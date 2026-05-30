@@ -3,13 +3,18 @@
 #![allow(clippy::type_complexity)] // Common in Bevy
 #![allow(clippy::module_name_repetitions)]
 
+mod coordinates;
+mod blocks;
+
 use bevy::prelude::*;
 use bevy::input::mouse::MouseMotion;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
+use blocks::BlockRegistry;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
+        .init_resource::<BlockRegistry>()
         .add_systems(Startup, setup)
         .add_systems(Update, (player_look, player_move, cursor_grab_system))
         .run();

@@ -1,0 +1,32 @@
+(
+    blocks: [
+        (
+            id: "air",
+            name: "Воздух",
+            is_solid: false,
+            is_transparent: true,
+            color: (0.0, 0.0, 0.0, 0.0),
+        ),
+        (
+            id: "dirt",
+            name: "Земля",
+            is_solid: true,
+            is_transparent: false,
+            color: (0.4, 0.2, 0.1, 1.0),
+        ),
+        (
+            id: "grass",
+            name: "Трава",
+            is_solid: true,
+            is_transparent: false,
+            color: (0.2, 0.8, 0.2, 1.0),
+        ),
+        (
+            id: "stone",
+            name: "Камень",
+            is_solid: true,
+            is_transparent: false,
+            color: (0.5, 0.5, 0.5, 1.0),
+        )
+    ]
+)
