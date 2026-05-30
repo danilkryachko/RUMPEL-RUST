@@ -5,6 +5,9 @@
 
 mod coordinates;
 mod blocks;
+mod chunk;
+mod world_gen;
+mod mesher;
 
 use bevy::prelude::*;
 use bevy::input::mouse::MouseMotion;
@@ -33,6 +36,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    registry: Res<BlockRegistry>,
 ) {
     // Light
     commands.spawn(PointLightBundle {
@@ -40,7 +44,7 @@ fn setup(
             shadows_enabled: true,
             ..default()
         },
-        transform: Transform::from_xyz(4.0, 8.0, 4.0),
+        transform: Transform::from_xyz(8.0, 60.0, 8.0),
         ..default()
     });
 
@@ -48,7 +52,7 @@ fn setup(
     commands
         .spawn((
             Player,
-            TransformBundle::from(Transform::from_xyz(0.0, 2.0, 5.0)),
+            TransformBundle::from(Transform::from_xyz(8.0, 50.0, 24.0)), // Спавним повыше из-за гор
             VisibilityBundle::default(),
         ))
         .with_children(|parent| {
@@ -61,20 +65,20 @@ fn setup(
             ));
         });
 
-    // Test "Chunk" (16x16 plane of blocks)
-    let block_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    let block_material = materials.add(Color::srgb(0.2, 0.8, 0.2)); // Grass-like green
-
-    for x in -8..8 {
-        for z in -8..8 {
-            commands.spawn(PbrBundle {
-                mesh: block_mesh.clone(),
-                material: block_material.clone(),
-                transform: Transform::from_xyz(x as f32, 0.0, z as f32),
-                ..default()
-            });
-        }
-    }
+    // Генерируем тестовый чанк 0,0
+    let chunk = world_gen::generate_chunk(coordinates::ChunkPos::new(0, 0), &registry);
+    let mesh = mesher::mesh_chunk(&chunk, &registry);
+    
+    commands.spawn(PbrBundle {
+        mesh: meshes.add(mesh),
+        material: materials.add(StandardMaterial {
+            // Разрешаем использование цветов из вершин (Vertex Colors)
+            base_color: Color::WHITE,
+            ..default()
+        }),
+        transform: Transform::from_xyz(0.0, 0.0, 0.0),
+        ..default()
+    });
 }
 
 fn player_look(
