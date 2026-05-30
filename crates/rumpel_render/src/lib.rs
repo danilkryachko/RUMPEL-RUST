@@ -271,7 +271,7 @@ pub fn mesh_terrain_chunk_with_detail(
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+        RenderAssetUsages::RENDER_WORLD,
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
@@ -488,7 +488,7 @@ pub fn mesh_terrain_macro_chunk_with_detail(
 
     let mut combined_mesh = Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
+        RenderAssetUsages::RENDER_WORLD,
     );
     combined_mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, combined_positions);
     combined_mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, combined_normals);
