@@ -77,6 +77,7 @@ fn setup_camera_and_light(mut commands: Commands) {
         .with_children(|parent| {
             parent.spawn((
                 Camera3d::default(),
+                Camera::default(),
                 Msaa::Off,
                 Transform::from_xyz(0.0, 0.5, 0.0),
                 PlayerCamera,
