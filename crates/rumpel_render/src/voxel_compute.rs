@@ -4,8 +4,8 @@ use bevy::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_graph::{self, RenderGraph, RenderLabel},
         render_resource::*,
-        renderer::{RenderContext, RenderDevice},
-        RenderApp,
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+        RenderApp, Render,
     },
 };
 use std::sync::{mpsc, Mutex};
@@ -17,31 +17,68 @@ pub struct VoxelComputePlugin;
 
 impl Plugin for VoxelComputePlugin {
     fn build(&self, app: &mut App) {
-        // We will initialize the compute pipeline and render graph here
-    }
-
-    fn finish(&self, app: &mut App) {
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
-            return;
-        };
-        render_app.init_resource::<VoxelComputePipeline>();
-
+        app.init_resource::<SingleChunkExtract>();
+        app.add_plugins(ExtractResourcePlugin::<SingleChunkExtract>::default());
+        
         let (sender, receiver) = mpsc::channel();
-        render_app.insert_resource(AsyncMeshChannel { 
-            sender, 
+        app.insert_resource(AsyncMeshChannel { 
+            sender: sender.clone(), 
             receiver: Mutex::new(receiver) 
         });
 
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        
+        render_app.insert_resource(AsyncMeshChannel { 
+            sender, 
+            receiver: Mutex::new(mpsc::channel().1) // Dummy receiver for render world
+        });
+        
+        render_app.init_resource::<VoxelComputePipeline>();
+        render_app.add_systems(Render, prepare_buffers);
+
         let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
         render_graph.add_node(VoxelComputeLabel, VoxelComputeNode::default());
-        // We will order this node later depending on our draw systems
+        // TODO: add graph edges to ensure compute runs before main pass
     }
+}
+
+#[derive(Resource, Clone, ExtractResource)]
+pub struct SingleChunkExtract {
+    pub blocks: Box<[u32; 32768]>, // WGSL expects array<u32>
+    pub has_changes: bool,
+}
+
+impl Default for SingleChunkExtract {
+    fn default() -> Self {
+        Self {
+            blocks: Box::new([0; 32768]),
+            has_changes: false,
+        }
+    }
+}
+
+#[derive(Resource)]
+pub struct AsyncMeshChannel {
+    pub sender: mpsc::Sender<Vec<u8>>,
+    pub receiver: Mutex<mpsc::Receiver<Vec<u8>>>,
 }
 
 #[derive(Resource)]
 struct VoxelComputePipeline {
     pipeline: CachedComputePipelineId,
     bind_group_layout: BindGroupLayout,
+}
+
+#[derive(Resource)]
+struct VoxelComputeBuffers {
+    chunk_buffer: Buffer,
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
+    vertex_staging_buffer: Buffer,
+    index_staging_buffer: Buffer,
+    bind_group: BindGroup,
 }
 
 impl FromWorld for VoxelComputePipeline {
@@ -51,7 +88,6 @@ impl FromWorld for VoxelComputePipeline {
         let bind_group_layout = render_device.create_bind_group_layout(
             "voxel_compute_bind_group_layout",
             &[
-                // Binding 0: Chunk Data (Read)
                 BindGroupLayoutEntry {
                     binding: 0,
                     visibility: ShaderStages::COMPUTE,
@@ -62,7 +98,6 @@ impl FromWorld for VoxelComputePipeline {
                     },
                     count: None,
                 },
-                // Binding 1: Vertices (Read/Write)
                 BindGroupLayoutEntry {
                     binding: 1,
                     visibility: ShaderStages::COMPUTE,
@@ -73,7 +108,6 @@ impl FromWorld for VoxelComputePipeline {
                     },
                     count: None,
                 },
-                // Binding 2: Indices (Read/Write)
                 BindGroupLayoutEntry {
                     binding: 2,
                     visibility: ShaderStages::COMPUTE,
@@ -103,6 +137,95 @@ impl FromWorld for VoxelComputePipeline {
             pipeline,
             bind_group_layout,
         }
+    }
+}
+
+fn prepare_buffers(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    mut extracted_chunk: ResMut<SingleChunkExtract>,
+    pipeline: Res<VoxelComputePipeline>,
+    mut buffers: Local<Option<VoxelComputeBuffers>>,
+) {
+    if buffers.is_none() {
+        let chunk_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("chunk_data_buffer"),
+            size: (32768 * 4) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let vertex_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("vertex_output_buffer"),
+            size: 1024 * 1024 * 16,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let index_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("index_output_buffer"),
+            size: 1024 * 1024 * 4,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let vertex_staging_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("vertex_staging_buffer"),
+            size: 1024 * 1024 * 16,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let index_staging_buffer = render_device.create_buffer(&BufferDescriptor {
+            label: Some("index_staging_buffer"),
+            size: 1024 * 1024 * 4,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = render_device.create_bind_group(
+            Some("voxel_compute_bind_group"),
+            &pipeline.bind_group_layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: chunk_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: index_buffer.as_entire_binding(),
+                },
+            ],
+        );
+
+        *buffers = Some(VoxelComputeBuffers {
+            chunk_buffer,
+            vertex_buffer,
+            index_buffer,
+            vertex_staging_buffer,
+            index_staging_buffer,
+            bind_group,
+        });
+    }
+
+    if let Some(bufs) = &mut *buffers {
+        if extracted_chunk.has_changes {
+            render_queue.write_buffer(&bufs.chunk_buffer, 0, bytemuck::cast_slice(&*extracted_chunk.blocks));
+            extracted_chunk.has_changes = false;
+        }
+        commands.insert_resource(VoxelComputeBuffers {
+            chunk_buffer: bufs.chunk_buffer.clone(),
+            vertex_buffer: bufs.vertex_buffer.clone(),
+            index_buffer: bufs.index_buffer.clone(),
+            vertex_staging_buffer: bufs.vertex_staging_buffer.clone(),
+            index_staging_buffer: bufs.index_staging_buffer.clone(),
+            bind_group: bufs.bind_group.clone(),
+        });
     }
 }
 
@@ -152,67 +275,13 @@ impl render_graph::Node for VoxelComputeNode {
 
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline = world.resource::<VoxelComputePipeline>();
+        let Some(buffers) = world.get_resource::<VoxelComputeBuffers>() else {
+            return Ok(());
+        };
 
         let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline) else {
             return Ok(());
         };
-
-        // TODO: Actually extract chunks and write them to a buffer
-        let dummy_chunk_data = vec![0u32; 32768];
-        let chunk_buffer = render_context.render_device().create_buffer_with_data(
-            &BufferInitDescriptor {
-                label: Some("chunk_data_buffer"),
-                contents: bytemuck::cast_slice(&dummy_chunk_data),
-                usage: BufferUsages::STORAGE,
-            }
-        );
-
-        let vertex_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
-            label: Some("vertex_output_buffer"),
-            size: 1024 * 1024 * 16, // 16MB max vertices per chunk
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let index_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
-            label: Some("index_output_buffer"),
-            size: 1024 * 1024 * 4, // 4MB max indices
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let vertex_staging_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
-            label: Some("vertex_staging_buffer"),
-            size: 1024 * 1024 * 16,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let index_staging_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
-            label: Some("index_staging_buffer"),
-            size: 1024 * 1024 * 4,
-            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group = render_context.render_device().create_bind_group(
-            Some("voxel_compute_bind_group"),
-            &pipeline.bind_group_layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: chunk_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: vertex_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: index_buffer.as_entire_binding(),
-                },
-            ],
-        );
 
         {
             let mut pass = render_context
@@ -223,47 +292,34 @@ impl render_graph::Node for VoxelComputeNode {
                 });
 
             pass.set_pipeline(compute_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, &buffers.bind_group, &[]);
             pass.dispatch_workgroups(8, 8, 8); // 32/4 = 8
-        } // Drop the pass to release the encoder borrow
+        }
 
-        // Copy from fast GPU Storage to slow CPU-mappable Staging Buffers
         render_context.command_encoder().copy_buffer_to_buffer(
-            &vertex_buffer, 0,
-            &vertex_staging_buffer, 0,
+            &buffers.vertex_buffer, 0,
+            &buffers.vertex_staging_buffer, 0,
             1024 * 1024 * 16
         );
 
         render_context.command_encoder().copy_buffer_to_buffer(
-            &index_buffer, 0,
-            &index_staging_buffer, 0,
+            &buffers.index_buffer, 0,
+            &buffers.index_staging_buffer, 0,
             1024 * 1024 * 4
         );
 
-        // Map buffer async and read vertices back
-        let vertex_slice = vertex_staging_buffer.slice(..);
+        // Tell WGPU to map the buffer to CPU memory
+        let vertex_slice = buffers.vertex_staging_buffer.slice(..);
+        let channel = world.resource::<AsyncMeshChannel>();
+        let sender = channel.sender.clone();
         
-        let (map_sender, map_receiver) = mpsc::channel();
         vertex_slice.map_async(MapMode::Read, move |result| {
-            let _ = map_sender.send(result);
+            if result.is_ok() {
+                // In a real impl we grab the bytes here
+                let _ = sender.send(vec![1, 2, 3]); 
+            }
         });
 
-        // In a real implementation we would not wait synchronously here,
-        // but store the receiver in a resource and check it next frame.
-        // For demonstration of the pipeline architecture, we prepare the hook:
-        
-        // if let Ok(Ok(())) = map_receiver.try_recv() {
-        //     let data = vertex_slice.get_mapped_range();
-        //     // Copy data out and send to Main World via AsyncMeshChannel
-        //     // vertex_staging_buffer.unmap();
-        // }
-        
         Ok(())
     }
-}
-
-#[derive(Resource)]
-pub struct AsyncMeshChannel {
-    pub sender: mpsc::Sender<Vec<u8>>,
-    pub receiver: Mutex<mpsc::Receiver<Vec<u8>>>,
 }
