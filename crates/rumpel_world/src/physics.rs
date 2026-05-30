@@ -76,3 +76,22 @@ pub fn raycast_voxels(
 
     None
 }
+
+pub struct Aabb {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+pub fn collide_aabb_with_voxels(
+    player_aabb: &Aabb,
+    velocity: Vec3,
+    chunk_manager: &ChunkManager,
+) -> Vec3 {
+    // Basic Swept AABB collision against a grid of voxels
+    // This function returns the allowed velocity after collision.
+    // In a real engine, we expand the AABB by the velocity and query all intersecting voxels.
+    
+    // For now, return the velocity unmodified (fly mode)
+    // TODO: Query all blocks in `chunk_manager` intersecting (player_aabb.min + velocity) and (player_aabb.max + velocity)
+    velocity
+}
