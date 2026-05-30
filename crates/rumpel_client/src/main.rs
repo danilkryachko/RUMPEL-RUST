@@ -50,6 +50,23 @@ struct StartupChunkWarmup {
 struct LoadingChunksText;
 
 fn setup_camera_and_light(mut commands: Commands) {
+    // Add sun light for PBR rendering
+    commands.spawn((
+        DirectionalLight {
+            shadows_enabled: true,
+            illuminance: 12000.0, // Sunlight in lux
+            ..default()
+        },
+        Transform::from_xyz(100.0, 250.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+
+    // Soft global ambient light (spawned as a component in Bevy 0.18)
+    commands.spawn(AmbientLight {
+        color: Color::WHITE,
+        brightness: 600.0, // Ambient brightness in lux
+        affects_lightmapped_meshes: true,
+    });
+
     // Camera/Player
     commands
         .spawn((
