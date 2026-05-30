@@ -26,6 +26,7 @@ impl Plugin for VoxelComputePlugin {
             receiver: Mutex::new(receiver) 
         });
         
+        app.add_systems(Startup, setup_test_chunk);
         app.add_systems(Update, receive_mesh_data);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -67,10 +68,40 @@ pub struct AsyncMeshChannel {
     pub receiver: Mutex<mpsc::Receiver<Vec<u8>>>,
 }
 
-fn receive_mesh_data(channel: Res<AsyncMeshChannel>) {
+fn setup_test_chunk(mut chunk: ResMut<SingleChunkExtract>) {
+    // Generate a simple test shape: A 10x10x10 cube of blocks at the center
+    for x in 10..20 {
+        for y in 0..10 {
+            for z in 10..20 {
+                let idx = x + y * 32 + z * 32 * 32;
+                chunk.blocks[idx] = 1; // Solid block
+            }
+        }
+    }
+    chunk.has_changes = true;
+}
+
+#[derive(Component)]
+struct VoxelComputeMesh;
+
+fn receive_mesh_data(
+    mut commands: Commands,
+    channel: Res<AsyncMeshChannel>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    existing_meshes: Query<Entity, With<VoxelComputeMesh>>,
+) {
     if let Ok(receiver) = channel.receiver.lock() {
         while let Ok(data) = receiver.try_recv() {
-            info!("MAIN WORLD: Received GPU generated mesh data! Size: {} bytes. Voxel Engine Pipeline is ALIVE!", data.len());
+            if data.is_empty() || data.len() < 8 { continue; }
+            
+            // The first 4 bytes is the atomic counter for vertices, the next 4 for indices
+            // But wait, our shader atomic counters are separated from data arrays.
+            // Let's assume the GPU sends back just the raw vertices and indices.
+            // For now, to truly finish it, we need to extract vertices.
+            info!("MAIN WORLD: Parsing {} bytes of mesh data...", data.len());
+            
+            // (Mocking parsing until we correctly align the bytes)
         }
     }
 }
