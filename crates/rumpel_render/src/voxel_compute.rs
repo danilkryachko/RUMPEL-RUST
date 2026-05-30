@@ -25,6 +25,8 @@ impl Plugin for VoxelComputePlugin {
             sender: sender.clone(), 
             receiver: Mutex::new(receiver) 
         });
+        
+        app.add_systems(Update, receive_mesh_data);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -63,6 +65,14 @@ impl Default for SingleChunkExtract {
 pub struct AsyncMeshChannel {
     pub sender: mpsc::Sender<Vec<u8>>,
     pub receiver: Mutex<mpsc::Receiver<Vec<u8>>>,
+}
+
+fn receive_mesh_data(channel: Res<AsyncMeshChannel>) {
+    if let Ok(receiver) = channel.receiver.lock() {
+        while let Ok(data) = receiver.try_recv() {
+            info!("MAIN WORLD: Received GPU generated mesh data! Size: {} bytes. Voxel Engine Pipeline is ALIVE!", data.len());
+        }
+    }
 }
 
 #[derive(Resource)]
