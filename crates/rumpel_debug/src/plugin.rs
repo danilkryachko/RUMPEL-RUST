@@ -1,9 +1,13 @@
-use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, prelude::*};
+#[cfg(debug_assertions)]
+use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
+use bevy::prelude::*;
+
 #[cfg(feature = "inspector")]
 use bevy_egui::EguiPlugin;
 #[cfg(feature = "inspector")]
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 
+#[cfg(debug_assertions)]
 use crate::hud::{spawn_fps_hud, update_debug_hud};
 
 pub struct RumpelDebugPlugin;
@@ -18,6 +22,10 @@ impl Plugin for RumpelDebugPlugin {
 
             #[cfg(feature = "inspector")]
             app.add_plugins((EguiPlugin::default(), WorldInspectorPlugin::new()));
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = app;
         }
     }
 }
