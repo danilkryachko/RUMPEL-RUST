@@ -4892,6 +4892,7 @@ dependencies = [
  "bevy",
  "bevy-inspector-egui",
  "bevy_egui",
+ "rumpel_player",
  "rumpel_prelude",
 ]
 

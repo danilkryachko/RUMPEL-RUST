@@ -16,6 +16,7 @@ fn main() {
         .insert_resource(block_registry)
         .insert_resource(voxel_world_config.clone())
         .insert_resource(WinitSettings::continuous())
+        .insert_resource(ClearColor(Color::srgb(0.529, 0.808, 0.922)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 present_mode: PresentMode::AutoNoVsync,
@@ -60,8 +61,8 @@ fn setup_camera_and_light(mut commands: Commands) {
         Transform::from_xyz(100.0, 250.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
-    // Soft global ambient light (spawned as a component in Bevy 0.18)
-    commands.spawn(AmbientLight {
+    // Configure global ambient light in Bevy 0.18
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: 600.0, // Ambient brightness in lux
         affects_lightmapped_meshes: true,
@@ -71,24 +72,42 @@ fn setup_camera_and_light(mut commands: Commands) {
     commands
         .spawn((
             Player,
-            Transform::from_xyz(8.0, 50.0, 24.0),
+            Transform::from_xyz(8.0, 80.0, 24.0),
+            GlobalTransform::default(),
             Visibility::default(),
+            InheritedVisibility::default(),
+            ViewVisibility::default(),
         ))
         .with_children(|parent| {
             parent.spawn((
                 Camera3d::default(),
                 Msaa::Off,
-                Transform::from_xyz(0.0, 0.5, 0.0),
+                Transform::from_xyz(0.0, 0.5, 0.0).with_rotation(Quat::from_rotation_x(-0.3)),
+                GlobalTransform::default(),
+                Visibility::default(),
+                InheritedVisibility::default(),
+                ViewVisibility::default(),
                 PlayerCamera,
                 VoxelWorldCamera::<RumpelVoxelWorld>::default(),
+                AmbientLight {
+                    color: Color::WHITE,
+                    brightness: 600.0,
+                    affects_lightmapped_meshes: true,
+                },
             ));
         });
+
 }
 
-fn spawn_loading_overlay(mut commands: Commands, mut warmup: ResMut<StartupChunkWarmup>) {
+fn spawn_loading_overlay(
+    mut commands: Commands,
+    mut warmup: ResMut<StartupChunkWarmup>,
+    camera_query: Query<Entity, With<PlayerCamera>>,
+) {
     warmup.elapsed_seconds = 0.0;
+    let ui_camera = camera_query.iter().next();
 
-    commands.spawn((
+    let mut entity = commands.spawn((
         Text::new(format!("Loading chunks 0/{STARTUP_RENDERED_CHUNK_TARGET}")),
         TextFont::from_font_size(24.0),
         TextColor(Color::srgb(0.9, 0.95, 0.9)),
@@ -103,23 +122,40 @@ fn spawn_loading_overlay(mut commands: Commands, mut warmup: ResMut<StartupChunk
         DespawnOnExit(GameState::Loading),
         LoadingChunksText,
     ));
+
+    if let Some(cam) = ui_camera {
+        entity.insert(UiTargetCamera(cam));
+        info!("MAIN: Attached UiTargetCamera({:?}) to loading overlay", cam);
+    } else {
+        info!("MAIN: Spawning loading overlay without UiTargetCamera (camera not found)");
+    }
 }
 
 fn warmup_startup_chunks(
+    mut commands: Commands,
     time: Res<Time>,
     mut warmup: ResMut<StartupChunkWarmup>,
     rendered_chunks: Query<(), With<VoxelChunk<RumpelVoxelWorld>>>,
-    mut loading_text: Query<&mut Text, With<LoadingChunksText>>,
+    mut loading_text: Query<(Entity, &mut Text), With<LoadingChunksText>>,
+    camera_query: Query<Entity, With<PlayerCamera>>,
+    target_camera_query: Query<(), With<UiTargetCamera>>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     warmup.elapsed_seconds += time.delta_secs();
     let rendered_chunk_count = rendered_chunks.iter().count();
 
-    for mut text in &mut loading_text {
+    for (entity, mut text) in &mut loading_text {
         text.0 = format!(
             "Loading chunks {}/{STARTUP_RENDERED_CHUNK_TARGET}",
             rendered_chunk_count.min(STARTUP_RENDERED_CHUNK_TARGET)
         );
+
+        if target_camera_query.get(entity).is_err() {
+            if let Some(cam) = camera_query.iter().next() {
+                commands.entity(entity).insert(UiTargetCamera(cam));
+                info!("MAIN: Attached UiTargetCamera({:?}) to loading overlay during warmup", cam);
+            }
+        }
     }
 
     if rendered_chunk_count >= STARTUP_RENDERED_CHUNK_TARGET

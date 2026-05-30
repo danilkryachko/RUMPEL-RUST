@@ -21,7 +21,7 @@ test:
 verify: fmt-check check clippy test
 
 dev:
-    cargo run -p rumpel_client --features dev_dynamic_linking
+    cargo run -p rumpel_client
 
 release:
     cargo run -p rumpel_client --release

@@ -24,17 +24,18 @@ impl Plugin for RumpelPlayerPlugin {
 
 pub fn player_look(
     mut mouse_motion_events: MessageReader<MouseMotion>,
-    mut query: Query<&mut Transform, With<PlayerCamera>>,
     cursor_query: Query<&CursorOptions, With<PrimaryWindow>>,
+    mut query: Query<&mut Transform, With<PlayerCamera>>,
 ) {
     let Ok(cursor_options) = cursor_query.single() else {
         return;
     };
-    if cursor_options.grab_mode == CursorGrabMode::None {
+
+    if cursor_options.grab_mode != CursorGrabMode::Locked {
         return;
     }
 
-    let mut delta: Vec2 = Vec2::ZERO;
+    let mut delta = Vec2::ZERO;
     for event in mouse_motion_events.read() {
         delta += event.delta;
     }
@@ -53,6 +54,7 @@ pub fn player_look(
         pitch = pitch.clamp(-1.54, 1.54);
 
         transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+        info!("player_look: Camera rotated (yaw: {:.3}, pitch: {:.3})", yaw, pitch);
     }
 }
 
@@ -63,9 +65,11 @@ pub fn player_move(
     camera_query: Query<&Transform, (With<PlayerCamera>, Without<Player>)>,
 ) {
     let Ok(mut transform) = query.single_mut() else {
+        info!("player_move: FAILED to find single Player entity!");
         return;
     };
     let Ok(camera_transform) = camera_query.single() else {
+        info!("player_move: FAILED to find single PlayerCamera entity!");
         return;
     };
 
@@ -73,8 +77,8 @@ pub fn player_move(
     let forward = camera_transform.forward();
     let right = camera_transform.right();
 
-    // Плоское движение (без полета вверх/вниз от взгляда)
-    let forward = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    // Полное 3D-движение (полет в сторону направления взгляда камеры)
+    let forward = *forward; // Convert Dir3 to Vec3
     let right = *right; // Convert Dir3 to Vec3
 
     if keyboard_input.pressed(KeyCode::KeyW) {
@@ -98,7 +102,9 @@ pub fn player_move(
     }
 
     if direction != Vec3::ZERO {
+        let prev_pos = transform.translation;
         transform.translation += direction.normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
+        info!("player_move: W/A/S/D/Space/Shift pressed! Moved from {:?} to {:?}", prev_pos, transform.translation);
     }
 }
 
@@ -114,10 +120,12 @@ pub fn cursor_grab_system(
     if mouse.just_pressed(MouseButton::Left) {
         cursor_options.grab_mode = CursorGrabMode::Locked;
         cursor_options.visible = false;
+        info!("cursor_grab_system: Mouse Left clicked! Grabbing cursor. Visible=false, Mode=Locked.");
     }
 
     if key.just_pressed(KeyCode::Escape) {
         cursor_options.grab_mode = CursorGrabMode::None;
         cursor_options.visible = true;
+        info!("cursor_grab_system: ESC pressed! Releasing cursor. Visible=true, Mode=None.");
     }
 }

@@ -4,4 +4,4 @@
 set -euo pipefail
 
 echo "Компиляция и запуск dev-сборки игры (при первом запуске это может занять несколько минут)..."
-cargo run -p rumpel_client --features dev_dynamic_linking
+cargo run -p rumpel_client
