@@ -163,14 +163,28 @@ impl render_graph::Node for VoxelComputeNode {
         let vertex_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
             label: Some("vertex_output_buffer"),
             size: 1024 * 1024 * 16, // 16MB max vertices per chunk
-            usage: BufferUsages::STORAGE | BufferUsages::MAP_READ,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let index_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
             label: Some("index_output_buffer"),
             size: 1024 * 1024 * 4, // 4MB max indices
-            usage: BufferUsages::STORAGE | BufferUsages::MAP_READ,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let vertex_staging_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
+            label: Some("vertex_staging_buffer"),
+            size: 1024 * 1024 * 16,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let index_staging_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
+            label: Some("index_staging_buffer"),
+            size: 1024 * 1024 * 4,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -193,18 +207,34 @@ impl render_graph::Node for VoxelComputeNode {
             ],
         );
 
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("voxel_compute_pass"),
-                timestamp_writes: None,
-            });
+        {
+            let mut pass = render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("voxel_compute_pass"),
+                    timestamp_writes: None,
+                });
 
-        pass.set_pipeline(compute_pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(8, 8, 8); // 32/4 = 8
+            pass.set_pipeline(compute_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(8, 8, 8); // 32/4 = 8
+        } // Drop the pass to release the encoder borrow
 
-        // TODO: Map buffer async and read vertices back
+        // Copy from fast GPU Storage to slow CPU-mappable Staging Buffers
+        render_context.command_encoder().copy_buffer_to_buffer(
+            &vertex_buffer, 0,
+            &vertex_staging_buffer, 0,
+            1024 * 1024 * 16
+        );
+
+        render_context.command_encoder().copy_buffer_to_buffer(
+            &index_buffer, 0,
+            &index_staging_buffer, 0,
+            1024 * 1024 * 4
+        );
+
+        // TODO: Async map read logic here...
+        // vertex_staging_buffer.slice(..).map_async(MapMode::Read, |result| { ... });
         
         Ok(())
     }
