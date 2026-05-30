@@ -3,9 +3,14 @@ name = "rumpel_client"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+dev_dynamic_linking = ["bevy/dynamic_linking"]
+
 [dependencies]
 bevy = { workspace = true }
 rumpel_prelude = { workspace = true }
 rumpel_render = { workspace = true }
 rumpel_player = { workspace = true }
 rumpel_modding = { workspace = true }
+rumpel_debug = { version = "0.1.0", path = "../rumpel_debug" }

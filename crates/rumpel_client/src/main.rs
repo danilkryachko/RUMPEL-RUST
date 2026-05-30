@@ -6,14 +6,24 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(RumpelPlayerPlugin)
+        .add_plugins(rumpel_debug::RumpelDebugPlugin)
         .init_state::<GameState>()
+        .enable_state_scoped_entities::<GameState>()
         .init_resource::<BlockRegistry>()
         .add_systems(Startup, setup_camera_and_light)
         .add_systems(
             OnEnter(GameState::Loading),
-            (rumpel_modding::load_lua_mods, generate_world_and_start).chain(),
+            (rumpel_modding::load_lua_mods, trigger_world_generation).chain(),
         )
+        .observe(generate_world_and_start)
         .run();
+}
+
+#[derive(Event)]
+pub struct SpawnTestWorld;
+
+fn trigger_world_generation(mut commands: Commands) {
+    commands.trigger(SpawnTestWorld);
 }
 
 fn setup_camera_and_light(mut commands: Commands) {
@@ -46,6 +56,7 @@ fn setup_camera_and_light(mut commands: Commands) {
 }
 
 fn generate_world_and_start(
+    _trigger: Trigger<SpawnTestWorld>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -56,15 +67,18 @@ fn generate_world_and_start(
     let chunk = generate_chunk(ChunkPos::new(0, 0), &registry);
     let mesh = rumpel_render::mesh_chunk(&chunk, &registry);
 
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(mesh),
-        material: materials.add(StandardMaterial {
-            base_color: Color::WHITE,
+    commands.spawn((
+        PbrBundle {
+            mesh: meshes.add(mesh),
+            material: materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                ..default()
+            }),
+            transform: Transform::from_xyz(0.0, 0.0, 0.0),
             ..default()
-        }),
-        transform: Transform::from_xyz(0.0, 0.0, 0.0),
-        ..default()
-    });
+        },
+        StateScoped(GameState::InGame),
+    ));
 
     // World generated, switch to InGame
     next_state.set(GameState::InGame);

@@ -1,1 +1,12 @@
-/target
+/.DS_Store
+/target/
+/data/state_store.db/
+
+# Local agent/editor runtime configuration. Keep shareable examples in docs/dev/mcp/.
+/.codex/config.toml
+/.cursor/mcp.json
+/.windsurf/mcp.json
+
+# Bevy/Rust local artifacts.
+*.pdb
+*.dSYM/

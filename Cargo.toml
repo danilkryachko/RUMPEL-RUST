@@ -5,7 +5,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-bevy = { version = "0.14", features = ["dynamic_linking"] }
+bevy = { version = "0.14" }
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.8"
 noise = "0.9"
@@ -17,6 +17,7 @@ rumpel_world = { path = "crates/rumpel_world" }
 rumpel_render = { path = "crates/rumpel_render" }
 rumpel_player = { path = "crates/rumpel_player" }
 rumpel_modding = { path = "crates/rumpel_modding" }
+rumpel_tests = { path = "crates/rumpel_tests" }
 rumpel_prelude = { path = "crates/rumpel_prelude" }
 
 [profile.dev]
@@ -24,4 +25,4 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
-rumpel_tests = { path = "crates/rumpel_tests" }
+rumpel_debug = { path = "crates/rumpel_debug" }
