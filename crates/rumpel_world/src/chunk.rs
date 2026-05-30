@@ -1,155 +1,67 @@
-use rumpel_blocks::BlockId;
-use serde::{Deserialize, Serialize};
+use bevy::{platform::collections::HashMap, prelude::*};
+use rumpel_blocks::{BlockId, AIR_BLOCK_ID};
 
-pub const CHUNK_SIZE: usize = 16;
-pub const CHUNK_HEIGHT: usize = 256;
+pub const CHUNK_SIZE: usize = 32;
+pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RleEntry {
-    pub count: u32,
-    pub block_id: BlockId,
+/// A flat array of block IDs optimized for GPU StorageBuffers
+#[derive(Clone, Component)]
+pub struct ChunkData {
+    pub blocks: Box<[BlockId; CHUNK_VOLUME]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RleChunk {
-    pub runs: Vec<RleEntry>,
-}
-
-pub struct Chunk {
-    // Array format: [x][y][z]
-    // Box is used to avoid stack overflow since the chunk is large (16 * 256 * 16 * 2 bytes = 128 KB)
-    pub blocks: Box<[[[BlockId; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
-}
-
-impl Chunk {
-    pub fn new() -> Self {
-        Self {
-            blocks: Box::new([[[0; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]),
-        }
-    }
-
-    pub fn get_block(&self, x: usize, y: usize, z: usize) -> BlockId {
-        if x >= CHUNK_SIZE || y >= CHUNK_HEIGHT || z >= CHUNK_SIZE {
-            return 0; // Air outside bounds
-        }
-        self.blocks[x][y][z]
-    }
-
-    pub fn set_block(&mut self, x: usize, y: usize, z: usize, id: BlockId) {
-        if x < CHUNK_SIZE && y < CHUNK_HEIGHT && z < CHUNK_SIZE {
-            self.blocks[x][y][z] = id;
-        }
-    }
-
-    pub fn to_rle(&self) -> RleChunk {
-        let mut runs = Vec::new();
-        let mut current_id = self.blocks[0][0][0];
-        let mut current_count = 0u32;
-
-        for x in 0..CHUNK_SIZE {
-            for y in 0..CHUNK_HEIGHT {
-                for z in 0..CHUNK_SIZE {
-                    let id = self.blocks[x][y][z];
-                    if id == current_id {
-                        current_count += 1;
-                    } else {
-                        runs.push(RleEntry {
-                            count: current_count,
-                            block_id: current_id,
-                        });
-                        current_id = id;
-                        current_count = 1;
-                    }
-                }
-            }
-        }
-
-        if current_count > 0 {
-            runs.push(RleEntry {
-                count: current_count,
-                block_id: current_id,
-            });
-        }
-
-        RleChunk { runs }
-    }
-
-    pub fn from_rle(rle: &RleChunk) -> Self {
-        let mut chunk = Self::new();
-        let mut idx = 0usize;
-
-        for run in &rle.runs {
-            for _ in 0..run.count {
-                if idx >= CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE {
-                    break;
-                }
-                let x = idx / (CHUNK_HEIGHT * CHUNK_SIZE);
-                let rem = idx % (CHUNK_HEIGHT * CHUNK_SIZE);
-                let y = rem / CHUNK_SIZE;
-                let z = rem % CHUNK_SIZE;
-
-                chunk.blocks[x][y][z] = run.block_id;
-                idx += 1;
-            }
-        }
-
-        chunk
-    }
-}
-
-impl Default for Chunk {
+impl Default for ChunkData {
     fn default() -> Self {
-        Self::new()
+        Self {
+            blocks: Box::new([AIR_BLOCK_ID; CHUNK_VOLUME]),
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl ChunkData {
+    #[inline]
+    pub fn get_index(x: usize, y: usize, z: usize) -> usize {
+        x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
+    }
 
-    #[test]
-    fn test_chunk_rle_round_trip() {
-        let mut original = Chunk::new();
-
-        // Fill some blocks
-        for x in 0..CHUNK_SIZE {
-            for z in 0..CHUNK_SIZE {
-                original.set_block(x, 10, z, 1); // Dirt
-                original.set_block(x, 11, z, 2); // Grass
-            }
-        }
-
-        let rle = original.to_rle();
-        let decompressed = Chunk::from_rle(&rle);
-
-        // Verify matches exactly
-        for x in 0..CHUNK_SIZE {
-            for y in 0..CHUNK_HEIGHT {
-                for z in 0..CHUNK_SIZE {
-                    assert_eq!(decompressed.get_block(x, y, z), original.get_block(x, y, z));
-                }
-            }
+    #[inline]
+    pub fn get_block(&self, x: usize, y: usize, z: usize) -> BlockId {
+        if x < CHUNK_SIZE && y < CHUNK_SIZE && z < CHUNK_SIZE {
+            self.blocks[Self::get_index(x, y, z)]
+        } else {
+            AIR_BLOCK_ID
         }
     }
 
-    #[test]
-    fn test_rle_compression_ratio() {
-        let mut original = Chunk::new();
-
-        // A typical chunk with stone under grass
-        for x in 0..CHUNK_SIZE {
-            for z in 0..CHUNK_SIZE {
-                for y in 0..10 {
-                    original.set_block(x, y, z, 3); // Stone
-                }
-                original.set_block(x, 10, z, 2); // Grass
-            }
+    #[inline]
+    pub fn set_block(&mut self, x: usize, y: usize, z: usize, id: BlockId) {
+        if x < CHUNK_SIZE && y < CHUNK_SIZE && z < CHUNK_SIZE {
+            let index = Self::get_index(x, y, z);
+            self.blocks[index] = id;
         }
+    }
+}
 
-        let rle = original.to_rle();
+/// Tracks the loaded chunks and their entities
+#[derive(Resource, Default)]
+pub struct ChunkManager {
+    pub loaded_chunks: HashMap<IVec3, Entity>,
+}
 
-        // Raw chunk has 16*256*16 = 65,536 voxels (65,536 * 2 bytes = 131,072 bytes)
-        // Rle representation will have very few runs (around 32 runs)
-        assert!(rle.runs.len() < 50);
+impl ChunkManager {
+    pub fn world_to_chunk_pos(world_pos: Vec3) -> IVec3 {
+        IVec3::new(
+            (world_pos.x / CHUNK_SIZE as f32).floor() as i32,
+            (world_pos.y / CHUNK_SIZE as f32).floor() as i32,
+            (world_pos.z / CHUNK_SIZE as f32).floor() as i32,
+        )
+    }
+
+    pub fn chunk_to_world_pos(chunk_pos: IVec3) -> Vec3 {
+        Vec3::new(
+            (chunk_pos.x * CHUNK_SIZE as i32) as f32,
+            (chunk_pos.y * CHUNK_SIZE as i32) as f32,
+            (chunk_pos.z * CHUNK_SIZE as i32) as f32,
+        )
     }
 }

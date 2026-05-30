@@ -1,4 +1,4 @@
-use crate::chunk::{CHUNK_HEIGHT, CHUNK_SIZE, Chunk};
+use crate::chunk::{CHUNK_SIZE, ChunkData};
 use noise::{NoiseFn, Perlin};
 use rumpel_blocks::{BlockId, BlockRegistry};
 use rumpel_coords::ChunkPos;
@@ -62,8 +62,8 @@ pub fn terrain_block_at_height(
     }
 }
 
-pub fn generate_chunk(pos: ChunkPos, registry: &BlockRegistry) -> Chunk {
-    let mut chunk = Chunk::new();
+pub fn generate_chunk(pos: ChunkPos, registry: &BlockRegistry) -> ChunkData {
+    let mut chunk = ChunkData::default();
     let palette = TerrainBlockPalette::from_registry(registry);
     let perlin = Perlin::new(TERRAIN_SEED);
 
@@ -73,7 +73,7 @@ pub fn generate_chunk(pos: ChunkPos, registry: &BlockRegistry) -> Chunk {
             let global_z = pos.z * CHUNK_SIZE as i32 + z as i32;
             let height = terrain_height_with_noise(global_x, global_z, &perlin);
 
-            for y in 0..CHUNK_HEIGHT {
+            for y in 0..CHUNK_SIZE {
                 let block_id = terrain_block_at_height(y, height, palette);
                 if block_id != palette.air {
                     chunk.set_block(x, y, z, block_id);
