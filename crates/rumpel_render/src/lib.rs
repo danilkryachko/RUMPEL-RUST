@@ -2,8 +2,7 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
 
-use rumpel_world::chunk::{Chunk, CHUNK_SIZE, CHUNK_HEIGHT};
-use rumpel_blocks::BlockRegistry;
+use rumpel_prelude::*;
 
 // Вектора нормалей и позиций вершин для 6 граней куба
 const VOXEL_POSITIONS: [[f32; 3]; 8] = [

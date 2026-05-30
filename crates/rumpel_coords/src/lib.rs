@@ -1,8 +1,5 @@
 use bevy::prelude::*;
 
-pub const CHUNK_SIZE: i32 = 16;
-pub const CHUNK_HEIGHT: i32 = 256;
-
 /// Глобальные координаты чанка (X, Z) в бесконечном мире.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Component)]
 pub struct ChunkPos {
@@ -27,9 +24,6 @@ pub struct LocalBlockPos {
 
 impl LocalBlockPos {
     pub fn new(x: u8, y: u16, z: u8) -> Self {
-        debug_assert!(x < CHUNK_SIZE as u8);
-        debug_assert!(z < CHUNK_SIZE as u8);
-        debug_assert!(y < CHUNK_HEIGHT as u16);
         Self { x, y, z }
     }
 }
@@ -41,10 +35,10 @@ pub struct WorldPos {
 }
 
 impl WorldPos {
-    pub fn to_chunk_pos(&self) -> ChunkPos {
+    pub fn to_chunk_pos(&self, chunk_size: i32) -> ChunkPos {
         ChunkPos::new(
-            (self.position.x.floor() as i32).div_euclid(CHUNK_SIZE),
-            (self.position.z.floor() as i32).div_euclid(CHUNK_SIZE),
+            (self.position.x.floor() as i32).div_euclid(chunk_size),
+            (self.position.z.floor() as i32).div_euclid(chunk_size),
         )
     }
 

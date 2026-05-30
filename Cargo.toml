@@ -15,6 +15,7 @@ rumpel_blocks = { path = "crates/rumpel_blocks" }
 rumpel_world = { path = "crates/rumpel_world" }
 rumpel_render = { path = "crates/rumpel_render" }
 rumpel_player = { path = "crates/rumpel_player" }
+rumpel_prelude = { path = "crates/rumpel_prelude" }
 
 [profile.dev]
 opt-level = 1

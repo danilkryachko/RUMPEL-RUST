@@ -5,6 +5,4 @@ edition = "2024"
 
 [dependencies]
 bevy = { workspace = true }
-rumpel_coords = { workspace = true }
-rumpel_blocks = { workspace = true }
-rumpel_world = { workspace = true }
+rumpel_prelude = { workspace = true }

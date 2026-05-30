@@ -1,0 +1,9 @@
+[package]
+name = "rumpel_prelude"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rumpel_coords = { workspace = true }
+rumpel_blocks = { workspace = true }
+rumpel_world = { workspace = true }

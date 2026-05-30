@@ -1,8 +1,6 @@
 use bevy::prelude::*;
-use rumpel_blocks::BlockRegistry;
+use rumpel_prelude::*;
 use rumpel_player::{Player, PlayerCamera, RumpelPlayerPlugin};
-use rumpel_world::world_gen;
-use rumpel_coords::ChunkPos;
 use rumpel_render;
 
 fn main() {
@@ -48,7 +46,7 @@ fn setup(
         });
 
     // Generate test chunk 0,0
-    let chunk = world_gen::generate_chunk(ChunkPos::new(0, 0), &registry);
+    let chunk = generate_chunk(ChunkPos::new(0, 0), &registry);
     let mesh = rumpel_render::mesh_chunk(&chunk, &registry);
     
     commands.spawn(PbrBundle {

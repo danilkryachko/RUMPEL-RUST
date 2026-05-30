@@ -3367,11 +3367,9 @@ name = "rumpel_client"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "rumpel_blocks",
- "rumpel_coords",
  "rumpel_player",
+ "rumpel_prelude",
  "rumpel_render",
- "rumpel_world",
 ]
 
 [[package]]
@@ -3389,13 +3387,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rumpel_prelude"
+version = "0.1.0"
+dependencies = [
+ "rumpel_blocks",
+ "rumpel_coords",
+ "rumpel_world",
+]
+
+[[package]]
 name = "rumpel_render"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "rumpel_blocks",
- "rumpel_coords",
- "rumpel_world",
+ "rumpel_prelude",
 ]
 
 [[package]]
