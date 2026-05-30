@@ -4801,6 +4801,7 @@ name = "rumpel_render"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bytemuck",
  "noise",
  "rumpel_prelude",
 ]

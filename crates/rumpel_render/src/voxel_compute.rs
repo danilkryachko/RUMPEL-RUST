@@ -150,6 +150,49 @@ impl render_graph::Node for VoxelComputeNode {
             return Ok(());
         };
 
+        // TODO: Actually extract chunks and write them to a buffer
+        let dummy_chunk_data = vec![0u32; 32768];
+        let chunk_buffer = render_context.render_device().create_buffer_with_data(
+            &BufferInitDescriptor {
+                label: Some("chunk_data_buffer"),
+                contents: bytemuck::cast_slice(&dummy_chunk_data),
+                usage: BufferUsages::STORAGE,
+            }
+        );
+
+        let vertex_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
+            label: Some("vertex_output_buffer"),
+            size: 1024 * 1024 * 16, // 16MB max vertices per chunk
+            usage: BufferUsages::STORAGE | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let index_buffer = render_context.render_device().create_buffer(&BufferDescriptor {
+            label: Some("index_output_buffer"),
+            size: 1024 * 1024 * 4, // 4MB max indices
+            usage: BufferUsages::STORAGE | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = render_context.render_device().create_bind_group(
+            Some("voxel_compute_bind_group"),
+            &pipeline.bind_group_layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: chunk_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: vertex_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: index_buffer.as_entire_binding(),
+                },
+            ],
+        );
+
         let mut pass = render_context
             .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor {
@@ -158,9 +201,11 @@ impl render_graph::Node for VoxelComputeNode {
             });
 
         pass.set_pipeline(compute_pipeline);
-        // pass.set_bind_group(0, &bind_group, &[]);
-        // pass.dispatch_workgroups(1, 1, 1);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(8, 8, 8); // 32/4 = 8
 
+        // TODO: Map buffer async and read vertices back
+        
         Ok(())
     }
 }
