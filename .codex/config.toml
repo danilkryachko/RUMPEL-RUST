@@ -1,0 +1,32 @@
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+[mcp_servers.agentmemory]
+args = [
+    "-y",
+    "@agentmemory/mcp",
+]
+command = "npx"
+
+[mcp_servers.agentmemory.env]
+AGENTMEMORY_URL = "http://localhost:3111"
+
+[mcp_servers.agentmemory.tools.memory_recall]
+approval_mode = "approve"
+
+[mcp_servers.agentmemory.tools.memory_lesson_recall]
+approval_mode = "approve"
+
+[mcp_servers.agentmemory.tools.memory_slot_list]
+approval_mode = "approve"
+
+[mcp_servers.agentmemory.tools.memory_profile]
+approval_mode = "approve"
+
+[mcp_servers.agentmemory.tools.memory_save]
+approval_mode = "approve"
+
+[mcp_servers.agentmemory.tools.memory_lesson_save]
+approval_mode = "approve"
+
+[sandbox_workspace_write]
+network_access = true

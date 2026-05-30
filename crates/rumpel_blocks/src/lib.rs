@@ -35,7 +35,7 @@ impl Default for BlockRegistry {
             string_to_id: HashMap::new(),
             next_id: 1, // 0 is reserved for air if not explicitly defined first
         };
-        
+
         registry.load_from_file("assets/blocks/base.ron");
         registry
     }
@@ -46,16 +46,7 @@ impl BlockRegistry {
         if let Ok(content) = fs::read_to_string(path) {
             if let Ok(config) = ron::from_str::<BlocksConfig>(&content) {
                 for block in config.blocks {
-                    let id = if block.id == "air" {
-                        0
-                    } else {
-                        let current = self.next_id;
-                        self.next_id += 1;
-                        current
-                    };
-                    
-                    self.string_to_id.insert(block.id.clone(), id);
-                    self.id_to_data.insert(id, block);
+                    self.register_block(block);
                 }
                 println!("Loaded {} blocks from config.", self.id_to_data.len());
             } else {
@@ -72,5 +63,24 @@ impl BlockRegistry {
 
     pub fn get_id(&self, string_id: &str) -> Option<BlockId> {
         self.string_to_id.get(string_id).copied()
+    }
+
+    pub fn register_block(&mut self, block: BlockData) -> BlockId {
+        if let Some(existing_id) = self.string_to_id.get(&block.id).copied() {
+            self.id_to_data.insert(existing_id, block);
+            return existing_id;
+        }
+
+        let id = if block.id == "air" {
+            AIR_BLOCK_ID
+        } else {
+            let current = self.next_id;
+            self.next_id += 1;
+            current
+        };
+
+        self.string_to_id.insert(block.id.clone(), id);
+        self.id_to_data.insert(id, block);
+        id
     }
 }

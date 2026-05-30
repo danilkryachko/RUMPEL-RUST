@@ -1,6 +1,6 @@
 use bevy::prelude::*;
-use rumpel_prelude::*;
 use rumpel_player::{Player, PlayerCamera, RumpelPlayerPlugin};
+use rumpel_prelude::*;
 
 fn main() {
     App::new()
@@ -9,13 +9,14 @@ fn main() {
         .init_state::<GameState>()
         .init_resource::<BlockRegistry>()
         .add_systems(Startup, setup_camera_and_light)
-        .add_systems(OnEnter(GameState::Loading), generate_world_and_start)
+        .add_systems(
+            OnEnter(GameState::Loading),
+            (rumpel_modding::load_lua_mods, generate_world_and_start).chain(),
+        )
         .run();
 }
 
-fn setup_camera_and_light(
-    mut commands: Commands,
-) {
+fn setup_camera_and_light(mut commands: Commands) {
     // Light
     commands.spawn(PointLightBundle {
         point_light: PointLight {
@@ -54,7 +55,7 @@ fn generate_world_and_start(
     // Generate test chunk 0,0
     let chunk = generate_chunk(ChunkPos::new(0, 0), &registry);
     let mesh = rumpel_render::mesh_chunk(&chunk, &registry);
-    
+
     commands.spawn(PbrBundle {
         mesh: meshes.add(mesh),
         material: materials.add(StandardMaterial {

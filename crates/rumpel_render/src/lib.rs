@@ -6,8 +6,14 @@ use rumpel_prelude::*;
 
 // Вектора нормалей и позиций вершин для 6 граней куба
 const VOXEL_POSITIONS: [[f32; 3]; 8] = [
-    [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0], // Front
-    [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0], // Back
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0], // Front
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0], // Back
 ];
 
 const FACES: [[usize; 4]; 6] = [
@@ -40,7 +46,9 @@ pub fn mesh_chunk(chunk: &Chunk, registry: &BlockRegistry) -> Mesh {
         for y in 0..CHUNK_HEIGHT {
             for z in 0..CHUNK_SIZE {
                 let block_id = chunk.get_block(x, y, z);
-                if block_id == 0 { continue; } // Air
+                if block_id == 0 {
+                    continue;
+                } // Air
 
                 let block_data = registry.get_block(block_id).unwrap();
                 let color = [
@@ -62,28 +70,30 @@ pub fn mesh_chunk(chunk: &Chunk, registry: &BlockRegistry) -> Mesh {
 
                 for (face_idx, &(nx, ny, nz)) in neighbors.iter().enumerate() {
                     let mut draw_face = false;
-                    
-                    if nx < 0 || nx >= CHUNK_SIZE as i32 || 
-                       ny < 0 || ny >= CHUNK_HEIGHT as i32 || 
-                       nz < 0 || nz >= CHUNK_SIZE as i32 {
+
+                    if nx < 0
+                        || nx >= CHUNK_SIZE as i32
+                        || ny < 0
+                        || ny >= CHUNK_HEIGHT as i32
+                        || nz < 0
+                        || nz >= CHUNK_SIZE as i32
+                    {
                         // At chunk boundary, draw face (for now, until we have neighbor chunks loaded)
                         draw_face = true;
                     } else {
                         let neighbor_id = chunk.get_block(nx as usize, ny as usize, nz as usize);
                         if neighbor_id == 0 {
                             draw_face = true; // Neighbor is air
-                        } else {
-                            if let Some(n_data) = registry.get_block(neighbor_id) {
-                                if n_data.is_transparent && !block_data.is_transparent {
-                                    draw_face = true;
-                                }
-                            }
+                        } else if let Some(n_data) = registry.get_block(neighbor_id)
+                            && n_data.is_transparent
+                            && !block_data.is_transparent
+                        {
+                            draw_face = true;
                         }
                     }
 
                     if draw_face {
-                        for i in 0..4 {
-                            let v_idx = FACES[face_idx][i];
+                        for &v_idx in &FACES[face_idx] {
                             let vx = VOXEL_POSITIONS[v_idx][0] + x as f32;
                             let vy = VOXEL_POSITIONS[v_idx][1] + y as f32;
                             let vz = VOXEL_POSITIONS[v_idx][2] + z as f32;
@@ -107,7 +117,10 @@ pub fn mesh_chunk(chunk: &Chunk, registry: &BlockRegistry) -> Mesh {
         }
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);

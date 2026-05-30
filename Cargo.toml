@@ -9,12 +9,14 @@ bevy = { version = "0.14", features = ["dynamic_linking"] }
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.8"
 noise = "0.9"
+mlua = { version = "0.11.6", features = ["lua54", "vendored"] }
 
 rumpel_coords = { path = "crates/rumpel_coords" }
 rumpel_blocks = { path = "crates/rumpel_blocks" }
 rumpel_world = { path = "crates/rumpel_world" }
 rumpel_render = { path = "crates/rumpel_render" }
 rumpel_player = { path = "crates/rumpel_player" }
+rumpel_modding = { path = "crates/rumpel_modding" }
 rumpel_prelude = { path = "crates/rumpel_prelude" }
 
 [profile.dev]
@@ -22,3 +24,4 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+rumpel_tests = { path = "crates/rumpel_tests" }

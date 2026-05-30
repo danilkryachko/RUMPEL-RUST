@@ -8,3 +8,4 @@ bevy = { workspace = true }
 rumpel_prelude = { workspace = true }
 rumpel_render = { workspace = true }
 rumpel_player = { workspace = true }
+rumpel_modding = { workspace = true }
