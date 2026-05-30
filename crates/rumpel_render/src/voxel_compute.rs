@@ -24,6 +24,10 @@ impl Plugin for VoxelComputePlugin {
             return;
         };
         render_app.init_resource::<VoxelComputePipeline>();
+
+        let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
+        render_graph.add_node(VoxelComputeLabel, VoxelComputeNode::default());
+        // We will order this node later depending on our draw systems
     }
 }
 
@@ -92,5 +96,71 @@ impl FromWorld for VoxelComputePipeline {
             pipeline,
             bind_group_layout,
         }
+    }
+}
+
+pub struct VoxelComputeNode {
+    state: VoxelComputeState,
+}
+
+enum VoxelComputeState {
+    Loading,
+    Ready,
+}
+
+impl Default for VoxelComputeNode {
+    fn default() -> Self {
+        Self {
+            state: VoxelComputeState::Loading,
+        }
+    }
+}
+
+impl render_graph::Node for VoxelComputeNode {
+    fn update(&mut self, world: &mut World) {
+        let pipeline = world.resource::<VoxelComputePipeline>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+
+        match self.state {
+            VoxelComputeState::Loading => {
+                if let CachedPipelineState::Ok(_) =
+                    pipeline_cache.get_compute_pipeline_state(pipeline.pipeline)
+                {
+                    self.state = VoxelComputeState::Ready;
+                }
+            }
+            VoxelComputeState::Ready => {}
+        }
+    }
+
+    fn run(
+        &self,
+        _graph: &mut render_graph::RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), render_graph::NodeRunError> {
+        if matches!(self.state, VoxelComputeState::Loading) {
+            return Ok(());
+        }
+
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let pipeline = world.resource::<VoxelComputePipeline>();
+
+        let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline) else {
+            return Ok(());
+        };
+
+        let mut pass = render_context
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("voxel_compute_pass"),
+                timestamp_writes: None,
+            });
+
+        pass.set_pipeline(compute_pipeline);
+        // pass.set_bind_group(0, &bind_group, &[]);
+        // pass.dispatch_workgroups(1, 1, 1);
+
+        Ok(())
     }
 }
