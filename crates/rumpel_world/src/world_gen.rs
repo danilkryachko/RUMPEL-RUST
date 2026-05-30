@@ -1,6 +1,6 @@
 use crate::chunk::{Chunk, CHUNK_SIZE, CHUNK_HEIGHT};
-use crate::coordinates::ChunkPos;
-use crate::blocks::BlockRegistry;
+use rumpel_coords::ChunkPos;
+use rumpel_blocks::BlockRegistry;
 use noise::{NoiseFn, Perlin};
 
 pub fn generate_chunk(pos: ChunkPos, registry: &BlockRegistry) -> Chunk {

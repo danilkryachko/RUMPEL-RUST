@@ -12,10 +12,8 @@
 
 ## 2. Архитектура
 * **Движок:** Bevy Engine (версия 0.14+).
-* **Паттерн:** Строгий ECS (Entity-Component-System). 
-  * Данные лежат в `Component`.
-  * Логика лежит в `System`.
-  * Глобальное состояние лежит в `Resource`.
+* **Модульность (Cargo Workspaces):** Проект разбит на независимые крейты в папке `crates/` (`rumpel_coords`, `rumpel_blocks`, `rumpel_world`, `rumpel_render`, `rumpel_player`, `rumpel_client`). ЗАПРЕЩЕНО писать весь код в одном файле. Каждая новая крупная система (Инвентарь, Сеть, Звук) должна создаваться как отдельный Crate через `cargo new crates/rumpel_X --lib`.
+* **ECS (Entity Component System):** Строго соблюдайте паттерн ECS. Не используйте ООП. Логика пишется только в System (`fn my_system(query: Query<...>)`), данные хранятся только в Component и Resource.`.
   * Никогда не смешивайте их. Не создавайте гигантских систем типа "god_object".
 
 ## 3. Мультиагентная Система

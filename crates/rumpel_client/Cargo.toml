@@ -1,0 +1,12 @@
+[package]
+name = "rumpel_client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { workspace = true }
+rumpel_coords = { workspace = true }
+rumpel_blocks = { workspace = true }
+rumpel_world = { workspace = true }
+rumpel_render = { workspace = true }
+rumpel_player = { workspace = true }

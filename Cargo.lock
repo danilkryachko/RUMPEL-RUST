@@ -3354,13 +3354,58 @@ dependencies = [
 ]
 
 [[package]]
-name = "rumpel_rust"
+name = "rumpel_blocks"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "ron",
+ "serde",
+]
+
+[[package]]
+name = "rumpel_client"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "rumpel_blocks",
+ "rumpel_coords",
+ "rumpel_player",
+ "rumpel_render",
+ "rumpel_world",
+]
+
+[[package]]
+name = "rumpel_coords"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
+name = "rumpel_player"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
+name = "rumpel_render"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "rumpel_blocks",
+ "rumpel_coords",
+ "rumpel_world",
+]
+
+[[package]]
+name = "rumpel_world"
 version = "0.1.0"
 dependencies = [
  "bevy",
  "noise",
- "ron",
- "serde",
+ "rumpel_blocks",
+ "rumpel_coords",
 ]
 
 [[package]]

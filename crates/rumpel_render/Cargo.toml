@@ -1,0 +1,10 @@
+[package]
+name = "rumpel_render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { workspace = true }
+rumpel_coords = { workspace = true }
+rumpel_blocks = { workspace = true }
+rumpel_world = { workspace = true }

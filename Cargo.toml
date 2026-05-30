@@ -1,18 +1,23 @@
-[package]
-name = "rumpel_rust"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "crates/*"
+]
+resolver = "2"
 
-[dependencies]
+[workspace.dependencies]
 bevy = { version = "0.14", features = ["dynamic_linking"] }
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.8"
-noise = "0.9.0"
+noise = "0.9"
 
-# Enable a small amount of optimization in debug mode
+rumpel_coords = { path = "crates/rumpel_coords" }
+rumpel_blocks = { path = "crates/rumpel_blocks" }
+rumpel_world = { path = "crates/rumpel_world" }
+rumpel_render = { path = "crates/rumpel_render" }
+rumpel_player = { path = "crates/rumpel_player" }
+
 [profile.dev]
 opt-level = 1
 
-# Enable high optimizations for dependencies (incl. Bevy), but not for our code:
 [profile.dev.package."*"]
 opt-level = 3
