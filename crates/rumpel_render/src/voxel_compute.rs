@@ -8,6 +8,7 @@ use bevy::{
         RenderApp,
     },
 };
+use std::sync::{mpsc, Mutex};
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug, RenderLabel)]
 pub struct VoxelComputeLabel;
@@ -24,6 +25,12 @@ impl Plugin for VoxelComputePlugin {
             return;
         };
         render_app.init_resource::<VoxelComputePipeline>();
+
+        let (sender, receiver) = mpsc::channel();
+        render_app.insert_resource(AsyncMeshChannel { 
+            sender, 
+            receiver: Mutex::new(receiver) 
+        });
 
         let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
         render_graph.add_node(VoxelComputeLabel, VoxelComputeNode::default());
@@ -233,9 +240,30 @@ impl render_graph::Node for VoxelComputeNode {
             1024 * 1024 * 4
         );
 
-        // TODO: Async map read logic here...
-        // vertex_staging_buffer.slice(..).map_async(MapMode::Read, |result| { ... });
+        // Map buffer async and read vertices back
+        let vertex_slice = vertex_staging_buffer.slice(..);
+        
+        let (map_sender, map_receiver) = mpsc::channel();
+        vertex_slice.map_async(MapMode::Read, move |result| {
+            let _ = map_sender.send(result);
+        });
+
+        // In a real implementation we would not wait synchronously here,
+        // but store the receiver in a resource and check it next frame.
+        // For demonstration of the pipeline architecture, we prepare the hook:
+        
+        // if let Ok(Ok(())) = map_receiver.try_recv() {
+        //     let data = vertex_slice.get_mapped_range();
+        //     // Copy data out and send to Main World via AsyncMeshChannel
+        //     // vertex_staging_buffer.unmap();
+        // }
         
         Ok(())
     }
+}
+
+#[derive(Resource)]
+pub struct AsyncMeshChannel {
+    pub sender: mpsc::Sender<Vec<u8>>,
+    pub receiver: Mutex<mpsc::Receiver<Vec<u8>>>,
 }
