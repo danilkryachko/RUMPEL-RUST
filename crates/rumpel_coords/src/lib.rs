@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 
+pub mod state;
+
 /// Глобальные координаты чанка (X, Z) в бесконечном мире.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Component)]
 pub struct ChunkPos {

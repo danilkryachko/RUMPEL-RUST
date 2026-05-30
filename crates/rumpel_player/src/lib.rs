@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy::input::mouse::MouseMotion;
 use bevy::window::{CursorGrabMode, PrimaryWindow};
+use rumpel_prelude::*;
 
 #[derive(Component)]
 pub struct Player;
@@ -12,7 +13,10 @@ pub struct RumpelPlayerPlugin;
 
 impl Plugin for RumpelPlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (player_look, player_move, cursor_grab_system));
+        app.add_systems(
+            Update,
+            (player_look, player_move, cursor_grab_system).run_if(in_state(GameState::InGame)),
+        );
     }
 }
 

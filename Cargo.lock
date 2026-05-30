@@ -3384,6 +3384,7 @@ name = "rumpel_player"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "rumpel_prelude",
 ]
 
 [[package]]

@@ -1,22 +1,20 @@
 use bevy::prelude::*;
 use rumpel_prelude::*;
 use rumpel_player::{Player, PlayerCamera, RumpelPlayerPlugin};
-use rumpel_render;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(RumpelPlayerPlugin)
+        .init_state::<GameState>()
         .init_resource::<BlockRegistry>()
-        .add_systems(Startup, setup)
+        .add_systems(Startup, setup_camera_and_light)
+        .add_systems(OnEnter(GameState::Loading), generate_world_and_start)
         .run();
 }
 
-fn setup(
+fn setup_camera_and_light(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    registry: Res<BlockRegistry>,
 ) {
     // Light
     commands.spawn(PointLightBundle {
@@ -44,7 +42,15 @@ fn setup(
                 PlayerCamera,
             ));
         });
+}
 
+fn generate_world_and_start(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    registry: Res<BlockRegistry>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
     // Generate test chunk 0,0
     let chunk = generate_chunk(ChunkPos::new(0, 0), &registry);
     let mesh = rumpel_render::mesh_chunk(&chunk, &registry);
@@ -58,4 +64,7 @@ fn setup(
         transform: Transform::from_xyz(0.0, 0.0, 0.0),
         ..default()
     });
+
+    // World generated, switch to InGame
+    next_state.set(GameState::InGame);
 }
