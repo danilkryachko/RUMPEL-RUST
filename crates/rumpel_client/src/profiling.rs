@@ -4,7 +4,7 @@ use bevy::{
     prelude::*,
 };
 use rumpel_player::Player;
-use rumpel_prelude::{VoxelChunk, RumpelVoxelWorld};
+// Removed legacy voxel world prelude
 
 const PROFILE_SECONDS_ENV: &str = "RUMPEL_PROFILE_SECONDS";
 const PROFILE_AUTOPILOT_ENV: &str = "RUMPEL_PROFILE_AUTOPILOT";
@@ -95,7 +95,7 @@ fn profile_autopilot(
 fn log_profile_metrics(
     time: Res<Time>,
     diagnostics: Res<DiagnosticsStore>,
-    chunks_query: Query<(), With<VoxelChunk<RumpelVoxelWorld>>>,
+    // TODO: Track GPU chunk query
     player_query: Query<&Transform, With<Player>>,
     mut profiling: ResMut<ProfilingRun>,
     mut app_exit: MessageWriter<AppExit>,
@@ -121,7 +121,7 @@ fn log_profile_metrics(
         profiling.min_raw_fps = profiling.min_raw_fps.min(raw_fps);
     }
 
-    let rendered_chunk_count = chunks_query.iter().count();
+    let rendered_chunk_count = 0; // TODO: Track GPU chunks
 
     if profiling.elapsed_seconds >= profiling.next_log_seconds {
         profiling.sample_count += 1;

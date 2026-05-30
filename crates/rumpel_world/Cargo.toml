@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 bevy = { workspace = true }
-bevy_voxel_world = { workspace = true }
 noise = { workspace = true }
 rumpel_coords = { workspace = true }
 rumpel_blocks = { workspace = true }

@@ -2,7 +2,7 @@ use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     prelude::*,
 };
-use rumpel_prelude::{VoxelChunk, RumpelVoxelWorld};
+// Removed legacy prelude imports
 
 const FPS_PENDING_TEXT: &str = "FPS -- | Chunks -- (3D Voxel World)";
 
@@ -16,7 +16,7 @@ pub(crate) fn spawn_fps_hud() {
 pub(crate) fn update_debug_hud(
     mut commands: Commands,
     diagnostics: Res<DiagnosticsStore>,
-    chunks_query: Query<(), With<VoxelChunk<RumpelVoxelWorld>>>,
+    // TODO: Track new GPU chunks query
     mut fps_text: Query<&mut Text, With<FpsHudText>>,
     camera_query: Query<Entity, With<rumpel_player::PlayerCamera>>,
 ) {
@@ -57,7 +57,7 @@ pub(crate) fn update_debug_hud(
     else {
         return;
     };
-    let active_chunk_count = chunks_query.iter().count();
+    let active_chunk_count = 0; // TODO: Implement GPU chunk count
 
     for mut text in &mut fps_text {
         text.0 = format!(
@@ -76,7 +76,7 @@ pub(crate) fn debug_camera_components(
         let has_camera2d = world.entity(entity).contains::<Camera2d>();
         let has_camera = world.entity(entity).contains::<Camera>();
         let has_render_graph = world.entity(entity).contains::<bevy::render::camera::CameraRenderGraph>();
-        let has_voxel_world_camera = world.entity(entity).contains::<rumpel_prelude::VoxelWorldCamera<RumpelVoxelWorld>>();
+        let has_voxel_world_camera = false;
         let has_player_camera = world.entity(entity).contains::<rumpel_player::PlayerCamera>();
         let has_parent = world.entity(entity).contains::<ChildOf>();
 

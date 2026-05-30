@@ -10,11 +10,9 @@ const STARTUP_WARMUP_TIMEOUT_SECS: f32 = 10.0;
 
 fn main() {
     let block_registry = BlockRegistry::default();
-    let voxel_world_config = RumpelVoxelWorld::from_registry(&block_registry);
 
     App::new()
         .insert_resource(block_registry)
-        .insert_resource(voxel_world_config.clone())
         .insert_resource(WinitSettings::continuous())
         .insert_resource(ClearColor(Color::srgb(0.529, 0.808, 0.922)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -24,7 +22,6 @@ fn main() {
             }),
             ..default()
         }))
-        .add_plugins(VoxelWorldPlugin::<RumpelVoxelWorld>::with_config(voxel_world_config.clone()))
         .add_plugins(RumpelPlayerPlugin)
         .add_plugins(rumpel_debug::RumpelDebugPlugin)
         .add_plugins(RumpelClientProfilingPlugin)
@@ -96,7 +93,6 @@ fn setup_camera_and_light(mut commands: Commands) {
                 InheritedVisibility::default(),
                 ViewVisibility::default(),
                 PlayerCamera,
-                VoxelWorldCamera::<RumpelVoxelWorld>::default(),
                 AmbientLight {
                     color: Color::WHITE,
                     brightness: 600.0,
@@ -143,14 +139,14 @@ fn warmup_startup_chunks(
     mut commands: Commands,
     time: Res<Time>,
     mut warmup: ResMut<StartupChunkWarmup>,
-    rendered_chunks: Query<(), With<VoxelChunk<RumpelVoxelWorld>>>,
+    // TODO: Track new GPU chunks
     mut loading_text: Query<(Entity, &mut Text), With<LoadingChunksText>>,
     camera_query: Query<Entity, With<PlayerCamera>>,
     target_camera_query: Query<(), With<UiTargetCamera>>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     warmup.elapsed_seconds += time.delta_secs();
-    let rendered_chunk_count = rendered_chunks.iter().count();
+    let rendered_chunk_count = 0; // TODO: Implement GPU chunk count
 
     for (entity, mut text) in &mut loading_text {
         text.0 = format!(
