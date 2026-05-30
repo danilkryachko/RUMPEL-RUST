@@ -9,3 +9,4 @@ bevy_voxel_world = { workspace = true }
 noise = { workspace = true }
 rumpel_coords = { workspace = true }
 rumpel_blocks = { workspace = true }
+serde = { workspace = true }

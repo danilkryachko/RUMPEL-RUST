@@ -4947,6 +4947,7 @@ dependencies = [
  "noise",
  "rumpel_blocks",
  "rumpel_coords",
+ "serde",
 ]
 
 [[package]]

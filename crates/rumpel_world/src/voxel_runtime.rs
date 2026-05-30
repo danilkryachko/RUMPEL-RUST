@@ -107,7 +107,9 @@ impl VoxelWorldConfig for RumpelVoxelWorld {
     }
 
     fn max_active_chunk_threads(&self) -> usize {
-        DEFAULT_MAX_ACTIVE_CHUNK_THREADS
+        std::thread::available_parallelism()
+            .map(|n| (n.get() as usize).saturating_sub(2).max(1))
+            .unwrap_or(DEFAULT_MAX_ACTIVE_CHUNK_THREADS)
     }
 
     fn spawning_rays(&self) -> usize {
