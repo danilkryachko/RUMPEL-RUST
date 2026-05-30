@@ -7,6 +7,8 @@
 - `just verify`: run formatting, check, Clippy, and tests.
 - `just changelog`: regenerate `CHANGELOG.md` from Conventional Commit history.
 
+The project targets Bevy `0.18.x`. Keep Bevy ecosystem crates on versions compatible with that line.
+
 ## Hooks
 
 Install local hooks with:

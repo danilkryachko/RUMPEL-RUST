@@ -1,7 +1,9 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, PrimaryWindow};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 use rumpel_prelude::*;
+
+const PLAYER_MOVE_SPEED: f32 = 60.0;
 
 #[derive(Component)]
 pub struct Player;
@@ -21,14 +23,14 @@ impl Plugin for RumpelPlayerPlugin {
 }
 
 pub fn player_look(
-    mut mouse_motion_events: EventReader<MouseMotion>,
+    mut mouse_motion_events: MessageReader<MouseMotion>,
     mut query: Query<&mut Transform, With<PlayerCamera>>,
-    window_query: Query<&Window, With<PrimaryWindow>>,
+    cursor_query: Query<&CursorOptions, With<PrimaryWindow>>,
 ) {
-    let Ok(window) = window_query.get_single() else {
+    let Ok(cursor_options) = cursor_query.single() else {
         return;
     };
-    if window.cursor.grab_mode == CursorGrabMode::None {
+    if cursor_options.grab_mode == CursorGrabMode::None {
         return;
     }
 
@@ -60,10 +62,10 @@ pub fn player_move(
     mut query: Query<&mut Transform, With<Player>>,
     camera_query: Query<&Transform, (With<PlayerCamera>, Without<Player>)>,
 ) {
-    let Ok(mut transform) = query.get_single_mut() else {
+    let Ok(mut transform) = query.single_mut() else {
         return;
     };
-    let Ok(camera_transform) = camera_query.get_single() else {
+    let Ok(camera_transform) = camera_query.single() else {
         return;
     };
 
@@ -96,27 +98,26 @@ pub fn player_move(
     }
 
     if direction != Vec3::ZERO {
-        let speed = 20.0;
-        transform.translation += direction.normalize() * speed * time.delta_seconds();
+        transform.translation += direction.normalize() * PLAYER_MOVE_SPEED * time.delta_secs();
     }
 }
 
 pub fn cursor_grab_system(
-    mut window_query: Query<&mut Window, With<PrimaryWindow>>,
+    mut cursor_query: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mouse: Res<ButtonInput<MouseButton>>,
     key: Res<ButtonInput<KeyCode>>,
 ) {
-    let Ok(mut window) = window_query.get_single_mut() else {
+    let Ok(mut cursor_options) = cursor_query.single_mut() else {
         return;
     };
 
     if mouse.just_pressed(MouseButton::Left) {
-        window.cursor.grab_mode = CursorGrabMode::Locked;
-        window.cursor.visible = false;
+        cursor_options.grab_mode = CursorGrabMode::Locked;
+        cursor_options.visible = false;
     }
 
     if key.just_pressed(KeyCode::Escape) {
-        window.cursor.grab_mode = CursorGrabMode::None;
-        window.cursor.visible = true;
+        cursor_options.grab_mode = CursorGrabMode::None;
+        cursor_options.visible = true;
     }
 }

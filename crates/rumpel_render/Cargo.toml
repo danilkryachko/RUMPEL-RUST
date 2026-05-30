@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 bevy = { workspace = true }
+noise = { workspace = true }
 rumpel_prelude = { workspace = true }

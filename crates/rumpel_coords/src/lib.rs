@@ -16,7 +16,9 @@ impl ChunkPos {
 }
 
 /// Локальные координаты конкретного блока внутри чанка.
-/// X и Z всегда от 0 до 15. Y от 0 до 255.
+/// В legacy storage X и Z лежат в диапазоне 0..15, Y в диапазоне 0..255.
+/// Runtime backend может использовать другой размер чанка, но gameplay-код не должен
+/// смешивать локальные и мировые координаты.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LocalBlockPos {
     pub x: u8,
@@ -27,6 +29,30 @@ pub struct LocalBlockPos {
 impl LocalBlockPos {
     pub fn new(x: u8, y: u16, z: u8) -> Self {
         Self { x, y, z }
+    }
+}
+
+/// Мировые целочисленные координаты блока.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WorldBlockPos {
+    pub position: IVec3,
+}
+
+impl WorldBlockPos {
+    pub fn new(position: IVec3) -> Self {
+        Self { position }
+    }
+}
+
+impl From<IVec3> for WorldBlockPos {
+    fn from(position: IVec3) -> Self {
+        Self::new(position)
+    }
+}
+
+impl From<WorldBlockPos> for IVec3 {
+    fn from(pos: WorldBlockPos) -> Self {
+        pos.position
     }
 }
 

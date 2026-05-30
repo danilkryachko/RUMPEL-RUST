@@ -21,6 +21,20 @@ Subagent tasks must be concrete, bounded, and assigned disjoint file ownership w
 
 If the runtime does not expose subagent tools, continue locally and mention the limitation briefly.
 
+## Codex and Antigravity Collaboration
+
+The project may be developed by both Codex and Antigravity agents. Treat this as a collaboration protocol, not as permission for uncontrolled parallel edits.
+
+- The Producer owns product direction and final approval.
+- Codex owns final integration and verification unless the Producer explicitly assigns that role to another agent.
+- Antigravity may propose, implement, or review bounded tasks with explicit file ownership.
+- Before editing, inspect the current working tree and adapt to existing changes.
+- Do not revert, overwrite, or reformat changes made by another agent unless the Producer explicitly asks for it.
+- For parallel work, each agent must state its task scope, editable files, forbidden files, and expected verification command.
+- Shared architecture files such as `Cargo.toml`, `AGENTS.md`, `AI_DEVELOPMENT_GUIDE.md`, `GDD.md`, `BOARD.md`, and core crate boundaries require extra care: inspect diffs first and keep edits narrowly scoped.
+- Commit and push require explicit Producer approval.
+- Final integration must pass `just verify` or the equivalent Cargo checks before publication.
+
 ## Local Quality Bar
 
 - Keep blocks data-driven through `assets/blocks/base.ron` and Lua registration APIs.

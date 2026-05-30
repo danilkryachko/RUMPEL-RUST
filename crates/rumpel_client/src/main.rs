@@ -1,85 +1,113 @@
-use bevy::prelude::*;
+use bevy::{prelude::*, window::PresentMode, winit::WinitSettings};
+use profiling::RumpelClientProfilingPlugin;
 use rumpel_player::{Player, PlayerCamera, RumpelPlayerPlugin};
 use rumpel_prelude::*;
 
+mod profiling;
+
+const STARTUP_RENDERED_CHUNK_TARGET: usize = 384;
+const STARTUP_WARMUP_TIMEOUT_SECS: f32 = 10.0;
+
 fn main() {
+    let block_registry = BlockRegistry::default();
+    let voxel_world_config = RumpelVoxelWorld::from_registry(&block_registry);
+
     App::new()
-        .add_plugins(DefaultPlugins)
+        .insert_resource(block_registry)
+        .insert_resource(voxel_world_config.clone())
+        .insert_resource(WinitSettings::continuous())
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                present_mode: PresentMode::AutoNoVsync,
+                ..default()
+            }),
+            ..default()
+        }))
+        .add_plugins(VoxelWorldPlugin::<RumpelVoxelWorld>::with_config(voxel_world_config.clone()))
         .add_plugins(RumpelPlayerPlugin)
         .add_plugins(rumpel_debug::RumpelDebugPlugin)
+        .add_plugins(RumpelClientProfilingPlugin)
         .init_state::<GameState>()
-        .enable_state_scoped_entities::<GameState>()
-        .init_resource::<BlockRegistry>()
+        .init_resource::<StartupChunkWarmup>()
         .add_systems(Startup, setup_camera_and_light)
         .add_systems(
             OnEnter(GameState::Loading),
-            (rumpel_modding::load_lua_mods, trigger_world_generation).chain(),
+            (rumpel_modding::load_lua_mods, spawn_loading_overlay).chain(),
         )
-        .observe(generate_world_and_start)
+        .add_systems(
+            Update,
+            warmup_startup_chunks.run_if(in_state(GameState::Loading)),
+        )
         .run();
 }
 
-#[derive(Event)]
-pub struct SpawnTestWorld;
-
-fn trigger_world_generation(mut commands: Commands) {
-    commands.trigger(SpawnTestWorld);
+#[derive(Resource, Default)]
+struct StartupChunkWarmup {
+    elapsed_seconds: f32,
 }
 
-fn setup_camera_and_light(mut commands: Commands) {
-    // Light
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
-            shadows_enabled: true,
-            ..default()
-        },
-        transform: Transform::from_xyz(8.0, 60.0, 8.0),
-        ..default()
-    });
+#[derive(Component)]
+struct LoadingChunksText;
 
+fn setup_camera_and_light(mut commands: Commands) {
     // Camera/Player
     commands
         .spawn((
             Player,
-            TransformBundle::from(Transform::from_xyz(8.0, 50.0, 24.0)),
-            VisibilityBundle::default(),
+            Transform::from_xyz(8.0, 50.0, 24.0),
+            Visibility::default(),
         ))
         .with_children(|parent| {
             parent.spawn((
-                Camera3dBundle {
-                    transform: Transform::from_xyz(0.0, 0.5, 0.0),
-                    ..default()
-                },
+                Camera3d::default(),
+                Msaa::Off,
+                Transform::from_xyz(0.0, 0.5, 0.0),
                 PlayerCamera,
+                VoxelWorldCamera::<RumpelVoxelWorld>::default(),
             ));
         });
 }
 
-fn generate_world_and_start(
-    _trigger: Trigger<SpawnTestWorld>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    registry: Res<BlockRegistry>,
-    mut next_state: ResMut<NextState<GameState>>,
-) {
-    // Generate test chunk 0,0
-    let chunk = generate_chunk(ChunkPos::new(0, 0), &registry);
-    let mesh = rumpel_render::mesh_chunk(&chunk, &registry);
+fn spawn_loading_overlay(mut commands: Commands, mut warmup: ResMut<StartupChunkWarmup>) {
+    warmup.elapsed_seconds = 0.0;
 
     commands.spawn((
-        PbrBundle {
-            mesh: meshes.add(mesh),
-            material: materials.add(StandardMaterial {
-                base_color: Color::WHITE,
-                ..default()
-            }),
-            transform: Transform::from_xyz(0.0, 0.0, 0.0),
+        Text::new(format!("Loading chunks 0/{STARTUP_RENDERED_CHUNK_TARGET}")),
+        TextFont::from_font_size(24.0),
+        TextColor(Color::srgb(0.9, 0.95, 0.9)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: percent(50),
+            bottom: px(42),
+            padding: UiRect::axes(px(12), px(7)),
             ..default()
         },
-        StateScoped(GameState::InGame),
+        BackgroundColor(Color::srgba(0.02, 0.025, 0.02, 0.78)),
+        DespawnOnExit(GameState::Loading),
+        LoadingChunksText,
     ));
+}
 
-    // World generated, switch to InGame
-    next_state.set(GameState::InGame);
+fn warmup_startup_chunks(
+    time: Res<Time>,
+    mut warmup: ResMut<StartupChunkWarmup>,
+    rendered_chunks: Query<(), With<VoxelChunk<RumpelVoxelWorld>>>,
+    mut loading_text: Query<&mut Text, With<LoadingChunksText>>,
+    mut next_state: ResMut<NextState<GameState>>,
+) {
+    warmup.elapsed_seconds += time.delta_secs();
+    let rendered_chunk_count = rendered_chunks.iter().count();
+
+    for mut text in &mut loading_text {
+        text.0 = format!(
+            "Loading chunks {}/{STARTUP_RENDERED_CHUNK_TARGET}",
+            rendered_chunk_count.min(STARTUP_RENDERED_CHUNK_TARGET)
+        );
+    }
+
+    if rendered_chunk_count >= STARTUP_RENDERED_CHUNK_TARGET
+        || warmup.elapsed_seconds >= STARTUP_WARMUP_TIMEOUT_SECS
+    {
+        next_state.set(GameState::InGame);
+    }
 }
