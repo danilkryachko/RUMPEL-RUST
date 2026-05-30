@@ -107,7 +107,7 @@ impl VoxelWorldConfig for RumpelVoxelWorld {
     }
 
     fn chunk_despawn_strategy(&self) -> ChunkDespawnStrategy {
-        ChunkDespawnStrategy::FarAwayOrOutOfView
+        ChunkDespawnStrategy::FarAway
     }
 
     fn chunk_spawn_strategy(&self) -> ChunkSpawnStrategy {
@@ -213,6 +213,15 @@ fn terrain_voxel_at(
                 let tx = block_pos.x + dx;
                 let tz = block_pos.z + dz;
 
+                // Deterministic stateless hash of tree coordinates
+                let mut hash = tx.wrapping_mul(73856093) ^ tz.wrapping_mul(19349663);
+                hash = hash.wrapping_abs();
+
+                // 2.5% chance of tree per column - check this first to avoid height/noise computation!
+                if hash % 40 != 0 {
+                    continue;
+                }
+
                 let th = *height_cache
                     .entry((tx, tz))
                     .or_insert_with(|| {
@@ -228,36 +237,34 @@ fn terrain_voxel_at(
                     continue;
                 }
 
-                // Deterministic stateless hash of tree coordinates
-                let mut hash = tx.wrapping_mul(73856093) ^ tz.wrapping_mul(19349663);
-                hash = hash.wrapping_abs();
+                // Pruning check: if y coordinate is not in tree range [th + 1, th + 7], skip calculations
+                if block_pos.y < th + 1 || block_pos.y > th + 7 {
+                    continue;
+                }
 
-                // 2.5% chance of tree per column
-                if hash % 40 == 0 {
-                    let trunk_min = th + 1;
-                    let trunk_max = th + 5;
+                let trunk_min = th + 1;
+                let trunk_max = th + 5;
 
-                    // Spawn wood trunk
-                    if tx == block_pos.x && tz == block_pos.z && block_pos.y >= trunk_min && block_pos.y <= trunk_max {
-                        base_voxel = WorldVoxel::Solid(block_ids.wood);
-                        break 'outer;
-                    }
+                // Spawn wood trunk
+                if tx == block_pos.x && tz == block_pos.z && block_pos.y >= trunk_min && block_pos.y <= trunk_max {
+                    base_voxel = WorldVoxel::Solid(block_ids.wood);
+                    break 'outer;
+                }
 
-                    // Spawn leaf canopy centered at top of the trunk
-                    let leaf_center_y = th + 5;
-                    let dy = block_pos.y - leaf_center_y;
-                    if dy >= -1 && dy <= 2 {
-                        let ldx = block_pos.x - tx;
-                        let ldz = block_pos.z - tz;
+                // Spawn leaf canopy centered at top of the trunk
+                let leaf_center_y = th + 5;
+                let dy = block_pos.y - leaf_center_y;
+                if dy >= -1 && dy <= 2 {
+                    let ldx = block_pos.x - tx;
+                    let ldz = block_pos.z - tz;
 
-                        // Spherical leaf canopy
-                        let dist_sq = ldx * ldx + dy * dy + ldz * ldz;
-                        if dist_sq <= 5 {
-                            // Don't overwrite the wood trunk
-                            if !(ldx == 0 && ldz == 0 && block_pos.y <= trunk_max) {
-                                base_voxel = WorldVoxel::Solid(block_ids.leaves);
-                                break 'outer;
-                            }
+                    // Spherical leaf canopy
+                    let dist_sq = ldx * ldx + dy * dy + ldz * ldz;
+                    if dist_sq <= 5 {
+                        // Don't overwrite the wood trunk
+                        if !(ldx == 0 && ldz == 0 && block_pos.y <= trunk_max) {
+                            base_voxel = WorldVoxel::Solid(block_ids.leaves);
+                            break 'outer;
                         }
                     }
                 }

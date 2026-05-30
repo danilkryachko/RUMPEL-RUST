@@ -1,6 +1,6 @@
 use bevy::input::mouse::MouseMotion;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowMode, MonitorSelection};
 use rumpel_prelude::*;
 
 const PLAYER_MOVE_SPEED: f32 = 60.0;
@@ -17,7 +17,13 @@ impl Plugin for RumpelPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (player_look, player_move, cursor_grab_system).run_if(in_state(GameState::InGame)),
+            (
+                player_look,
+                player_move,
+                cursor_grab_system,
+                toggle_fullscreen_system,
+            )
+                .run_if(in_state(GameState::InGame)),
         );
     }
 }
@@ -127,5 +133,29 @@ pub fn cursor_grab_system(
         cursor_options.grab_mode = CursorGrabMode::None;
         cursor_options.visible = true;
         info!("cursor_grab_system: ESC pressed! Releasing cursor. Visible=true, Mode=None.");
+    }
+}
+
+pub fn toggle_fullscreen_system(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut window_query: Query<&mut Window, With<PrimaryWindow>>,
+) {
+    let Ok(mut window) = window_query.single_mut() else {
+        return;
+    };
+
+    let alt_enter = keyboard_input.pressed(KeyCode::AltLeft) || keyboard_input.pressed(KeyCode::AltRight);
+    let cmd_f = keyboard_input.pressed(KeyCode::SuperLeft) || keyboard_input.pressed(KeyCode::SuperRight);
+
+    let toggle = (alt_enter && keyboard_input.just_pressed(KeyCode::Enter))
+        || (cmd_f && keyboard_input.just_pressed(KeyCode::KeyF))
+        || keyboard_input.just_pressed(KeyCode::F11);
+
+    if toggle {
+        window.mode = match window.mode {
+            WindowMode::Windowed => WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+            _ => WindowMode::Windowed,
+        };
+        info!("toggle_fullscreen_system: Toggled window mode to {:?}", window.mode);
     }
 }

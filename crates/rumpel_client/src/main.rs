@@ -19,7 +19,7 @@ fn main() {
         .insert_resource(ClearColor(Color::srgb(0.529, 0.808, 0.922)))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                present_mode: PresentMode::AutoNoVsync,
+                present_mode: PresentMode::Immediate,
                 ..default()
             }),
             ..default()
@@ -51,13 +51,21 @@ struct StartupChunkWarmup {
 struct LoadingChunksText;
 
 fn setup_camera_and_light(mut commands: Commands) {
-    // Add sun light for PBR rendering
+    // Add sun light with Cascaded Shadows covering the entire visibility distance (350.0 range)
     commands.spawn((
         DirectionalLight {
             shadows_enabled: true,
             illuminance: 12000.0, // Sunlight in lux
             ..default()
         },
+        bevy::light::CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 0.1,
+            maximum_distance: 350.0, // Matches full render range to the horizon
+            first_cascade_far_bound: 10.0,
+            overlap_proportion: 0.2,
+        }
+        .build(),
         Transform::from_xyz(100.0, 250.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
