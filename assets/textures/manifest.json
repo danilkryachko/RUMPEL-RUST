@@ -1,0 +1,51 @@
+{
+  "source": "/Users/daniil/AIPROJECT/RUMPEL2",
+  "imported_from": "clients/godot/assets/textures",
+  "tile_size_px": 64,
+  "block_atlas_tile_count": 72,
+  "blocks": {
+    "grass": {
+      "top": "blocks/grass_block_top.png",
+      "side": "blocks/grass_block_side.png",
+      "bottom": "blocks/dirt.png"
+    },
+    "dirt": {
+      "all": "blocks/dirt.png"
+    },
+    "stone": {
+      "all": "blocks/stone.png"
+    },
+    "sand": {
+      "all": "blocks/sand.png"
+    },
+    "wood": {
+      "side": "blocks/wood_log_side.png",
+      "top": "blocks/wood_log_top.png",
+      "variants": [
+        "blocks/wood_log_side_knot_center.png",
+        "blocks/wood_log_side_knot_off_center.png"
+      ]
+    },
+    "leaves": {
+      "all": "blocks/leaves.png"
+    }
+  },
+  "vegetation": {
+    "grass_bush": "vegetation/grass_bush.png",
+    "leaves_cluster": "vegetation/leaves_cluster.png"
+  },
+  "atlases": {
+    "block_atlas": "blocks/block_atlas.png",
+    "block_atlas_rgba": "blocks/block_atlas.rgba",
+    "rumpel2_block_texture_atlas": "blocks/rumpel2_block_texture_atlas.png"
+  },
+  "third_party": {
+    "clarity": {
+      "source": "/Users/daniil/Downloads/Clarity",
+      "terms_file": "third_party/clarity/Terms_of_Use_and_Info.txt",
+      "notice": "third_party/clarity/NOTICE.md",
+      "usage": "Only non-protected block atlas tiles use Clarity textures. Existing RUMPEL dirt, grass, grass-side, stone, wood, leaves, grass-bush, and leaf-cluster textures remain unchanged.",
+      "redistribution_note": "Clarity terms allow personal use and modification but prohibit redistributing pack elements without permission from the author."
+    }
+  }
+}
