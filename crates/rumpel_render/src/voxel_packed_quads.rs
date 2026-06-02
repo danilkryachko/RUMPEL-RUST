@@ -424,8 +424,7 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
         has_edits,
     };
     for_each_surface_packed_column_for_chunk(source, |column| {
-        let neighbor_heights =
-            surface_neighbor_heights(column, chunk_pos, context, edit_store, &perlin, has_edits);
+        let neighbor_heights = surface_neighbor_heights(column, source);
         gpu_columns.push(PackedGpuSurfaceColumn::from_parts(
             [column.x, column.z, column.width, column.depth],
             [
@@ -590,51 +589,47 @@ fn surface_neighbor_height(
 
 fn surface_neighbor_heights(
     column: SurfacePackedColumn,
-    chunk_pos: ChunkPos,
-    context: &WorldGenerationContext,
-    edit_store: &WorldEditStore,
-    perlin: &Perlin,
-    has_edits: bool,
+    source: SurfaceColumnSource<'_>,
 ) -> [usize; 4] {
-    let world_x = chunk_pos.x * CHUNK_SIZE as i32 + column.x as i32;
-    let world_z = chunk_pos.z * CHUNK_SIZE as i32 + column.z as i32;
+    let world_x = source.chunk_pos.x * CHUNK_SIZE as i32 + column.x as i32;
+    let world_z = source.chunk_pos.z * CHUNK_SIZE as i32 + column.z as i32;
 
     [
         surface_neighbor_sample_height(
             world_x + column.width as i32,
             world_z,
             column,
-            context,
-            edit_store,
-            perlin,
-            has_edits,
+            source.context,
+            source.edit_store,
+            source.perlin,
+            source.has_edits,
         ),
         surface_neighbor_sample_height(
             world_x - column.width as i32,
             world_z,
             column,
-            context,
-            edit_store,
-            perlin,
-            has_edits,
+            source.context,
+            source.edit_store,
+            source.perlin,
+            source.has_edits,
         ),
         surface_neighbor_sample_height(
             world_x,
             world_z + column.depth as i32,
             column,
-            context,
-            edit_store,
-            perlin,
-            has_edits,
+            source.context,
+            source.edit_store,
+            source.perlin,
+            source.has_edits,
         ),
         surface_neighbor_sample_height(
             world_x,
             world_z - column.depth as i32,
             column,
-            context,
-            edit_store,
-            perlin,
-            has_edits,
+            source.context,
+            source.edit_store,
+            source.perlin,
+            source.has_edits,
         ),
     ]
 }
