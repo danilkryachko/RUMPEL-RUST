@@ -28,8 +28,8 @@ use std::{
 use wgpu::{QuerySet, QuerySetDescriptor, QueryType, RenderPassTimestampWrites};
 
 use crate::packed_quad_gpu_generation::{
-    PackedGpuGenerationBatches, PackedGpuGenerationJob, packed_gpu_generation_enabled_from_env,
-    packed_gpu_generation_workgroups,
+    PackedGpuGenerationBatches, PackedGpuGenerationJob, PackedGpuSurfaceColumn,
+    packed_gpu_generation_enabled_from_env, packed_gpu_generation_workgroups,
 };
 use crate::packed_quad_pipeline::{PreparedPackedQuadBatch, PreparedPackedQuadBatches};
 
@@ -216,6 +216,10 @@ struct PackedGpuGenerationBuffers {
     draw_params_capacity: usize,
     indirect_buffer: Option<Buffer>,
     indirect_capacity_commands: usize,
+    allocation_requests: Vec<crate::packed_quad_buffer::PackedGpuGenerationAllocationRequest>,
+    jobs: Vec<PackedGpuGenerationJob>,
+    columns: Vec<PackedGpuSurfaceColumn>,
+    draw_params: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
 }
 
 #[derive(Resource)]
@@ -805,20 +809,20 @@ fn prepare_packed_gpu_generated_draw(
         return;
     }
 
-    let allocation_requests = ordered_batches
-        .iter()
-        .map(
-            |batch| crate::packed_quad_buffer::PackedGpuGenerationAllocationRequest {
+    buffers.allocation_requests.clear();
+    buffers
+        .allocation_requests
+        .extend(ordered_batches.iter().map(|batch| {
+            crate::packed_quad_buffer::PackedGpuGenerationAllocationRequest {
                 key: batch.key,
                 requested_quads: batch.max_output_quads,
                 generation: batch.generation,
-            },
-        )
-        .collect::<Vec<_>>();
+            }
+        }));
     let (new_allocations, next_free_quads) =
         crate::packed_quad_buffer::plan_gpu_generated_arena_allocations(
             &arena.allocations,
-            &allocation_requests,
+            &buffers.allocation_requests,
             next_packed_gpu_generation_slot_capacity,
         );
 
@@ -974,6 +978,50 @@ fn prepare_packed_gpu_generated_draw(
         buffers.indirect_capacity_commands = next_capacity;
     }
 
+    buffers.jobs.clear();
+    let jobs_capacity = buffers.jobs.capacity();
+    if jobs_capacity < ordered_batches.len() {
+        buffers.jobs.reserve(ordered_batches.len() - jobs_capacity);
+    }
+    buffers.columns.clear();
+    let columns_capacity = buffers.columns.capacity();
+    if columns_capacity < batch_summary.total_column_count {
+        buffers
+            .columns
+            .reserve(batch_summary.total_column_count - columns_capacity);
+    }
+    buffers.draw_params.clear();
+    let draw_params_capacity = buffers.draw_params.capacity();
+    if draw_params_capacity < ordered_batches.len() {
+        buffers
+            .draw_params
+            .reserve(ordered_batches.len() - draw_params_capacity);
+    }
+    let mut column_offset = 0usize;
+
+    for (draw_index, (batch, region)) in ordered_batches.iter().zip(&planned_regions).enumerate() {
+        let mut params = batch.params;
+        params.config[0] = batch.columns.len().min(u32::MAX as usize) as u32;
+        params.config[1] = region.max_output_quads.min(u32::MAX as usize) as u32;
+        buffers.jobs.push(PackedGpuGenerationJob::new(
+            params,
+            column_offset,
+            region.arena_offset_quads,
+            draw_index,
+            draw_index,
+            draw_index,
+        ));
+        let mut translation = batch.translation;
+        translation.w = region.arena_offset_quads as f32;
+        buffers
+            .draw_params
+            .push(crate::packed_quad_buffer::PackedQuadDrawParams {
+                chunk_offset: translation.to_array(),
+            });
+        buffers.columns.extend_from_slice(batch.columns.as_slice());
+        column_offset = column_offset.saturating_add(batch.columns.len());
+    }
+
     let Some(jobs_buffer) = buffers.jobs_buffer.as_ref() else {
         prepared.disable();
         return;
@@ -999,35 +1047,13 @@ fn prepare_packed_gpu_generated_draw(
         return;
     };
 
-    let mut jobs = Vec::with_capacity(ordered_batches.len());
-    let mut columns = Vec::with_capacity(batch_summary.total_column_count);
-    let mut draw_params = Vec::with_capacity(ordered_batches.len());
-    let mut column_offset = 0usize;
-
-    for (draw_index, (batch, region)) in ordered_batches.iter().zip(&planned_regions).enumerate() {
-        let mut params = batch.params;
-        params.config[0] = batch.columns.len().min(u32::MAX as usize) as u32;
-        params.config[1] = region.max_output_quads.min(u32::MAX as usize) as u32;
-        jobs.push(PackedGpuGenerationJob::new(
-            params,
-            column_offset,
-            region.arena_offset_quads,
-            draw_index,
-            draw_index,
-            draw_index,
-        ));
-        let mut translation = batch.translation;
-        translation.w = region.arena_offset_quads as f32;
-        draw_params.push(crate::packed_quad_buffer::PackedQuadDrawParams {
-            chunk_offset: translation.to_array(),
-        });
-        columns.extend_from_slice(batch.columns.as_slice());
-        column_offset = column_offset.saturating_add(batch.columns.len());
-    }
-
-    render_queue.write_buffer(jobs_buffer, 0, bytemuck::cast_slice(&jobs));
-    render_queue.write_buffer(columns_buffer, 0, bytemuck::cast_slice(&columns));
-    render_queue.write_buffer(draw_params_buffer, 0, bytemuck::cast_slice(&draw_params));
+    render_queue.write_buffer(jobs_buffer, 0, bytemuck::cast_slice(&buffers.jobs));
+    render_queue.write_buffer(columns_buffer, 0, bytemuck::cast_slice(&buffers.columns));
+    render_queue.write_buffer(
+        draw_params_buffer,
+        0,
+        bytemuck::cast_slice(&buffers.draw_params),
+    );
 
     let generation_bind_group = render_device.create_bind_group(
         Some("packed_gpu_generation_bind_group"),
