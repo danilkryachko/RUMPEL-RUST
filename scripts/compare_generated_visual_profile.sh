@@ -164,8 +164,8 @@ run_case() {
 
     local draw_mode
     local uploaded_quads
-    draw_mode="$(extract_profile_field "$stdout_log" "profile sample=" "packed_draw_mode")"
-    uploaded_quads="$(extract_profile_field "$stdout_log" "profile sample=" "packed_uploaded_quads")"
+    draw_mode="$(extract_profile_field "$stdout_log" "profile worst_packed" "draw_mode")"
+    uploaded_quads="$(extract_profile_field "$stdout_log" "profile worst_packed" "uploaded_quads")"
     if [[ "$variant" == "cpu" && "$draw_mode" == "gpu-generated" ]]; then
         echo "$preset/$variant unexpectedly used gpu-generated draw mode" >&2
         exit 66
@@ -179,22 +179,22 @@ run_case() {
             echo "$preset/$variant expected zero CPU uploaded quads, got ${uploaded_quads:-missing}" >&2
             exit 66
         fi
-        if [[ "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_enabled")" != "true" ]]; then
+        if [[ "$(extract_profile_field "$stdout_log" "profile worst_packed" "gpu_cull_enabled")" != "true" ]]; then
             echo "$preset/$variant did not enable packed GPU cull" >&2
             exit 66
         fi
         require_positive_int \
-            "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_input_commands")" \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "gpu_cull_input_commands")" \
             packed_gpu_cull_input_commands \
             "$preset" \
             "$variant"
         require_positive_int \
-            "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_est_visible_commands")" \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "gpu_cull_est_visible_commands")" \
             packed_gpu_cull_est_visible_commands \
             "$preset" \
             "$variant"
         require_positive_int \
-            "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_est_visible_quads")" \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "gpu_cull_est_visible_quads")" \
             packed_gpu_cull_est_visible_quads \
             "$preset" \
             "$variant"
@@ -236,10 +236,10 @@ report="$compare_dir/report.txt"
                 "$(extract_profile_field "$stdout_log" "profile end" "frames_ge_25ms")" \
                 "$(extract_profile_field "$stdout_log" "profile worst_packed" "visible_quads")" \
                 "$(extract_profile_field "$stdout_log" "profile worst_packed" "uploaded_quads")" \
-                "$(extract_profile_field "$stdout_log" "profile sample=" "packed_indirect_draw_commands")" \
-                "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_input_commands")" \
-                "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_est_visible_commands")" \
-                "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_est_visible_quads")" \
+                "$(extract_profile_field "$stdout_log" "profile worst_packed" "indirect_draw_commands")" \
+                "$(extract_profile_field "$stdout_log" "profile worst_packed" "gpu_cull_input_commands")" \
+                "$(extract_profile_field "$stdout_log" "profile worst_packed" "gpu_cull_est_visible_commands")" \
+                "$(extract_profile_field "$stdout_log" "profile worst_packed" "gpu_cull_est_visible_quads")" \
                 "$(extract_profile_field "$stdout_log" "profile worst_packed" "cpu_visible_commands")" \
                 "$screenshot" \
                 "$stdout_log" \

@@ -1685,17 +1685,7 @@ fn log_profile_metrics(
         if let Some(stats) = packed_stats_snapshot {
             let vertex_count =
                 rumpel_render::packed_quad_renderer::vertex_count_for_quads(stats.arena_used_quads);
-            let mode_str = match stats.draw_mode {
-                rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_GPU_GENERATED => {
-                    "gpu-generated"
-                }
-                rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_MATERIAL => "material",
-                rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_MULTI_INDIRECT => {
-                    "multi-indirect"
-                }
-                rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_INDIRECT => "indirect",
-                _ => "direct",
-            };
+            let mode_str = packed_draw_mode_label(stats.draw_mode);
             let face_range_cull =
                 env_flag_default(PACKED_FACE_RANGE_CULL_ENV, DEFAULT_PACKED_FACE_RANGE_CULL);
             let face_range_min_quads = env_usize(
@@ -1895,9 +1885,11 @@ fn log_profile_metrics(
         );
         if let Some(stats) = profiling.worst_packed_stats {
             println!(
-                "profile worst_packed visible_quads={} uploaded_quads={} pending_builds={} pending_region_rebuilds={} prepare_us={} view_prepare_us={} stream_us={} stream_spawned_builds={} stream_rebuild_regions={} build_task_us={} built_this_frame={} compaction_us={} compacted_regions={} uploaded_this_frame={} arena_compactions={} render_node_us={} packed_render_gpu_pass_us={} gpu_cull_node_us={} cpu_visible_commands={} material_entities={} material_sync_us={}",
+                "profile worst_packed draw_mode={} visible_quads={} uploaded_quads={} indirect_draw_commands={} pending_builds={} pending_region_rebuilds={} prepare_us={} view_prepare_us={} stream_us={} stream_spawned_builds={} stream_rebuild_regions={} build_task_us={} built_this_frame={} compaction_us={} compacted_regions={} uploaded_this_frame={} arena_compactions={} render_node_us={} packed_render_draw_calls={} packed_render_items_considered={} packed_render_gpu_pass_us={} gpu_cull_enabled={} gpu_cull_input_commands={} gpu_cull_est_visible_commands={} gpu_cull_est_visible_quads={} gpu_cull_node_us={} gpu_cull_count_supported={} gpu_cull_compact_enabled={} cpu_visible_compact_enabled={} cpu_visible_commands={} material_entities={} material_sync_us={}",
+                packed_draw_mode_label(stats.draw_mode),
                 stats.visible_quads,
                 stats.uploaded_quads,
+                stats.indirect_draw_commands,
                 stats.pending_builds,
                 stats.pending_region_rebuilds,
                 stats.prepare_system_us,
@@ -1912,8 +1904,17 @@ fn log_profile_metrics(
                 stats.uploaded_this_frame,
                 stats.arena_compactions,
                 stats.render_node_us,
+                stats.render_draw_calls,
+                stats.render_items_considered,
                 stats.render_gpu_pass_us,
+                stats.gpu_cull_enabled,
+                stats.gpu_cull_input_commands,
+                stats.gpu_cull_est_visible_commands,
+                stats.gpu_cull_est_visible_quads,
                 stats.gpu_cull_node_us,
+                stats.gpu_cull_count_supported,
+                stats.gpu_cull_compact_enabled,
+                stats.cpu_visible_compact_enabled,
                 stats.cpu_visible_commands,
                 stats.material_entities,
                 stats.material_sync_us
@@ -1926,6 +1927,16 @@ fn log_profile_metrics(
 }
 
 fn env_flag(name: &str) -> bool {
+fn packed_draw_mode_label(draw_mode: usize) -> &'static str {
+    match draw_mode {
+        rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_GPU_GENERATED => "gpu-generated",
+        rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_MATERIAL => "material",
+        rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_MULTI_INDIRECT => "multi-indirect",
+        rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_INDIRECT => "indirect",
+        _ => "direct",
+    }
+}
+
     std::env::var(name).is_ok_and(|value| {
         matches!(
             value.to_ascii_lowercase().as_str(),
