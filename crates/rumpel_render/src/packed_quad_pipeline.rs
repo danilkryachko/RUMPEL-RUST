@@ -301,17 +301,33 @@ pub struct PreparedPackedQuadGpuCull {
     pub config_buffer: Option<Buffer>,
     pub output_indirect_buffer: Option<Buffer>,
     pub count_buffer: Option<Buffer>,
+    pub source_signature: u64,
     pub metadata_signature: u64,
     pub config_signature: u64,
     dispatched: AtomicBool,
+    dispatched_signature: AtomicU64,
+    last_visible_commands: AtomicUsize,
+    last_visible_quads: AtomicUsize,
 }
 
 impl PreparedPackedQuadGpuCull {
     pub fn reset_dispatched(&self) {
         self.dispatched.store(false, Ordering::Release);
+        self.dispatched_signature.store(0, Ordering::Release);
     }
 
-    pub fn mark_dispatched(&self) {
+    pub fn mark_dispatched(
+        &self,
+        dispatch_signature: u64,
+        visible_commands: usize,
+        visible_quads: usize,
+    ) {
+        self.last_visible_commands
+            .store(visible_commands, Ordering::Release);
+        self.last_visible_quads
+            .store(visible_quads, Ordering::Release);
+        self.dispatched_signature
+            .store(dispatch_signature, Ordering::Release);
         self.dispatched.store(true, Ordering::Release);
     }
 
@@ -319,11 +335,26 @@ impl PreparedPackedQuadGpuCull {
         self.dispatched.load(Ordering::Acquire)
     }
 
+    pub fn was_dispatched_for(&self, dispatch_signature: u64) -> bool {
+        dispatch_signature != 0
+            && self.was_dispatched()
+            && self.dispatched_signature.load(Ordering::Acquire) == dispatch_signature
+    }
+
+    pub fn last_visible_commands(&self) -> usize {
+        self.last_visible_commands.load(Ordering::Acquire)
+    }
+
+    pub fn last_visible_quads(&self) -> usize {
+        self.last_visible_quads.load(Ordering::Acquire)
+    }
+
     pub fn disable(&mut self) {
         self.enabled = false;
         self.compact_enabled = false;
         self.count_supported = false;
         self.command_count = 0;
+        self.source_signature = 0;
         self.metadata_signature = 0;
         self.config_signature = 0;
         self.reset_dispatched();
@@ -342,9 +373,13 @@ impl FromWorld for PreparedPackedQuadGpuCull {
             config_buffer: None,
             output_indirect_buffer: None,
             count_buffer: None,
+            source_signature: 0,
             metadata_signature: 0,
             config_signature: 0,
             dispatched: AtomicBool::new(false),
+            dispatched_signature: AtomicU64::new(0),
+            last_visible_commands: AtomicUsize::new(0),
+            last_visible_quads: AtomicUsize::new(0),
         }
     }
 }
@@ -538,6 +573,8 @@ pub struct PackedQuadPipelineStats {
     pub generated_cull_metadata_uploaded: bool,
     /// Whether GPU-generated cull config was uploaded this frame.
     pub generated_cull_config_uploaded: bool,
+    /// Whether GPU-generated cull dispatch reused the previous culled output this frame.
+    pub generated_cull_dispatch_skipped: bool,
 }
 
 struct PackedQuadMetricsBridge {
@@ -614,6 +651,7 @@ struct PackedQuadMetricsBridge {
     generated_prepare_skipped: AtomicUsize,
     generated_cull_metadata_uploaded: AtomicUsize,
     generated_cull_config_uploaded: AtomicUsize,
+    generated_cull_dispatch_skipped: AtomicUsize,
 }
 
 static METRICS_BRIDGE: PackedQuadMetricsBridge = PackedQuadMetricsBridge {
@@ -690,6 +728,7 @@ static METRICS_BRIDGE: PackedQuadMetricsBridge = PackedQuadMetricsBridge {
     generated_prepare_skipped: AtomicUsize::new(0),
     generated_cull_metadata_uploaded: AtomicUsize::new(0),
     generated_cull_config_uploaded: AtomicUsize::new(0),
+    generated_cull_dispatch_skipped: AtomicUsize::new(0),
 };
 
 static CONFIRMED_PACKED_BATCH_GENERATIONS: LazyLock<Mutex<HashMap<u64, u64>>> =
@@ -2037,6 +2076,9 @@ pub fn prepare_packed_quad_buffers(
         gpu_cull.compact_enabled = gpu_cull_compact_enabled;
         gpu_cull.count_supported = has_indirect_count;
         gpu_cull.command_count = command_count;
+        gpu_cull.source_signature = 0;
+        gpu_cull.metadata_signature = 0;
+        gpu_cull.config_signature = 0;
         gpu_cull.reset_dispatched();
     } else {
         gpu_cull.disable();
@@ -2318,6 +2360,12 @@ pub fn record_packed_gpu_generation_cull_uploads(metadata_uploaded: bool, config
     METRICS_BRIDGE
         .generated_cull_config_uploaded
         .store(usize::from(config_uploaded), Ordering::Relaxed);
+}
+
+pub fn record_packed_gpu_generation_cull_dispatch_reuse(skipped: bool) {
+    METRICS_BRIDGE
+        .generated_cull_dispatch_skipped
+        .store(usize::from(skipped), Ordering::Relaxed);
 }
 
 pub fn record_packed_gpu_generation_prepare(
@@ -2671,6 +2719,10 @@ fn write_packed_quad_metrics(stats: &mut PackedQuadPipelineStats) {
         != 0;
     stats.generated_cull_config_uploaded = METRICS_BRIDGE
         .generated_cull_config_uploaded
+        .load(Ordering::Relaxed)
+        != 0;
+    stats.generated_cull_dispatch_skipped = METRICS_BRIDGE
+        .generated_cull_dispatch_skipped
         .load(Ordering::Relaxed)
         != 0;
 

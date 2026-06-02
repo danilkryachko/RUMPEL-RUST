@@ -48,6 +48,7 @@ const PACKED_GPU_TIMESTAMP_QUERY_COUNT: u32 = 2;
 const PACKED_GPU_TIMESTAMP_BUFFER_SIZE: u64 = 16;
 const PACKED_VIEW_BUFFER_SIZE: u64 = std::mem::size_of::<PackedQuadViewBuffer>() as u64;
 const PACKED_GPU_GENERATED_CULL_SIGNATURE_OFFSET: u64 = 14_695_981_039_346_656_037;
+const PACKED_GPU_CULL_DISPATCH_SIGNATURE_OFFSET: u64 = 7_686_136_129_550_973_701;
 const PACKED_GPU_GENERATED_CULL_SIGNATURE_PRIME: u64 = 1_099_511_628_211;
 
 static RENDERER_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -119,6 +120,7 @@ pub struct PreparedPackedGpuGeneratedDraw {
     pub command_count: usize,
     pub arena_generation: u64,
     pub cull_metadata_signature: u64,
+    pub cull_source_signature: u64,
     dispatched: AtomicBool,
 }
 
@@ -148,6 +150,7 @@ impl PreparedPackedGpuGeneratedDraw {
         self.command_count = 0;
         self.arena_generation = 0;
         self.cull_metadata_signature = 0;
+        self.cull_source_signature = 0;
         self.dispatched.store(false, Ordering::Release);
     }
 
@@ -760,6 +763,7 @@ fn prepare_packed_gpu_generated_draw(
             &prepared.regions,
             prepared.indirect_buffer.as_ref(),
             Some(prepared.cull_metadata_signature),
+            Some(prepared.cull_source_signature),
         );
         return;
     }
@@ -872,6 +876,7 @@ fn prepare_packed_gpu_generated_draw(
             &planned_regions,
             prepared.indirect_buffer.as_ref(),
             Some(prepared.cull_metadata_signature),
+            Some(prepared.cull_source_signature),
         );
         return;
     }
@@ -1035,6 +1040,8 @@ fn prepare_packed_gpu_generated_draw(
     prepared.command_count = sorted_batches.len();
     prepared.arena_generation = arena.generation;
     prepared.cull_metadata_signature = generated_regions_cull_metadata_signature(&prepared.regions);
+    prepared.cull_source_signature =
+        generated_regions_cull_source_signature(&prepared.regions, prepared.arena_generation);
     prepared.generation_bind_group = Some(generation_bind_group);
     prepared.render_bind_group = Some(render_bind_group);
     prepared.indirect_buffer = Some(indirect_buffer.clone());
@@ -1056,6 +1063,7 @@ fn prepare_packed_gpu_generated_draw(
         &prepared.regions,
         prepared.indirect_buffer.as_ref(),
         Some(prepared.cull_metadata_signature),
+        Some(prepared.cull_source_signature),
     );
 }
 
@@ -1092,6 +1100,25 @@ fn generated_regions_cull_metadata_signature(regions: &[PreparedPackedGpuGenerat
     signature
 }
 
+fn generated_regions_cull_source_signature(
+    regions: &[PreparedPackedGpuGeneratedRegion],
+    arena_generation: u64,
+) -> u64 {
+    let mut signature = PACKED_GPU_GENERATED_CULL_SIGNATURE_OFFSET;
+    signature = update_generated_cull_signature(signature, arena_generation);
+    signature = update_generated_cull_signature(signature, regions.len() as u64);
+    for (index, region) in regions.iter().enumerate() {
+        signature = update_generated_cull_signature(signature, index as u64);
+        signature = update_generated_cull_signature(signature, region.key);
+        signature = update_generated_cull_signature(signature, region.generation);
+        signature = update_generated_cull_signature(signature, region.max_output_quads as u64);
+        signature = update_generated_cull_signature(signature, region.arena_offset_quads as u64);
+        signature = update_generated_cull_signature(signature, region.arena_capacity_quads as u64);
+        signature = update_generated_cull_signature(signature, region.draw_command_index as u64);
+    }
+    signature
+}
+
 fn generated_cull_config_signature(config: crate::packed_quad_buffer::PackedQuadCullConfig) -> u64 {
     let mut signature = PACKED_GPU_GENERATED_CULL_SIGNATURE_OFFSET;
     signature = update_generated_cull_signature(signature, u64::from(config.command_count));
@@ -1107,6 +1134,7 @@ fn prepare_generated_gpu_cull(
     regions: &[PreparedPackedGpuGeneratedRegion],
     source_indirect_buffer: Option<&Buffer>,
     metadata_signature: Option<u64>,
+    source_signature: Option<u64>,
 ) {
     let command_count = regions.len();
     let generated_cull_enabled = env_flag_default(PACKED_GPU_CULL_ENV, true)
@@ -1115,6 +1143,7 @@ fn prepare_generated_gpu_cull(
     if !generated_cull_enabled {
         gpu_cull.disable();
         crate::packed_quad_pipeline::record_packed_gpu_generation_cull_uploads(false, false);
+        crate::packed_quad_pipeline::record_packed_gpu_generation_cull_dispatch_reuse(false);
         crate::packed_quad_pipeline::record_packed_quad_gpu_cull_prepare(false, 0, false, false);
         return;
     }
@@ -1170,7 +1199,8 @@ fn prepare_generated_gpu_cull(
             mapped_at_creation: false,
         }));
     }
-    if gpu_cull.count_buffer.is_none() {
+    let count_buffer_recreated = gpu_cull.count_buffer.is_none();
+    if count_buffer_recreated {
         gpu_cull.count_buffer = Some(render_device.create_buffer(&BufferDescriptor {
             label: Some("packed_gpu_generated_cull_count_buffer"),
             size: std::mem::size_of::<u32>() as u64,
@@ -1187,8 +1217,17 @@ fn prepare_generated_gpu_cull(
     };
     let metadata_signature =
         metadata_signature.unwrap_or_else(|| generated_regions_cull_metadata_signature(regions));
+    let source_signature =
+        source_signature.unwrap_or_else(|| generated_regions_cull_source_signature(regions, 0));
     let config_signature = generated_cull_config_signature(cull_config);
 
+    let was_enabled = gpu_cull.enabled;
+    let previous_command_count = gpu_cull.command_count;
+    let previous_compact_enabled = gpu_cull.compact_enabled;
+    let previous_count_supported = gpu_cull.count_supported;
+    let previous_source_signature = gpu_cull.source_signature;
+    let previous_metadata_signature = gpu_cull.metadata_signature;
+    let previous_config_signature = gpu_cull.config_signature;
     let metadata_uploaded =
         metadata_buffer_recreated || gpu_cull.metadata_signature != metadata_signature;
     if metadata_uploaded && let Some(metadata_buffer) = &gpu_cull.metadata_buffer {
@@ -1208,9 +1247,22 @@ fn prepare_generated_gpu_cull(
     gpu_cull.compact_enabled = compact_enabled;
     gpu_cull.count_supported = has_indirect_count;
     gpu_cull.command_count = command_count;
+    gpu_cull.source_signature = source_signature;
     gpu_cull.metadata_signature = metadata_signature;
     gpu_cull.config_signature = config_signature;
-    gpu_cull.reset_dispatched();
+    if !was_enabled
+        || previous_command_count != command_count
+        || previous_compact_enabled != compact_enabled
+        || previous_count_supported != has_indirect_count
+        || previous_source_signature != source_signature
+        || previous_metadata_signature != metadata_signature
+        || previous_config_signature != config_signature
+        || metadata_buffer_recreated
+        || config_buffer_recreated
+        || count_buffer_recreated
+    {
+        gpu_cull.reset_dispatched();
+    }
     crate::packed_quad_pipeline::record_packed_gpu_generation_cull_uploads(
         metadata_uploaded,
         config_uploaded,
@@ -1459,6 +1511,30 @@ impl render_graph::Node for PackedQuadCullNode {
             return Ok(());
         };
 
+        let dispatch_signature = packed_gpu_cull_dispatch_signature(
+            &cull_source,
+            command_count,
+            gpu_cull,
+            view_position,
+            clip_from_world,
+        );
+        if cull_source.is_generated() && gpu_cull.was_dispatched_for(dispatch_signature) {
+            let visible_commands = gpu_cull.last_visible_commands();
+            let visible_quads = gpu_cull.last_visible_quads();
+            crate::packed_quad_pipeline::record_packed_gpu_generation_cull_dispatch_reuse(true);
+            crate::packed_quad_pipeline::record_packed_gpu_generation_visible_draws(
+                visible_commands,
+                visible_quads,
+            );
+            let node_us = node_start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            crate::packed_quad_pipeline::record_packed_quad_gpu_cull_node(
+                node_us,
+                visible_commands,
+                visible_quads,
+            );
+            return Ok(());
+        }
+
         let estimate = estimate_visible_indirect_commands(
             cull_source.metadata(),
             command_count,
@@ -1500,13 +1576,19 @@ impl render_graph::Node for PackedQuadCullNode {
             pass.dispatch_workgroups(workgroups.min(u32::MAX as usize) as u32, 1, 1);
         }
 
-        gpu_cull.mark_dispatched();
+        gpu_cull.mark_dispatched(
+            dispatch_signature,
+            estimate.visible_commands,
+            estimate.visible_quads,
+        );
         if cull_source.is_generated() {
+            crate::packed_quad_pipeline::record_packed_gpu_generation_cull_dispatch_reuse(false);
             crate::packed_quad_pipeline::record_packed_gpu_generation_visible_draws(
                 estimate.visible_commands,
                 estimate.visible_quads,
             );
         } else {
+            crate::packed_quad_pipeline::record_packed_gpu_generation_cull_dispatch_reuse(false);
             crate::packed_quad_pipeline::record_packed_quad_visible_draws(
                 estimate.visible_batches,
                 estimate.visible_quads,
@@ -1601,6 +1683,63 @@ impl<'a> PackedQuadGpuCullSource<'a> {
     fn is_generated(&self) -> bool {
         matches!(self, Self::Generated { .. })
     }
+}
+
+#[derive(Clone, Copy)]
+struct PackedGpuCullDispatchSignatureInput {
+    is_generated: bool,
+    face_range_cull_enabled: bool,
+    command_count: usize,
+    source_signature: u64,
+    metadata_signature: u64,
+    config_signature: u64,
+    compact_enabled: bool,
+    count_supported: bool,
+    view_position: Vec3,
+    clip_from_world: Mat4,
+}
+
+fn packed_gpu_cull_dispatch_signature(
+    cull_source: &PackedQuadGpuCullSource<'_>,
+    command_count: usize,
+    gpu_cull: &crate::packed_quad_pipeline::PreparedPackedQuadGpuCull,
+    view_position: Vec3,
+    clip_from_world: Mat4,
+) -> u64 {
+    packed_gpu_cull_dispatch_signature_from_input(PackedGpuCullDispatchSignatureInput {
+        is_generated: cull_source.is_generated(),
+        face_range_cull_enabled: cull_source.face_range_cull_enabled(),
+        command_count,
+        source_signature: gpu_cull.source_signature,
+        metadata_signature: gpu_cull.metadata_signature,
+        config_signature: gpu_cull.config_signature,
+        compact_enabled: gpu_cull.compact_enabled,
+        count_supported: gpu_cull.count_supported,
+        view_position,
+        clip_from_world,
+    })
+}
+
+fn packed_gpu_cull_dispatch_signature_from_input(
+    input: PackedGpuCullDispatchSignatureInput,
+) -> u64 {
+    let mut signature = PACKED_GPU_CULL_DISPATCH_SIGNATURE_OFFSET;
+    signature = update_generated_cull_signature(signature, u64::from(input.is_generated));
+    signature = update_generated_cull_signature(signature, input.command_count as u64);
+    signature = update_generated_cull_signature(signature, input.source_signature);
+    signature = update_generated_cull_signature(signature, input.metadata_signature);
+    signature = update_generated_cull_signature(signature, input.config_signature);
+    signature = update_generated_cull_signature(signature, u64::from(input.compact_enabled));
+    signature = update_generated_cull_signature(signature, u64::from(input.count_supported));
+    signature =
+        update_generated_cull_signature(signature, u64::from(input.face_range_cull_enabled));
+    for value in input.view_position.to_array() {
+        signature = update_generated_cull_signature(signature, u64::from(value.to_bits()));
+    }
+    for value in input.clip_from_world.to_cols_array() {
+        signature = update_generated_cull_signature(signature, u64::from(value.to_bits()));
+    }
+    signature
 }
 
 /// A custom Render Graph node that executes the PackedVoxelQuad vertex pulling render pass.
@@ -2370,6 +2509,84 @@ mod tests {
         assert_ne!(
             generated_cull_config_signature(base_config),
             generated_cull_config_signature(compact_config)
+        );
+    }
+
+    #[test]
+    fn packed_gpu_generation_cull_source_signature_tracks_indirect_source_state() {
+        fn test_region(
+            generation: u64,
+            arena_offset_quads: usize,
+        ) -> PreparedPackedGpuGeneratedRegion {
+            PreparedPackedGpuGeneratedRegion {
+                key: 42,
+                generation,
+                column_count: 16,
+                max_output_quads: 1234,
+                arena_offset_quads,
+                arena_capacity_quads: 4096,
+                draw_command_index: 3,
+                bounds_min: Vec3::new(-32.0, 0.0, 64.0),
+                bounds_max: Vec3::new(96.0, 128.0, 192.0),
+            }
+        }
+
+        let base = generated_regions_cull_source_signature(&[test_region(7, 2048)], 11);
+        assert_eq!(
+            base,
+            generated_regions_cull_source_signature(&[test_region(7, 2048)], 11)
+        );
+        assert_ne!(
+            base,
+            generated_regions_cull_source_signature(&[test_region(8, 2048)], 11)
+        );
+        assert_ne!(
+            base,
+            generated_regions_cull_source_signature(&[test_region(7, 4096)], 11)
+        );
+        assert_ne!(
+            base,
+            generated_regions_cull_source_signature(&[test_region(7, 2048)], 12)
+        );
+    }
+
+    #[test]
+    fn packed_gpu_cull_dispatch_signature_tracks_view_and_source_state() {
+        let input = PackedGpuCullDispatchSignatureInput {
+            is_generated: true,
+            face_range_cull_enabled: false,
+            command_count: 9,
+            source_signature: 11,
+            metadata_signature: 22,
+            config_signature: 33,
+            compact_enabled: false,
+            count_supported: false,
+            view_position: Vec3::new(1.0, 2.0, 3.0),
+            clip_from_world: Mat4::IDENTITY,
+        };
+        let base = packed_gpu_cull_dispatch_signature_from_input(input);
+
+        assert_eq!(base, packed_gpu_cull_dispatch_signature_from_input(input));
+        assert_ne!(
+            base,
+            packed_gpu_cull_dispatch_signature_from_input(PackedGpuCullDispatchSignatureInput {
+                source_signature: 12,
+                ..input
+            })
+        );
+        assert_ne!(
+            base,
+            packed_gpu_cull_dispatch_signature_from_input(PackedGpuCullDispatchSignatureInput {
+                view_position: Vec3::new(1.0, 2.0, 4.0),
+                ..input
+            })
+        );
+        assert_ne!(
+            base,
+            packed_gpu_cull_dispatch_signature_from_input(PackedGpuCullDispatchSignatureInput {
+                clip_from_world: Mat4::from_scale(Vec3::splat(2.0)),
+                ..input
+            })
         );
     }
 
