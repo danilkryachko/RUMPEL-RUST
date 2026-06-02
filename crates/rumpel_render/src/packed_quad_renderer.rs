@@ -691,6 +691,7 @@ fn prepare_packed_gpu_generated_draw(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     packed_pipeline: Option<Res<PackedQuadPipeline>>,
+    cull_pipeline: Option<Res<PackedQuadCullPipeline>>,
     generation_pipeline: Option<Res<PackedQuadGenerationPipeline>>,
     atlas: Res<crate::packed_quad_pipeline::PackedQuadBlockAtlas>,
     gpu_images: Res<RenderAssets<GpuImage>>,
@@ -760,10 +761,15 @@ fn prepare_packed_gpu_generated_draw(
             &render_device,
             &render_queue,
             &mut gpu_cull,
-            &prepared.regions,
-            prepared.indirect_buffer.as_ref(),
-            Some(prepared.cull_metadata_signature),
-            Some(prepared.cull_source_signature),
+            GeneratedGpuCullPrepareInput {
+                regions: &prepared.regions,
+                source_indirect_buffer: prepared.indirect_buffer.as_ref(),
+                cull_bind_group_layout: cull_pipeline
+                    .as_deref()
+                    .map(|pipeline| &pipeline.bind_group_layout),
+                metadata_signature: Some(prepared.cull_metadata_signature),
+                source_signature: Some(prepared.cull_source_signature),
+            },
         );
         return;
     }
@@ -873,10 +879,15 @@ fn prepare_packed_gpu_generated_draw(
             &render_device,
             &render_queue,
             &mut gpu_cull,
-            &planned_regions,
-            prepared.indirect_buffer.as_ref(),
-            Some(prepared.cull_metadata_signature),
-            Some(prepared.cull_source_signature),
+            GeneratedGpuCullPrepareInput {
+                regions: &planned_regions,
+                source_indirect_buffer: prepared.indirect_buffer.as_ref(),
+                cull_bind_group_layout: cull_pipeline
+                    .as_deref()
+                    .map(|pipeline| &pipeline.bind_group_layout),
+                metadata_signature: Some(prepared.cull_metadata_signature),
+                source_signature: Some(prepared.cull_source_signature),
+            },
         );
         return;
     }
@@ -1060,10 +1071,15 @@ fn prepare_packed_gpu_generated_draw(
         &render_device,
         &render_queue,
         &mut gpu_cull,
-        &prepared.regions,
-        prepared.indirect_buffer.as_ref(),
-        Some(prepared.cull_metadata_signature),
-        Some(prepared.cull_source_signature),
+        GeneratedGpuCullPrepareInput {
+            regions: &prepared.regions,
+            source_indirect_buffer: prepared.indirect_buffer.as_ref(),
+            cull_bind_group_layout: cull_pipeline
+                .as_deref()
+                .map(|pipeline| &pipeline.bind_group_layout),
+            metadata_signature: Some(prepared.cull_metadata_signature),
+            source_signature: Some(prepared.cull_source_signature),
+        },
     );
 }
 
@@ -1127,19 +1143,24 @@ fn generated_cull_config_signature(config: crate::packed_quad_buffer::PackedQuad
     signature
 }
 
+struct GeneratedGpuCullPrepareInput<'a> {
+    regions: &'a [PreparedPackedGpuGeneratedRegion],
+    source_indirect_buffer: Option<&'a Buffer>,
+    cull_bind_group_layout: Option<&'a BindGroupLayout>,
+    metadata_signature: Option<u64>,
+    source_signature: Option<u64>,
+}
+
 fn prepare_generated_gpu_cull(
     render_device: &RenderDevice,
     render_queue: &RenderQueue,
     gpu_cull: &mut crate::packed_quad_pipeline::PreparedPackedQuadGpuCull,
-    regions: &[PreparedPackedGpuGeneratedRegion],
-    source_indirect_buffer: Option<&Buffer>,
-    metadata_signature: Option<u64>,
-    source_signature: Option<u64>,
+    input: GeneratedGpuCullPrepareInput<'_>,
 ) {
-    let command_count = regions.len();
+    let command_count = input.regions.len();
     let generated_cull_enabled = env_flag_default(PACKED_GPU_CULL_ENV, true)
         && command_count > 0
-        && source_indirect_buffer.is_some();
+        && input.source_indirect_buffer.is_some();
     if !generated_cull_enabled {
         gpu_cull.disable();
         crate::packed_quad_pipeline::record_packed_gpu_generation_cull_uploads(false, false);
@@ -1215,10 +1236,12 @@ fn prepare_generated_gpu_cull(
         compact_output: u32::from(compact_enabled),
         _padding: 0,
     };
-    let metadata_signature =
-        metadata_signature.unwrap_or_else(|| generated_regions_cull_metadata_signature(regions));
-    let source_signature =
-        source_signature.unwrap_or_else(|| generated_regions_cull_source_signature(regions, 0));
+    let metadata_signature = input
+        .metadata_signature
+        .unwrap_or_else(|| generated_regions_cull_metadata_signature(input.regions));
+    let source_signature = input
+        .source_signature
+        .unwrap_or_else(|| generated_regions_cull_source_signature(input.regions, 0));
     let config_signature = generated_cull_config_signature(cull_config);
 
     let was_enabled = gpu_cull.enabled;
@@ -1231,7 +1254,8 @@ fn prepare_generated_gpu_cull(
     let metadata_uploaded =
         metadata_buffer_recreated || gpu_cull.metadata_signature != metadata_signature;
     if metadata_uploaded && let Some(metadata_buffer) = &gpu_cull.metadata_buffer {
-        let cull_metadata = regions
+        let cull_metadata = input
+            .regions
             .iter()
             .map(generated_region_cull_metadata)
             .map(crate::packed_quad_pipeline::packed_gpu_cull_metadata_from_command)
@@ -1241,6 +1265,43 @@ fn prepare_generated_gpu_cull(
     let config_uploaded = config_buffer_recreated || gpu_cull.config_signature != config_signature;
     if config_uploaded && let Some(config_buffer) = &gpu_cull.config_buffer {
         render_queue.write_buffer(config_buffer, 0, bytemuck::bytes_of(&cull_config));
+    }
+
+    let bind_group_recreated = gpu_cull.bind_group.is_none()
+        || metadata_buffer_recreated
+        || config_buffer_recreated
+        || count_buffer_recreated
+        || previous_source_signature != source_signature;
+    if bind_group_recreated {
+        if let (
+            Some(cull_bind_group_layout),
+            Some(source_indirect_buffer),
+            Some(metadata_buffer),
+            Some(output_indirect_buffer),
+            Some(config_buffer),
+            Some(count_buffer),
+        ) = (
+            input.cull_bind_group_layout,
+            input.source_indirect_buffer,
+            gpu_cull.metadata_buffer.as_ref(),
+            gpu_cull.output_indirect_buffer.as_ref(),
+            gpu_cull.config_buffer.as_ref(),
+            gpu_cull.count_buffer.as_ref(),
+        ) {
+            gpu_cull.bind_group = Some(render_device.create_bind_group(
+                Some("packed_gpu_generated_cull_bind_group"),
+                cull_bind_group_layout,
+                &BindGroupEntries::sequential((
+                    source_indirect_buffer.as_entire_buffer_binding(),
+                    metadata_buffer.as_entire_buffer_binding(),
+                    output_indirect_buffer.as_entire_buffer_binding(),
+                    config_buffer.as_entire_buffer_binding(),
+                    count_buffer.as_entire_buffer_binding(),
+                )),
+            ));
+        } else {
+            gpu_cull.bind_group = None;
+        }
     }
 
     gpu_cull.enabled = true;
@@ -1537,17 +1598,23 @@ impl render_graph::Node for PackedQuadCullNode {
 
         let estimate = cull_source.estimate_visible(command_count, view_position, clip_from_world);
 
-        let bind_group = render_context.render_device().create_bind_group(
-            Some("packed_quad_gpu_cull_bind_group"),
-            &pipeline.bind_group_layout,
-            &BindGroupEntries::sequential((
-                cull_source.indirect_buffer().as_entire_buffer_binding(),
-                metadata_buffer.as_entire_buffer_binding(),
-                output_indirect_buffer.as_entire_buffer_binding(),
-                config_buffer.as_entire_buffer_binding(),
-                count_buffer.as_entire_buffer_binding(),
-            )),
-        );
+        let local_bind_group;
+        let bind_group = if let Some(bind_group) = gpu_cull.bind_group.as_ref() {
+            bind_group
+        } else {
+            local_bind_group = render_context.render_device().create_bind_group(
+                Some("packed_quad_gpu_cull_bind_group"),
+                &pipeline.bind_group_layout,
+                &BindGroupEntries::sequential((
+                    cull_source.indirect_buffer().as_entire_buffer_binding(),
+                    metadata_buffer.as_entire_buffer_binding(),
+                    output_indirect_buffer.as_entire_buffer_binding(),
+                    config_buffer.as_entire_buffer_binding(),
+                    count_buffer.as_entire_buffer_binding(),
+                )),
+            );
+            &local_bind_group
+        };
 
         if gpu_cull.compact_enabled {
             render_context
@@ -1565,7 +1632,7 @@ impl render_graph::Node for PackedQuadCullNode {
                     });
             pass.set_pipeline(compute_pipeline);
             pass.set_bind_group(0, &view_uniform.bind_group, &[]);
-            pass.set_bind_group(1, &bind_group, &[]);
+            pass.set_bind_group(1, bind_group, &[]);
             let workgroups = command_count.div_ceil(PACKED_GPU_CULL_WORKGROUP_SIZE);
             pass.dispatch_workgroups(workgroups.min(u32::MAX as usize) as u32, 1, 1);
         }

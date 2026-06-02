@@ -301,6 +301,7 @@ pub struct PreparedPackedQuadGpuCull {
     pub config_buffer: Option<Buffer>,
     pub output_indirect_buffer: Option<Buffer>,
     pub count_buffer: Option<Buffer>,
+    pub bind_group: Option<BindGroup>,
     pub source_signature: u64,
     pub metadata_signature: u64,
     pub config_signature: u64,
@@ -354,6 +355,7 @@ impl PreparedPackedQuadGpuCull {
         self.compact_enabled = false;
         self.count_supported = false;
         self.command_count = 0;
+        self.bind_group = None;
         self.source_signature = 0;
         self.metadata_signature = 0;
         self.config_signature = 0;
@@ -373,6 +375,7 @@ impl FromWorld for PreparedPackedQuadGpuCull {
             config_buffer: None,
             output_indirect_buffer: None,
             count_buffer: None,
+            bind_group: None,
             source_signature: 0,
             metadata_signature: 0,
             config_signature: 0,
@@ -2076,6 +2079,7 @@ pub fn prepare_packed_quad_buffers(
         gpu_cull.compact_enabled = gpu_cull_compact_enabled;
         gpu_cull.count_supported = has_indirect_count;
         gpu_cull.command_count = command_count;
+        gpu_cull.bind_group = None;
         gpu_cull.source_signature = 0;
         gpu_cull.metadata_signature = 0;
         gpu_cull.config_signature = 0;
