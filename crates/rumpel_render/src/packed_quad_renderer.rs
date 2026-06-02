@@ -1535,13 +1535,7 @@ impl render_graph::Node for PackedQuadCullNode {
             return Ok(());
         }
 
-        let estimate = estimate_visible_indirect_commands(
-            cull_source.metadata(),
-            command_count,
-            view_position,
-            clip_from_world,
-            cull_source.face_range_cull_enabled(),
-        );
+        let estimate = cull_source.estimate_visible(command_count, view_position, clip_from_world);
 
         let bind_group = render_context.render_device().create_bind_group(
             Some("packed_quad_gpu_cull_bind_group"),
@@ -1608,7 +1602,7 @@ impl render_graph::Node for PackedQuadCullNode {
 enum PackedQuadGpuCullSource<'a> {
     Generated {
         indirect_buffer: &'a Buffer,
-        metadata: Vec<crate::packed_quad_pipeline::PackedQuadIndirectCommandMetadata>,
+        regions: &'a [PreparedPackedGpuGeneratedRegion],
         command_count: usize,
     },
     CpuPrepared {
@@ -1628,11 +1622,7 @@ impl<'a> PackedQuadGpuCullSource<'a> {
         {
             return Some(Self::Generated {
                 indirect_buffer,
-                metadata: generated
-                    .regions
-                    .iter()
-                    .map(generated_region_cull_metadata)
-                    .collect(),
+                regions: &generated.regions,
                 command_count: generated.command_count,
             });
         }
@@ -1660,10 +1650,33 @@ impl<'a> PackedQuadGpuCullSource<'a> {
         }
     }
 
-    fn metadata(&self) -> &[crate::packed_quad_pipeline::PackedQuadIndirectCommandMetadata] {
+    fn estimate_visible(
+        &self,
+        command_count: usize,
+        view_position: Vec3,
+        clip_from_world: Mat4,
+    ) -> IndirectVisibilityEstimate {
         match self {
-            Self::Generated { metadata, .. } => metadata,
-            Self::CpuPrepared { metadata, .. } => metadata,
+            Self::Generated { regions, .. } => {
+                let metadata = regions
+                    .iter()
+                    .map(generated_region_cull_metadata)
+                    .collect::<Vec<_>>();
+                estimate_visible_indirect_commands(
+                    &metadata,
+                    command_count,
+                    view_position,
+                    clip_from_world,
+                    false,
+                )
+            }
+            Self::CpuPrepared { metadata, .. } => estimate_visible_indirect_commands(
+                metadata,
+                command_count,
+                view_position,
+                clip_from_world,
+                self.face_range_cull_enabled(),
+            ),
         }
     }
 
