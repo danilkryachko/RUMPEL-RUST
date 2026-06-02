@@ -532,6 +532,12 @@ pub struct PackedQuadPipelineStats {
     pub generated_cache_invalidated: usize,
     /// Generated cache entries evicted because they left the loaded region window this frame.
     pub generated_cache_evicted: usize,
+    /// Whether GPU-generated render prepare reused already prepared region resources this frame.
+    pub generated_prepare_skipped: bool,
+    /// Whether GPU-generated cull metadata was uploaded this frame.
+    pub generated_cull_metadata_uploaded: bool,
+    /// Whether GPU-generated cull config was uploaded this frame.
+    pub generated_cull_config_uploaded: bool,
 }
 
 struct PackedQuadMetricsBridge {
@@ -605,6 +611,9 @@ struct PackedQuadMetricsBridge {
     generated_cache_misses: AtomicUsize,
     generated_cache_invalidated: AtomicUsize,
     generated_cache_evicted: AtomicUsize,
+    generated_prepare_skipped: AtomicUsize,
+    generated_cull_metadata_uploaded: AtomicUsize,
+    generated_cull_config_uploaded: AtomicUsize,
 }
 
 static METRICS_BRIDGE: PackedQuadMetricsBridge = PackedQuadMetricsBridge {
@@ -678,6 +687,9 @@ static METRICS_BRIDGE: PackedQuadMetricsBridge = PackedQuadMetricsBridge {
     generated_cache_misses: AtomicUsize::new(0),
     generated_cache_invalidated: AtomicUsize::new(0),
     generated_cache_evicted: AtomicUsize::new(0),
+    generated_prepare_skipped: AtomicUsize::new(0),
+    generated_cull_metadata_uploaded: AtomicUsize::new(0),
+    generated_cull_config_uploaded: AtomicUsize::new(0),
 };
 
 static CONFIRMED_PACKED_BATCH_GENERATIONS: LazyLock<Mutex<HashMap<u64, u64>>> =
@@ -2293,6 +2305,21 @@ pub fn record_packed_gpu_generation_cache_lifecycle(
         .store(evicted, Ordering::Relaxed);
 }
 
+pub fn record_packed_gpu_generation_prepare_reuse(skipped: bool) {
+    METRICS_BRIDGE
+        .generated_prepare_skipped
+        .store(usize::from(skipped), Ordering::Relaxed);
+}
+
+pub fn record_packed_gpu_generation_cull_uploads(metadata_uploaded: bool, config_uploaded: bool) {
+    METRICS_BRIDGE
+        .generated_cull_metadata_uploaded
+        .store(usize::from(metadata_uploaded), Ordering::Relaxed);
+    METRICS_BRIDGE
+        .generated_cull_config_uploaded
+        .store(usize::from(config_uploaded), Ordering::Relaxed);
+}
+
 pub fn record_packed_gpu_generation_prepare(
     capacity_quads: usize,
     slot_quads: usize,
@@ -2634,6 +2661,18 @@ fn write_packed_quad_metrics(stats: &mut PackedQuadPipelineStats) {
     stats.generated_cache_evicted = METRICS_BRIDGE
         .generated_cache_evicted
         .load(Ordering::Relaxed);
+    stats.generated_prepare_skipped = METRICS_BRIDGE
+        .generated_prepare_skipped
+        .load(Ordering::Relaxed)
+        != 0;
+    stats.generated_cull_metadata_uploaded = METRICS_BRIDGE
+        .generated_cull_metadata_uploaded
+        .load(Ordering::Relaxed)
+        != 0;
+    stats.generated_cull_config_uploaded = METRICS_BRIDGE
+        .generated_cull_config_uploaded
+        .load(Ordering::Relaxed)
+        != 0;
 
     if stats.draw_mode == PACKED_DRAW_MODE_MATERIAL {
         stats.batches = stats.material_entities;

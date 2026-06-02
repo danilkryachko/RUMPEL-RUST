@@ -744,6 +744,7 @@ fn prepare_packed_gpu_generated_draw(
         && prepared.render_bind_group.is_some()
         && prepared.indirect_buffer.is_some()
     {
+        crate::packed_quad_pipeline::record_packed_gpu_generation_prepare_reuse(true);
         crate::packed_quad_pipeline::record_packed_gpu_generation_prepare(
             arena.capacity_quads,
             arena.next_free_quads,
@@ -855,6 +856,7 @@ fn prepare_packed_gpu_generated_draw(
         && prepared.render_bind_group.is_some()
         && prepared.indirect_buffer.is_some()
     {
+        crate::packed_quad_pipeline::record_packed_gpu_generation_prepare_reuse(false);
         crate::packed_quad_pipeline::record_packed_gpu_generation_prepare(
             arena.capacity_quads,
             next_free_quads,
@@ -1038,6 +1040,7 @@ fn prepare_packed_gpu_generated_draw(
     prepared.indirect_buffer = Some(indirect_buffer.clone());
     prepared.mark_pending();
 
+    crate::packed_quad_pipeline::record_packed_gpu_generation_prepare_reuse(false);
     crate::packed_quad_pipeline::record_packed_gpu_generation_prepare(
         arena.capacity_quads,
         next_free_quads,
@@ -1111,6 +1114,7 @@ fn prepare_generated_gpu_cull(
         && source_indirect_buffer.is_some();
     if !generated_cull_enabled {
         gpu_cull.disable();
+        crate::packed_quad_pipeline::record_packed_gpu_generation_cull_uploads(false, false);
         crate::packed_quad_pipeline::record_packed_quad_gpu_cull_prepare(false, 0, false, false);
         return;
     }
@@ -1185,9 +1189,9 @@ fn prepare_generated_gpu_cull(
         metadata_signature.unwrap_or_else(|| generated_regions_cull_metadata_signature(regions));
     let config_signature = generated_cull_config_signature(cull_config);
 
-    if (metadata_buffer_recreated || gpu_cull.metadata_signature != metadata_signature)
-        && let Some(metadata_buffer) = &gpu_cull.metadata_buffer
-    {
+    let metadata_uploaded =
+        metadata_buffer_recreated || gpu_cull.metadata_signature != metadata_signature;
+    if metadata_uploaded && let Some(metadata_buffer) = &gpu_cull.metadata_buffer {
         let cull_metadata = regions
             .iter()
             .map(generated_region_cull_metadata)
@@ -1195,9 +1199,8 @@ fn prepare_generated_gpu_cull(
             .collect::<Vec<_>>();
         render_queue.write_buffer(metadata_buffer, 0, bytemuck::cast_slice(&cull_metadata));
     }
-    if (config_buffer_recreated || gpu_cull.config_signature != config_signature)
-        && let Some(config_buffer) = &gpu_cull.config_buffer
-    {
+    let config_uploaded = config_buffer_recreated || gpu_cull.config_signature != config_signature;
+    if config_uploaded && let Some(config_buffer) = &gpu_cull.config_buffer {
         render_queue.write_buffer(config_buffer, 0, bytemuck::bytes_of(&cull_config));
     }
 
@@ -1208,6 +1211,10 @@ fn prepare_generated_gpu_cull(
     gpu_cull.metadata_signature = metadata_signature;
     gpu_cull.config_signature = config_signature;
     gpu_cull.reset_dispatched();
+    crate::packed_quad_pipeline::record_packed_gpu_generation_cull_uploads(
+        metadata_uploaded,
+        config_uploaded,
+    );
     crate::packed_quad_pipeline::record_packed_quad_gpu_cull_prepare(
         true,
         command_count,

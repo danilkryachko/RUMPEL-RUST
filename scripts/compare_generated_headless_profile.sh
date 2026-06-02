@@ -165,11 +165,11 @@ report="$compare_dir/report.txt"
     printf 'view_radius=%s\n' "$view_radius"
     printf 'generated_region_radius=%s\n' "$region_radius"
     printf '\n'
-    printf 'variant ready_status avg_raw_fps worst_frame_ms frames_ge_25ms draw_mode generated_regions_loaded generated_regions_active generated_regions_visible generated_update_us generated_update_skipped generated_cache_hits generated_cache_misses generated_cache_invalidated generated_cache_evicted visible_quads uploaded_quads indirect_draw_commands gpu_cull_input_commands gpu_cull_visible_commands gpu_cull_visible_quads cpu_visible_commands log summary\n'
+    printf 'variant ready_status avg_raw_fps worst_frame_ms frames_ge_25ms draw_mode generated_regions_loaded generated_regions_active generated_regions_visible generated_update_us generated_update_skipped generated_cache_hits generated_cache_misses generated_cache_invalidated generated_cache_evicted generated_prepare_skipped generated_cull_metadata_uploaded generated_cull_config_uploaded visible_quads uploaded_quads indirect_draw_commands gpu_cull_input_commands gpu_cull_visible_commands gpu_cull_visible_quads cpu_visible_commands log summary\n'
     for variant in cpu generated; do
         stdout_log="$(cat "$compare_dir/${variant}.stdout.path")"
         summary="$compare_dir/${variant}.summary.txt"
-        printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
+        printf '%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n' \
             "$variant" \
             "$(extract_profile_field "$stdout_log" "profile end" "ready_status")" \
             "$(extract_profile_field "$stdout_log" "profile end" "avg_raw_fps")" \
@@ -185,6 +185,9 @@ report="$compare_dir/report.txt"
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_cache_misses")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_cache_invalidated")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_cache_evicted")" \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_prepare_skipped")" \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_cull_metadata_uploaded")" \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_cull_config_uploaded")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "visible_quads")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "uploaded_quads")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "indirect_draw_commands")" \
