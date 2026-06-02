@@ -1693,7 +1693,7 @@ fn log_profile_metrics(
                 DEFAULT_PACKED_FACE_RANGE_MIN_QUADS,
             );
             log_str.push_str(&format!(
-                " packed_batches={} packed_visible_batches={} packed_quads={} packed_visible_quads={} packed_uploaded_quads={} packed_dropped_quads={} packed_uploaded_bytes={} packed_buffer_capacity={} packed_vertex_count={} packed_visible_vertex_count={} packed_chunks_loaded={} packed_chunks_active={} packed_chunk_ranges={} packed_resident_ranges={} packed_tombstone_ranges={} packed_resident_capacity_quads={} packed_tombstone_capacity_quads={} packed_dirty_ranges={} packed_dirty_range_quads={} pending_builds={} pending_region_rebuilds={} packed_prepare_us={} packed_view_prepare_us={} packed_stream_us={} packed_stream_spawned_builds={} packed_stream_rebuild_regions={} packed_build_task_us={} built_this_frame={} packed_compaction_us={} packed_compacted_regions={} uploaded_this_frame={} arena_capacity_quads={} arena_used_quads={} arena_slot_quads={} arena_uploaded_bytes={} arena_reallocations={} arena_compactions={} packed_cpu_reserved_bytes={} packed_min_ram_bytes={} packed_gpu_reserved_bytes={} packed_min_vram_bytes={} packed_draw_mode={} packed_face_range_cull={} packed_face_range_min_quads={} packed_indirect_draw_commands={} packed_render_node_us={} packed_render_draw_calls={} packed_render_items_considered={} packed_render_gpu_pass_us={} packed_gpu_timestamps_requested={} packed_gpu_timestamps_supported={} packed_gpu_cull_enabled={} packed_gpu_cull_input_commands={} packed_gpu_cull_est_visible_commands={} packed_gpu_cull_est_visible_quads={} packed_gpu_cull_node_us={} packed_gpu_cull_count_supported={} packed_gpu_cull_compact_enabled={} packed_cpu_visible_compact_enabled={} packed_cpu_visible_commands={} packed_material_entities={} packed_material_sync_us={}",
+                " packed_batches={} packed_visible_batches={} packed_quads={} packed_visible_quads={} packed_uploaded_quads={} packed_dropped_quads={} packed_uploaded_bytes={} packed_buffer_capacity={} packed_vertex_count={} packed_visible_vertex_count={} packed_chunks_loaded={} packed_chunks_active={} packed_chunk_ranges={} packed_resident_ranges={} packed_tombstone_ranges={} packed_resident_capacity_quads={} packed_tombstone_capacity_quads={} packed_dirty_ranges={} packed_dirty_range_quads={} pending_builds={} pending_region_rebuilds={} packed_prepare_us={} packed_view_prepare_us={} packed_stream_us={} packed_stream_spawned_builds={} packed_stream_rebuild_regions={} packed_build_task_us={} built_this_frame={} packed_compaction_us={} packed_compacted_regions={} uploaded_this_frame={} arena_capacity_quads={} arena_used_quads={} arena_slot_quads={} arena_uploaded_bytes={} arena_reallocations={} arena_compactions={} packed_cpu_reserved_bytes={} packed_min_ram_bytes={} packed_gpu_reserved_bytes={} packed_min_vram_bytes={} packed_draw_mode={} packed_generated_regions_loaded={} packed_generated_regions_active={} packed_generated_regions_visible={} packed_face_range_cull={} packed_face_range_min_quads={} packed_indirect_draw_commands={} packed_render_node_us={} packed_render_draw_calls={} packed_render_items_considered={} packed_render_gpu_pass_us={} packed_gpu_timestamps_requested={} packed_gpu_timestamps_supported={} packed_gpu_cull_enabled={} packed_gpu_cull_input_commands={} packed_gpu_cull_est_visible_commands={} packed_gpu_cull_est_visible_quads={} packed_gpu_cull_node_us={} packed_gpu_cull_count_supported={} packed_gpu_cull_compact_enabled={} packed_cpu_visible_compact_enabled={} packed_cpu_visible_commands={} packed_material_entities={} packed_material_sync_us={}",
                 stats.batches,
                 stats.visible_batches,
                 stats.quads,
@@ -1736,6 +1736,9 @@ fn log_profile_metrics(
                 stats.gpu_reserved_bytes,
                 stats.min_vram_bytes,
                 mode_str,
+                stats.generated_regions_loaded,
+                stats.generated_regions_active,
+                stats.generated_regions_visible,
                 face_range_cull,
                 face_range_min_quads,
                 stats.indirect_draw_commands,
@@ -1885,8 +1888,11 @@ fn log_profile_metrics(
         );
         if let Some(stats) = profiling.worst_packed_stats {
             println!(
-                "profile worst_packed draw_mode={} visible_quads={} uploaded_quads={} indirect_draw_commands={} pending_builds={} pending_region_rebuilds={} prepare_us={} view_prepare_us={} stream_us={} stream_spawned_builds={} stream_rebuild_regions={} build_task_us={} built_this_frame={} compaction_us={} compacted_regions={} uploaded_this_frame={} arena_compactions={} render_node_us={} packed_render_draw_calls={} packed_render_items_considered={} packed_render_gpu_pass_us={} gpu_cull_enabled={} gpu_cull_input_commands={} gpu_cull_est_visible_commands={} gpu_cull_est_visible_quads={} gpu_cull_node_us={} gpu_cull_count_supported={} gpu_cull_compact_enabled={} cpu_visible_compact_enabled={} cpu_visible_commands={} material_entities={} material_sync_us={}",
+                "profile worst_packed draw_mode={} generated_regions_loaded={} generated_regions_active={} generated_regions_visible={} visible_quads={} uploaded_quads={} indirect_draw_commands={} pending_builds={} pending_region_rebuilds={} prepare_us={} view_prepare_us={} stream_us={} stream_spawned_builds={} stream_rebuild_regions={} build_task_us={} built_this_frame={} compaction_us={} compacted_regions={} uploaded_this_frame={} arena_compactions={} render_node_us={} packed_render_draw_calls={} packed_render_items_considered={} packed_render_gpu_pass_us={} gpu_cull_enabled={} gpu_cull_input_commands={} gpu_cull_est_visible_commands={} gpu_cull_est_visible_quads={} gpu_cull_node_us={} gpu_cull_count_supported={} gpu_cull_compact_enabled={} cpu_visible_compact_enabled={} cpu_visible_commands={} material_entities={} material_sync_us={}",
                 packed_draw_mode_label(stats.draw_mode),
+                stats.generated_regions_loaded,
+                stats.generated_regions_active,
+                stats.generated_regions_visible,
                 stats.visible_quads,
                 stats.uploaded_quads,
                 stats.indirect_draw_commands,

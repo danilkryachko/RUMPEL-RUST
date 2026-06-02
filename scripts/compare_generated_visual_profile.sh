@@ -198,6 +198,21 @@ run_case() {
             packed_gpu_cull_est_visible_quads \
             "$preset" \
             "$variant"
+        require_positive_int \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_regions_loaded")" \
+            generated_regions_loaded \
+            "$preset" \
+            "$variant"
+        require_positive_int \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_regions_active")" \
+            generated_regions_active \
+            "$preset" \
+            "$variant"
+        require_positive_int \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_regions_visible")" \
+            generated_regions_visible \
+            "$preset" \
+            "$variant"
     fi
 
     "$repo_dir/scripts/summarize_profile_log.sh" "$state_file" > "$summary_file"
@@ -220,7 +235,7 @@ report="$compare_dir/report.txt"
     printf 'generated_region_radius=%s\n' "$region_radius"
     printf 'presets=%s\n' "$presets"
     printf '\n'
-    printf 'preset variant render_target ready_status avg_raw_fps worst_frame_ms frames_ge_25ms visible_quads uploaded_quads indirect_draw_commands gpu_cull_input_commands gpu_cull_visible_commands gpu_cull_visible_quads cpu_visible_commands screenshot log summary\n'
+    printf 'preset variant render_target ready_status avg_raw_fps worst_frame_ms frames_ge_25ms generated_regions_loaded generated_regions_active generated_regions_visible visible_quads uploaded_quads indirect_draw_commands gpu_cull_input_commands gpu_cull_visible_commands gpu_cull_visible_quads cpu_visible_commands screenshot log summary\n'
     for preset in $presets; do
         for variant in cpu generated; do
             stdout_log="$(cat "$compare_dir/${preset}_${variant}.stdout.path")"
@@ -234,6 +249,9 @@ report="$compare_dir/report.txt"
                 "$(extract_profile_field "$stdout_log" "profile end" "avg_raw_fps")" \
                 "$(extract_profile_field "$stdout_log" "profile end" "worst_frame_ms")" \
                 "$(extract_profile_field "$stdout_log" "profile end" "frames_ge_25ms")" \
+                "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_regions_loaded")" \
+                "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_regions_active")" \
+                "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_regions_visible")" \
                 "$(extract_profile_field "$stdout_log" "profile worst_packed" "visible_quads")" \
                 "$(extract_profile_field "$stdout_log" "profile worst_packed" "uploaded_quads")" \
                 "$(extract_profile_field "$stdout_log" "profile worst_packed" "indirect_draw_commands")" \
