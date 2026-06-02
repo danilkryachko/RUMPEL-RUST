@@ -316,12 +316,38 @@ struct SurfacePackedColumn {
 #[derive(Clone, Copy)]
 struct SurfaceColumnSource<'a> {
     chunk_pos: ChunkPos,
+    world_origin_x: i32,
+    world_origin_z: i32,
     context: &'a WorldGenerationContext,
     requested_cell_size: usize,
     sand_block: BlockId,
     edit_store: &'a WorldEditStore,
     perlin: &'a Perlin,
     has_edits: bool,
+}
+
+impl<'a> SurfaceColumnSource<'a> {
+    fn new(
+        chunk_pos: ChunkPos,
+        context: &'a WorldGenerationContext,
+        requested_cell_size: usize,
+        sand_block: BlockId,
+        edit_store: &'a WorldEditStore,
+        perlin: &'a Perlin,
+        has_edits: bool,
+    ) -> Self {
+        Self {
+            chunk_pos,
+            world_origin_x: chunk_pos.x * CHUNK_SIZE as i32,
+            world_origin_z: chunk_pos.z * CHUNK_SIZE as i32,
+            context,
+            requested_cell_size,
+            sand_block,
+            edit_store,
+            perlin,
+            has_edits,
+        }
+    }
 }
 
 const PACKED_QUAD_FLAG_SIDE_BLENDS_TOP_TILE: u32 = 1;
@@ -342,15 +368,15 @@ pub fn build_surface_packed_quads_for_chunk(
     let empty_edits = WorldEditStore::default();
     let perlin = terrain_perlin();
     let has_edits = !empty_edits.is_empty();
-    let source = SurfaceColumnSource {
+    let source = SurfaceColumnSource::new(
         chunk_pos,
         context,
         requested_cell_size,
         sand_block,
-        edit_store: &empty_edits,
-        perlin: &perlin,
+        &empty_edits,
+        &perlin,
         has_edits,
-    };
+    );
     let columns = build_surface_packed_columns_for_chunk_with_perlin(source);
     let cell_size = requested_cell_size.clamp(1, CHUNK_SIZE);
 
@@ -414,15 +440,15 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
 ) {
     let perlin = terrain_perlin();
     let has_edits = !edit_store.is_empty();
-    let source = SurfaceColumnSource {
+    let source = SurfaceColumnSource::new(
         chunk_pos,
         context,
         requested_cell_size,
         sand_block,
         edit_store,
-        perlin: &perlin,
+        &perlin,
         has_edits,
-    };
+    );
     for_each_surface_packed_column_for_chunk(source, |column| {
         let neighbor_heights = surface_neighbor_heights(column, source);
         gpu_columns.push(PackedGpuSurfaceColumn::from_parts(
@@ -464,8 +490,8 @@ fn for_each_surface_packed_column_for_chunk(
             let x = cell_x * cell_size;
             let width = cell_size.min(CHUNK_SIZE - x);
             let depth = cell_size.min(CHUNK_SIZE - z);
-            let world_x = source.chunk_pos.x * CHUNK_SIZE as i32 + x as i32;
-            let world_z = source.chunk_pos.z * CHUNK_SIZE as i32 + z as i32;
+            let world_x = source.world_origin_x + x as i32;
+            let world_z = source.world_origin_z + z as i32;
             let sample = if chunk_edited {
                 terrain_surface_cell_sample_with_edits(
                     world_x,
@@ -591,8 +617,8 @@ fn surface_neighbor_heights(
     column: SurfacePackedColumn,
     source: SurfaceColumnSource<'_>,
 ) -> [usize; 4] {
-    let world_x = source.chunk_pos.x * CHUNK_SIZE as i32 + column.x as i32;
-    let world_z = source.chunk_pos.z * CHUNK_SIZE as i32 + column.z as i32;
+    let world_x = source.world_origin_x + column.x as i32;
+    let world_z = source.world_origin_z + column.z as i32;
 
     [
         surface_neighbor_sample_height(
@@ -1428,15 +1454,15 @@ mod tests {
                 let edit_store = WorldEditStore::default();
                 let has_edits = !edit_store.is_empty();
                 let cpu_columns =
-                    build_surface_packed_columns_for_chunk_with_perlin(SurfaceColumnSource {
+                    build_surface_packed_columns_for_chunk_with_perlin(SurfaceColumnSource::new(
                         chunk_pos,
-                        context: &context,
-                        requested_cell_size: cell_size,
+                        &context,
+                        cell_size,
                         sand_block,
-                        edit_store: &edit_store,
-                        perlin: &perlin,
+                        &edit_store,
+                        &perlin,
                         has_edits,
-                    });
+                    ));
                 let gpu_columns = build_surface_gpu_generation_columns_for_chunk(
                     chunk_pos,
                     &context,
