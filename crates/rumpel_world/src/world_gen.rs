@@ -672,4 +672,131 @@ mod tests {
             4
         );
     }
+
+    #[test]
+    fn terrain_surface_sampling_matches_golden_regions() {
+        let palette = TerrainBlockPalette {
+            air: 0,
+            dirt: 1,
+            grass: 2,
+            stone: 3,
+        };
+        let sand = 4;
+        let perlin = terrain_perlin();
+        struct GoldenSurfaceCase {
+            x: i32,
+            z: i32,
+            width: usize,
+            depth: usize,
+            raw_height: usize,
+            shell_height: usize,
+            cell_height: usize,
+            top_block: BlockId,
+        }
+
+        let cases = [
+            GoldenSurfaceCase {
+                x: -256,
+                z: -256,
+                width: 1,
+                depth: 1,
+                raw_height: 29,
+                shell_height: 29,
+                cell_height: 29,
+                top_block: palette.grass,
+            },
+            GoldenSurfaceCase {
+                x: -65,
+                z: 17,
+                width: 1,
+                depth: 1,
+                raw_height: 40,
+                shell_height: 40,
+                cell_height: 40,
+                top_block: palette.grass,
+            },
+            GoldenSurfaceCase {
+                x: 0,
+                z: 0,
+                width: 1,
+                depth: 1,
+                raw_height: 30,
+                shell_height: 30,
+                cell_height: 30,
+                top_block: palette.grass,
+            },
+            GoldenSurfaceCase {
+                x: 31,
+                z: 31,
+                width: 1,
+                depth: 1,
+                raw_height: 41,
+                shell_height: 41,
+                cell_height: 41,
+                top_block: palette.grass,
+            },
+            GoldenSurfaceCase {
+                x: 127,
+                z: -93,
+                width: 2,
+                depth: 2,
+                raw_height: 42,
+                shell_height: 42,
+                cell_height: 42,
+                top_block: palette.grass,
+            },
+            GoldenSurfaceCase {
+                x: 512,
+                z: 384,
+                width: 4,
+                depth: 3,
+                raw_height: 40,
+                shell_height: 40,
+                cell_height: 41,
+                top_block: palette.grass,
+            },
+            GoldenSurfaceCase {
+                x: -179,
+                z: -512,
+                width: 1,
+                depth: 1,
+                raw_height: 14,
+                shell_height: 14,
+                cell_height: 14,
+                top_block: sand,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                terrain_height_with_noise(case.x, case.z, &perlin),
+                case.raw_height,
+                "raw terrain height changed at ({}, {})",
+                case.x,
+                case.z
+            );
+            assert_eq!(
+                terrain_surface_shell_height_with_noise(case.x, case.z, &perlin),
+                case.shell_height,
+                "surface shell height changed at ({}, {})",
+                case.x,
+                case.z
+            );
+            let sample = terrain_surface_cell_sample_with_noise(
+                case.x, case.z, case.width, case.depth, palette, sand, &perlin,
+            );
+            assert_eq!(
+                sample,
+                TerrainSurfaceSample {
+                    height: case.cell_height,
+                    top_block: case.top_block,
+                },
+                "surface cell sample changed at ({}, {}) for {}x{}",
+                case.x,
+                case.z,
+                case.width,
+                case.depth
+            );
+        }
+    }
 }
