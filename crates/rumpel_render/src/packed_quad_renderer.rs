@@ -28,8 +28,8 @@ use std::{
 use wgpu::{QuerySet, QuerySetDescriptor, QueryType, RenderPassTimestampWrites};
 
 use crate::packed_quad_gpu_generation::{
-    PackedGpuGenerationBatches, PackedGpuGenerationJob, packed_gpu_generation_enabled_from_env,
-    packed_gpu_generation_workgroups,
+    PackedGpuGenerationBatch, PackedGpuGenerationBatches, PackedGpuGenerationJob,
+    packed_gpu_generation_enabled_from_env, packed_gpu_generation_workgroups,
 };
 use crate::packed_quad_pipeline::{PreparedPackedQuadBatch, PreparedPackedQuadBatches};
 
@@ -179,6 +179,28 @@ impl PreparedPackedGpuGeneratedDraw {
                     && existing.bounds_min == planned.bounds_min
                     && existing.bounds_max == planned.bounds_max
             })
+    }
+
+    fn matches_batches(
+        &self,
+        batches: &[&PackedGpuGenerationBatch],
+        arena_generation: u64,
+    ) -> bool {
+        self.enabled
+            && self.was_dispatched()
+            && self.arena_generation == arena_generation
+            && self.regions.len() == batches.len()
+            && self.regions.iter().zip(batches).enumerate().all(
+                |(draw_command_index, (region, batch))| {
+                    region.key == batch.key
+                        && region.generation == batch.generation
+                        && region.column_count == batch.columns.len()
+                        && region.max_output_quads == batch.max_output_quads.max(1)
+                        && region.draw_command_index == draw_command_index
+                        && region.bounds_min == batch.bounds_min
+                        && region.bounds_max == batch.bounds_max
+                },
+            )
     }
 }
 
@@ -710,6 +732,29 @@ fn prepare_packed_gpu_generated_draw(
         .contains(bevy::render::render_resource::WgpuFeatures::INDIRECT_FIRST_INSTANCE);
     if sorted_batches.len() > 1 && !has_first_instance {
         prepared.disable();
+        return;
+    }
+
+    if prepared.matches_batches(&sorted_batches, arena.generation)
+        && prepared.generation_bind_group.is_some()
+        && prepared.render_bind_group.is_some()
+        && prepared.indirect_buffer.is_some()
+    {
+        crate::packed_quad_pipeline::record_packed_gpu_generation_prepare(
+            arena.capacity_quads,
+            arena.next_free_quads,
+            prepared.total_max_output_quads,
+            prepared.total_column_count,
+            sorted_batches.len(),
+            prepared.source_chunk_count,
+        );
+        prepare_generated_gpu_cull(
+            &render_device,
+            &render_queue,
+            &mut gpu_cull,
+            &prepared.regions,
+            prepared.indirect_buffer.as_ref(),
+        );
         return;
     }
 
@@ -2218,6 +2263,56 @@ mod tests {
         assert_eq!(gpu_metadata.bounds_min, [-32.0, 0.0, 64.0, 0.0]);
         assert_eq!(gpu_metadata.bounds_max, [96.0, 128.0, 192.0, 0.0]);
         assert_eq!(gpu_metadata.meta, [1234, 0, 0, 0]);
+    }
+
+    #[test]
+    fn packed_gpu_generation_prepared_matches_batches_for_render_prepare_skip() {
+        let batch = PackedGpuGenerationBatch {
+            key: 42,
+            columns: std::sync::Arc::new(vec![
+                crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
+                    [0, 0, 1, 1],
+                    [4, 4, 4, 4, 4],
+                    2,
+                ),
+            ]),
+            params: crate::packed_quad_gpu_generation::PackedGpuGenerationParams::new(
+                1, 7, 0, 0, 1, 2, 3,
+            ),
+            source_chunk_count: 1,
+            max_output_quads: 7,
+            translation: Vec4::ZERO,
+            bounds_min: Vec3::new(-1.0, 0.0, 2.0),
+            bounds_max: Vec3::new(3.0, 4.0, 5.0),
+            generation: 9,
+        };
+        let prepared = PreparedPackedGpuGeneratedDraw {
+            enabled: true,
+            regions: vec![PreparedPackedGpuGeneratedRegion {
+                key: batch.key,
+                generation: batch.generation,
+                column_count: batch.columns.len(),
+                max_output_quads: batch.max_output_quads,
+                arena_offset_quads: 16,
+                arena_capacity_quads: 32,
+                draw_command_index: 0,
+                bounds_min: batch.bounds_min,
+                bounds_max: batch.bounds_max,
+            }],
+            arena_generation: 3,
+            ..Default::default()
+        };
+        prepared.mark_dispatched();
+
+        assert!(prepared.matches_batches(&[&batch], 3));
+
+        let mut changed_generation = batch.clone();
+        changed_generation.generation = changed_generation.generation.saturating_add(1);
+        assert!(!prepared.matches_batches(&[&changed_generation], 3));
+
+        let mut changed_bounds = batch.clone();
+        changed_bounds.bounds_max.x += 1.0;
+        assert!(!prepared.matches_batches(&[&changed_bounds], 3));
     }
 
     #[test]
