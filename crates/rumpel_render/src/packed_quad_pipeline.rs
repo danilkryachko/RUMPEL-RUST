@@ -2806,17 +2806,17 @@ pub fn update_packed_gpu_generation_regions(
     let cache_frame = region_cache.next_frame();
     let view_center = IVec2::new(camera_chunk_x, camera_chunk_z);
     let view_radius = packed_view_radius_from_env();
-    let mut target_keys = std::collections::HashSet::new();
-    let mut active_regions = Vec::new();
-    let mut loaded_regions = 0usize;
+    let generated_region_side = region_radius.saturating_mul(2).saturating_add(1).max(1) as usize;
+    let loaded_region_capacity = generated_region_side.saturating_mul(generated_region_side);
+    let mut loaded_region_keys = Vec::with_capacity(loaded_region_capacity);
+    let mut active_regions = Vec::with_capacity(loaded_region_capacity);
 
     for region_z in -region_radius..=region_radius {
         for region_x in -region_radius..=region_radius {
             let region_origin_x = center_origin_x + region_x * region_size;
             let region_origin_z = center_origin_z + region_z * region_size;
             let region_key = pack_chunk_key(region_origin_x, region_origin_z);
-            target_keys.insert(region_key);
-            loaded_regions = loaded_regions.saturating_add(1);
+            loaded_region_keys.push(region_key);
 
             if crate::packed_quad_gpu_generation::region_has_active_chunks(
                 region_origin_x,
@@ -2829,6 +2829,7 @@ pub fn update_packed_gpu_generation_regions(
             }
         }
     }
+    let loaded_regions = loaded_region_keys.len();
     let (active_region_count, active_region_hash) =
         PackedGpuGenerationTarget::active_region_signature(
             active_regions.iter().map(|(_, _, region_key)| *region_key),
@@ -2863,6 +2864,9 @@ pub fn update_packed_gpu_generation_regions(
     let mut cache_hits = 0usize;
     let mut cache_misses = 0usize;
     let mut cache_invalidated = 0usize;
+    let target_keys = loaded_region_keys
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
 
     for (region_origin_x, region_origin_z, region_key) in active_regions {
         if let Some(batch) = reuse_generated_region_cache_entry(
