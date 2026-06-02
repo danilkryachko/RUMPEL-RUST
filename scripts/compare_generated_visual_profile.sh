@@ -45,6 +45,21 @@ extract_profile_field() {
     ' "$log"
 }
 
+require_positive_int() {
+    local value="$1"
+    local label="$2"
+    local preset="$3"
+    local variant="$4"
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "$preset/$variant expected numeric $label, got '${value:-missing}'" >&2
+        exit 66
+    fi
+    if (( value <= 0 )); then
+        echo "$preset/$variant expected positive $label, got '$value'" >&2
+        exit 66
+    fi
+}
+
 camera_env_for_preset() {
     local preset="$1"
     case "$preset" in
@@ -145,6 +160,44 @@ run_case() {
     if [[ ! -s "$screenshot" ]]; then
         echo "missing screenshot for $preset/$variant: $screenshot" >&2
         exit 66
+    fi
+
+    local draw_mode
+    local uploaded_quads
+    draw_mode="$(extract_profile_field "$stdout_log" "profile sample=" "packed_draw_mode")"
+    uploaded_quads="$(extract_profile_field "$stdout_log" "profile sample=" "packed_uploaded_quads")"
+    if [[ "$variant" == "cpu" && "$draw_mode" == "gpu-generated" ]]; then
+        echo "$preset/$variant unexpectedly used gpu-generated draw mode" >&2
+        exit 66
+    fi
+    if [[ "$variant" == "generated" ]]; then
+        if [[ "$draw_mode" != "gpu-generated" ]]; then
+            echo "$preset/$variant did not enable gpu-generated draw mode (packed_draw_mode=${draw_mode:-missing})" >&2
+            exit 66
+        fi
+        if [[ "$uploaded_quads" != "0" ]]; then
+            echo "$preset/$variant expected zero CPU uploaded quads, got ${uploaded_quads:-missing}" >&2
+            exit 66
+        fi
+        if [[ "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_enabled")" != "true" ]]; then
+            echo "$preset/$variant did not enable packed GPU cull" >&2
+            exit 66
+        fi
+        require_positive_int \
+            "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_input_commands")" \
+            packed_gpu_cull_input_commands \
+            "$preset" \
+            "$variant"
+        require_positive_int \
+            "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_est_visible_commands")" \
+            packed_gpu_cull_est_visible_commands \
+            "$preset" \
+            "$variant"
+        require_positive_int \
+            "$(extract_profile_field "$stdout_log" "profile sample=" "packed_gpu_cull_est_visible_quads")" \
+            packed_gpu_cull_est_visible_quads \
+            "$preset" \
+            "$variant"
     fi
 
     "$repo_dir/scripts/summarize_profile_log.sh" "$state_file" > "$summary_file"
