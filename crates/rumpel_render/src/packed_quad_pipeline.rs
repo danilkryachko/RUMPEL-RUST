@@ -3000,6 +3000,12 @@ pub fn update_packed_gpu_generation_regions(
     for region_key in &scratch.loaded_region_keys {
         scratch.target_keys.insert(*region_key);
     }
+    let source_chunk_count = {
+        let side = region_size.max(0) as usize;
+        side.saturating_mul(side)
+    };
+    let expected_column_count =
+        source_chunk_count.saturating_mul(packed_gpu_generation_columns_per_chunk(cell_size));
 
     for (region_origin_x, region_origin_z, region_key) in scratch.active_regions.iter().copied() {
         if let Some(batch) = reuse_generated_region_cache_entry(
@@ -3038,16 +3044,10 @@ pub fn update_packed_gpu_generation_regions(
             cache_misses = cache_misses.saturating_add(1);
         }
 
-        let source_chunk_count = {
-            let side = region_size.max(0) as usize;
-            side.saturating_mul(side)
-        };
         if source_chunk_count == 0 {
             continue;
         }
 
-        let expected_column_count =
-            source_chunk_count.saturating_mul(packed_gpu_generation_columns_per_chunk(cell_size));
         let mut columns = Vec::with_capacity(expected_column_count);
 
         for chunk_z in region_origin_z..region_origin_z + region_size {
