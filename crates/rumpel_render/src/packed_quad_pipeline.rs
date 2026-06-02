@@ -2915,6 +2915,7 @@ pub fn update_packed_gpu_generation_regions(
     );
     let contract_generation = contract.generation();
     let cache_frame = region_cache.next_frame();
+    let edit_store_generation = edit_store.generation();
     let view_center = IVec2::new(camera_chunk_x, camera_chunk_z);
     let view_radius = packed_view_radius_from_env();
     let generated_region_side = region_radius.saturating_mul(2).saturating_add(1).max(1) as usize;
@@ -2970,7 +2971,7 @@ pub fn update_packed_gpu_generation_regions(
         region_radius,
         view_radius,
         contract_generation,
-        edit_store.generation(),
+        edit_store_generation,
         active_region_count,
         active_region_hash,
     );
@@ -3037,7 +3038,7 @@ pub fn update_packed_gpu_generation_regions(
                 new_generation = contract_generation,
                 invalidated_by_edits,
                 old_edit_store_generation = stale.edit_store_generation,
-                edit_store_generation = edit_store.generation(),
+                edit_store_generation,
                 "PACKED GPU GENERATION: invalidated stale generated region cache entry"
             );
         } else {
@@ -3102,7 +3103,7 @@ pub fn update_packed_gpu_generation_regions(
             bounds_max,
             generation: contract_generation,
             contract,
-            edit_store_generation: edit_store.generation(),
+            edit_store_generation,
             last_seen_frame: cache_frame,
         };
 
