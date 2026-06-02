@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime.version": "Lua 5.4",
+  "workspace.library": [
+    "api_stub.lua"
+  ],
+  "diagnostics.globals": [
+    "Behaviors",
+    "Chunk",
+    "MobDespawnQueue",
+    "MobSpawnQueue",
+    "MobStates",
+    "Mobs",
+    "ParticleSpawnQueue",
+    "PlayerState",
+    "TimeState",
+    "despawn_mob",
+    "get_block",
+    "get_height",
+    "get_mining_time",
+    "register_behavior",
+    "register_block",
+    "register_mob",
+    "register_structure",
+    "set_block",
+    "spawn_mob",
+    "spawn_particle",
+    "trigger_behavior",
+    "trigger_mob_spawn",
+    "trigger_mob_update",
+    "trigger_world_tick"
+  ],
+  "diagnostics.disable": [
+    "lowercase-global"
+  ],
+  "hint.enable": true
+}

@@ -1,10 +1,8 @@
-use std::sync::Arc;
-use bevy::{platform::collections::HashMap, prelude::*};
+use bevy::platform::collections::HashMap;
 use noise::{NoiseFn, Perlin};
 use rumpel_blocks::{AIR_BLOCK_ID, BlockId, BlockRegistry};
 use rumpel_coords::WorldBlockPos;
 
-const DEFAULT_SEED: u32 = 1337;
 const SURFACE_BASE_HEIGHT: f64 = 10.0;
 const SURFACE_HEIGHT_RANGE: f64 = 40.0;
 const SURFACE_NOISE_SCALE: f64 = 0.02;
@@ -50,7 +48,6 @@ impl TerrainBlockIds {
     }
 }
 
-// Temporary WorldVoxel enum to replace bevy_voxel_world's enum until we write ChunkData
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum WorldVoxel {
     Air,
@@ -100,7 +97,7 @@ pub fn terrain_voxel_at(
     };
 
     if base_voxel == WorldVoxel::Air {
-        let check_radius = 2; 
+        let check_radius = 2;
         'outer: for dx in -check_radius..=check_radius {
             for dz in -check_radius..=check_radius {
                 let tx = block_pos.x + dx;
@@ -113,15 +110,14 @@ pub fn terrain_voxel_at(
                     continue;
                 }
 
-                let th = *height_cache
-                    .entry((tx, tz))
-                    .or_insert_with(|| {
-                        let noise_value = perlin.get([
-                            f64::from(tx) * SURFACE_NOISE_SCALE,
-                            f64::from(tz) * SURFACE_NOISE_SCALE,
-                        ]);
-                        ((noise_value + 1.0) * 0.5 * SURFACE_HEIGHT_RANGE + SURFACE_BASE_HEIGHT).floor() as i32
-                    });
+                let th = *height_cache.entry((tx, tz)).or_insert_with(|| {
+                    let noise_value = perlin.get([
+                        f64::from(tx) * SURFACE_NOISE_SCALE,
+                        f64::from(tz) * SURFACE_NOISE_SCALE,
+                    ]);
+                    ((noise_value + 1.0) * 0.5 * SURFACE_HEIGHT_RANGE + SURFACE_BASE_HEIGHT).floor()
+                        as i32
+                });
 
                 if th <= 14 {
                     continue;
@@ -134,23 +130,25 @@ pub fn terrain_voxel_at(
                 let trunk_min = th + 1;
                 let trunk_max = th + 5;
 
-                if tx == block_pos.x && tz == block_pos.z && block_pos.y >= trunk_min && block_pos.y <= trunk_max {
+                if tx == block_pos.x
+                    && tz == block_pos.z
+                    && block_pos.y >= trunk_min
+                    && block_pos.y <= trunk_max
+                {
                     base_voxel = WorldVoxel::Solid(block_ids.wood);
                     break 'outer;
                 }
 
                 let leaf_center_y = th + 5;
                 let dy = block_pos.y - leaf_center_y;
-                if dy >= -1 && dy <= 2 {
+                if (-1..=2).contains(&dy) {
                     let ldx = block_pos.x - tx;
                     let ldz = block_pos.z - tz;
 
                     let dist_sq = ldx * ldx + dy * dy + ldz * ldz;
-                    if dist_sq <= 5 {
-                        if !(ldx == 0 && ldz == 0 && block_pos.y <= trunk_max) {
-                            base_voxel = WorldVoxel::Solid(block_ids.leaves);
-                            break 'outer;
-                        }
+                    if dist_sq <= 5 && !(ldx == 0 && ldz == 0 && block_pos.y <= trunk_max) {
+                        base_voxel = WorldVoxel::Solid(block_ids.leaves);
+                        break 'outer;
                     }
                 }
             }

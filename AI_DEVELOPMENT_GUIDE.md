@@ -1,6 +1,6 @@
 # AI Development Guide (Конституция Проекта)
 
-**ВНИМАНИЕ ВСЕМ ИИ-АГЕНТАМ:** Если вы читаете это, вы работаете над проектом "Rumpel Rust" (Voxel Game). 
+**ВНИМАНИЕ ВСЕМ ИИ-АГЕНТАМ:** Если вы читаете это, вы работаете над проектом "Rumpel Rust" (Voxel Game).
 Владелец проекта (Пользователь) выступает в роли **Продюсера**. Он пишет высокоуровневые требования и НЕ читает код. Ваша задача — принимать решения, распределять задачи между агентами и поддерживать идеальную чистоту кода.
 
 Для автоматического подхвата этих правил в Codex верхнеуровневый файл `AGENTS.md` дублирует обязательный workflow и маппинг проектных ролей на реальные subagent-типы текущей среды.
@@ -20,7 +20,7 @@
   * Никогда не смешивайте их. Не создавайте гигантских систем типа "god_object".
 
 ## 3. Мультиагентная Система
-Главный ИИ, который общается с Продюсером, выполняет роль **Геймдиректора**. 
+Главный ИИ, который общается с Продюсером, выполняет роль **Геймдиректора**.
 Если задача сложная, Геймдиректор **ОБЯЗАН** делегировать ее специализированным субагентам:
 * `engine_architect`: Сложные вычисления, оптимизация, математика вокселей, Greedy Meshing, многопоточность.
 * `gameplay_coder`: Логика игрока, UI, взаимодействие с миром.
@@ -28,6 +28,8 @@
 * **НОВЫЕ ОТДЕЛЫ (AAA Studio):**
   * `game_designer`: Ведет `GDD.md` (документацию) и `BOARD.md` (доску задач), проектирует фичи.
   * `art_director`: Создает концепты (`generate_image`), текстуры, руководит папкой `assets/`.
+
+В **Cursor** проектные субагенты лежат в `.cursor/agents/` (`engine-architect`, `gameplay-coder`, `code-reviewer`, `game-designer`, `art-director`). Вызов: `/code-reviewer …` в Agent-чате редактора или делегирование главному агенту. Проверка наличия — файлы в `.cursor/agents/`, не обязательно список в Settings (в Cursor 3.x UI индексация субагентов часто пустая при рабочих slash-командах).
 
 В Codex-средах, где доступны только типы `explorer`, `worker` и `default`, используйте следующий маппинг:
 * `engine_architect` и `gameplay_coder` -> `worker`.
@@ -58,5 +60,29 @@
 * **Проверки перед публикацией:** Перед `push` должны проходить `just verify` или эквивалентный набор `cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`.
 * **Changelog:** Для релизных изменений используйте `git-cliff` и Conventional Commits. Команда `just changelog` обновляет `CHANGELOG.md`.
 
-## 7. Использование Долгосрочной Памяти (agentmemory)
+## 7. Кэш Сборки (sccache)
+* **Обязательный wrapper:** Локальные Rust-сборки должны использовать `.cargo/config.toml`, где настроен `sccache` как `rustc-wrapper`.
+* **Не использовать ccache для Rust:** `ccache` подходит для C/C++, но не заменяет `sccache` для `rustc`.
+* **Быстрый macOS linker:** На рабочей macOS-машине проекта включен Homebrew LLVM linker `/opt/homebrew/bin/ld64.lld` для `aarch64-apple-darwin`. Не удаляйте этот флаг без измеримого регресса или несовместимости окружения.
+* **Повторяемые проверки:** Для долгих повторных проверок используйте `just check-cached`; для запуска клиента с отключенным incremental cache используйте `just dev-cached`.
+* **Диагностика:** Для проверки кэша используйте `just sccache-stats` или `sccache --show-stats`.
+* **Если sccache отсутствует:** В локальной macOS-среде установите его через `brew install sccache`, если это разрешено окружением.
+
+## 8. Lua API и Worldgen
+* **Startup-моды:** Обычные Lua-моды в `assets/mods/*.lua` регистрируют блоки, мобов, поведения, частицы и runtime-события.
+* **Worldgen-мод:** `assets/mods/world_gen.lua` не является startup-модом. Он запускается как bounded post-pass через `rumpel_world::world_gen` и получает только `get_block`, `set_block`, `get_height`, `Chunk` и безопасные no-op/intent функции.
+* **IDE typing:** `assets/mods/api_stub.lua` и `assets/mods/.luarc.json` являются служебными файлами для Lua Language Server. Runtime loader обязан пропускать `api_stub.lua`, чтобы не подменять настоящие Rust API.
+* **Async safety:** Не используйте persistent gameplay `LuaRuntime` внутри render/mesh async tasks. Для генерации чанков используйте изолированный Lua VM или заранее валидированный worldgen context.
+
+## 9. Surface Rendering и FPS
+* **Surface path по умолчанию:** Основной клиент использует `rumpel_render::surface_streaming`; `RUMPEL_COMPUTE_PROTOTYPE=1` оставлен только для измеряемого GPU compute prototype.
+* **Материал terrain:** Для streamed heightmap terrain используйте `VoxelQuadMaterial` и `assets/shaders/voxel_quads.wgsl`. Не возвращайте surface terrain на per-chunk `StandardMaterial`, иначе потеряются texture-array atlas, repeat UV и culling-настройки.
+* **Greedy merge:** Surface heightmap уже склеивает top faces и side walls в merged quads. Новые оптимизации должны сохранять повтор текстуры через `ATTRIBUTE_VOXEL_REPEAT_UV` и tile ID через `ATTRIBUTE_VOXEL_TILE`.
+* **Проверка FPS:** Для измерений используйте автопролет, например `RUST_LOG=wgpu=error,bevy_asset=error RUMPEL_PROFILE_SECONDS=8 RUMPEL_PROFILE_AUTOPILOT=1 RUMPEL_PROFILE_LOG_INTERVAL=2 cargo run -p rumpel_client`. Смотрите не только FPS, но и `surface_sample_vertices`, `surface_sample_indices`, build/upload/stream timings.
+* **Дальность прорисовки:** Не уменьшайте `VIEW_RADIUS_CHUNKS` ради FPS без прямой команды Продюсера. Цель оптимизации — сохранять дальность и снижать стоимость mesh/render path.
+* **Render mode:** Для повторяемых замеров явно задавайте `RUMPEL_RENDER_MODE=surface` или `RUMPEL_RENDER_MODE=compute`. Старый `RUMPEL_COMPUTE_PROTOTYPE=1` остается алиасом для compute prototype, но новые команды должны использовать `RUMPEL_RENDER_MODE`.
+* **Compute direct render:** В compute mode direct terrain render включен по умолчанию через `RUMPEL_COMPUTE_DIRECT_RENDER=1`: compute mesher пишет в GPU-owned arena buffers, а render node рисует их напрямую без Bevy mesh copy-back и без per-chunk terrain bind groups. По умолчанию direct renderer использует `multi_draw_indirect` при поддержке `INDIRECT_FIRST_INSTANCE` и GPU frustum cull pass через `RUMPEL_COMPUTE_DIRECT_GPU_CULL=1`: cull pass пишет per-view indirect command buffer и зануляет невидимые chunks, так что Metal/macOS не требует `MULTI_DRAW_INDIRECT_COUNT`. На backend-ах с `MULTI_DRAW_INDIRECT_COUNT` включен feature-gated compact path (`RUMPEL_COMPUTE_DIRECT_GPU_CULL_COMPACT=1`): shader atomically appends visible commands и render node вызывает `multi_draw_indirect_count`; `RUMPEL_COMPUTE_DIRECT_GPU_CULL_COMPACT=0` оставляет fixed-count path для A/B. `RUMPEL_COMPUTE_DIRECT_GPU_CULL=0` отключает cull; `RUMPEL_COMPUTE_DIRECT_MULTI_INDIRECT=0` оставляет loop-based `draw_indirect` fallback, а `RUMPEL_COMPUTE_DIRECT_INDIRECT=0` оставляет direct draw loop fallback.
+* **GPU-driven roadmap:** Долгосрочный путь описан в `.ai_memory/ADR-002-gpu-driven-voxel-roadmap.md`. Сначала делаем compute parity slice, затем GPU streaming queue, packed quads/vertex pulling, MDI/GPU culling и только потом far-field SVO/raymarch.
+
+## 10. Использование Долгосрочной Памяти (agentmemory)
 Если вы приняли важное архитектурное решение (например, изменили формат хранения чанков), вы **обязаны** использовать инструмент `memory_save` (предоставляемый через MCP `agentmemory`), чтобы сохранить это знание в векторную базу данных проекта. Будущие агенты смогут найти это через `memory_search`. Никогда не заставляйте Продюсера повторять одно и то же дважды.

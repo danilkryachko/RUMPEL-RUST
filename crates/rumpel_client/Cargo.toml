@@ -14,3 +14,4 @@ rumpel_render = { workspace = true }
 rumpel_player = { workspace = true }
 rumpel_modding = { workspace = true }
 rumpel_debug = { version = "0.1.0", path = "../rumpel_debug" }
+wgpu = { version = "27.0.1", default-features = false }
