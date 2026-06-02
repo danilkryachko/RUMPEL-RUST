@@ -2067,11 +2067,19 @@ pub fn prepare_packed_quad_buffers(
             }));
         }
 
-        let cull_metadata = command_metadata
-            .iter()
-            .copied()
-            .map(packed_gpu_cull_metadata_from_command)
-            .collect::<Vec<_>>();
+        gpu_cull.metadata_scratch.clear();
+        let metadata_capacity = gpu_cull.metadata_scratch.capacity();
+        if metadata_capacity < command_count {
+            gpu_cull
+                .metadata_scratch
+                .reserve(command_count - metadata_capacity);
+        }
+        gpu_cull.metadata_scratch.extend(
+            command_metadata
+                .iter()
+                .copied()
+                .map(packed_gpu_cull_metadata_from_command),
+        );
         let cull_config = crate::packed_quad_buffer::PackedQuadCullConfig {
             command_count: command_count.min(u32::MAX as usize) as u32,
             face_range_cull: u32::from(face_range_cull_enabled),
@@ -2080,7 +2088,11 @@ pub fn prepare_packed_quad_buffers(
         };
 
         if let Some(metadata_buffer) = &gpu_cull.metadata_buffer {
-            render_queue.write_buffer(metadata_buffer, 0, bytemuck::cast_slice(&cull_metadata));
+            render_queue.write_buffer(
+                metadata_buffer,
+                0,
+                bytemuck::cast_slice(&gpu_cull.metadata_scratch),
+            );
         }
         if let Some(config_buffer) = &gpu_cull.config_buffer {
             render_queue.write_buffer(config_buffer, 0, bytemuck::bytes_of(&cull_config));
