@@ -24,7 +24,8 @@ use rumpel_world::world_gen::{WorldGenerationContext, terrain_surface_contract_v
 use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuGenerationBatch,
     PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationParams,
-    PackedGpuGenerationTarget, packed_gpu_generation_lod_for_cell_size,
+    PackedGpuGenerationTarget, packed_gpu_generation_columns_per_chunk,
+    packed_gpu_generation_lod_for_cell_size,
 };
 use crate::voxel_material::load_block_atlas;
 use crate::voxel_packed_quads::{PackedVoxelFace, PackedVoxelQuad};
@@ -3045,7 +3046,9 @@ pub fn update_packed_gpu_generation_regions(
             continue;
         }
 
-        let mut columns = Vec::new();
+        let expected_column_count =
+            source_chunk_count.saturating_mul(packed_gpu_generation_columns_per_chunk(cell_size));
+        let mut columns = Vec::with_capacity(expected_column_count);
 
         for chunk_z in region_origin_z..region_origin_z + region_size {
             for chunk_x in region_origin_x..region_origin_x + region_size {
