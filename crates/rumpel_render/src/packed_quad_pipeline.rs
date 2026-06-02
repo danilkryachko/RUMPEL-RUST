@@ -1656,7 +1656,6 @@ pub fn prepare_packed_quad_buffers(
             uploaded_batches += usize::from(uploaded_subranges_for_batch);
         }
     }
-    arena.allocations = new_allocations.clone();
     record_confirmed_packed_batch_generations(&new_allocations);
     arena.next_free_quads = next_free_quads;
     arena.stats.used_quads = total_required_quads;
@@ -2170,6 +2169,7 @@ pub fn prepare_packed_quad_buffers(
     indirect_draw.command_count = command_count;
     indirect_draw.draw_mode = draw_mode;
     indirect_draw.is_indirect_enabled = use_indirect && command_count > 0;
+    arena.allocations = new_allocations;
 
     let mut chunk_ranges = 0;
     let mut resident_chunk_ranges = 0;
