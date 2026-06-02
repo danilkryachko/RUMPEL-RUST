@@ -9,6 +9,10 @@ use rumpel_world::world_gen::{
     terrain_surface_wall_block_at_y,
 };
 
+use crate::packed_quad_gpu_generation::{
+    PackedGpuSurfaceColumn, packed_gpu_generation_columns_per_chunk,
+};
+
 /// Represents the six cardinal directions of a voxel face.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -370,7 +374,28 @@ pub fn build_surface_gpu_generation_columns_for_chunk(
     requested_cell_size: usize,
     sand_block: BlockId,
     edit_store: &WorldEditStore,
-) -> Vec<crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn> {
+) -> Vec<PackedGpuSurfaceColumn> {
+    let mut gpu_columns =
+        Vec::with_capacity(packed_gpu_generation_columns_per_chunk(requested_cell_size));
+    append_surface_gpu_generation_columns_for_chunk(
+        &mut gpu_columns,
+        chunk_pos,
+        context,
+        requested_cell_size,
+        sand_block,
+        edit_store,
+    );
+    gpu_columns
+}
+
+pub fn append_surface_gpu_generation_columns_for_chunk(
+    gpu_columns: &mut Vec<PackedGpuSurfaceColumn>,
+    chunk_pos: ChunkPos,
+    context: &WorldGenerationContext,
+    requested_cell_size: usize,
+    sand_block: BlockId,
+    edit_store: &WorldEditStore,
+) {
     let columns = build_surface_packed_columns_for_chunk(
         chunk_pos,
         context,
@@ -379,50 +404,47 @@ pub fn build_surface_gpu_generation_columns_for_chunk(
         edit_store,
     );
     let perlin = terrain_perlin();
-    columns
-        .into_iter()
-        .map(|column| {
-            crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
-                [column.x, column.z, column.width, column.depth],
-                [
-                    column.height,
-                    surface_neighbor_height(
-                        column,
-                        PackedVoxelFace::PlusX,
-                        chunk_pos,
-                        context,
-                        edit_store,
-                        &perlin,
-                    ),
-                    surface_neighbor_height(
-                        column,
-                        PackedVoxelFace::MinusX,
-                        chunk_pos,
-                        context,
-                        edit_store,
-                        &perlin,
-                    ),
-                    surface_neighbor_height(
-                        column,
-                        PackedVoxelFace::PlusZ,
-                        chunk_pos,
-                        context,
-                        edit_store,
-                        &perlin,
-                    ),
-                    surface_neighbor_height(
-                        column,
-                        PackedVoxelFace::MinusZ,
-                        chunk_pos,
-                        context,
-                        edit_store,
-                        &perlin,
-                    ),
-                ],
-                column.top_block,
-            )
-        })
-        .collect()
+    gpu_columns.extend(columns.into_iter().map(|column| {
+        PackedGpuSurfaceColumn::from_parts(
+            [column.x, column.z, column.width, column.depth],
+            [
+                column.height,
+                surface_neighbor_height(
+                    column,
+                    PackedVoxelFace::PlusX,
+                    chunk_pos,
+                    context,
+                    edit_store,
+                    &perlin,
+                ),
+                surface_neighbor_height(
+                    column,
+                    PackedVoxelFace::MinusX,
+                    chunk_pos,
+                    context,
+                    edit_store,
+                    &perlin,
+                ),
+                surface_neighbor_height(
+                    column,
+                    PackedVoxelFace::PlusZ,
+                    chunk_pos,
+                    context,
+                    edit_store,
+                    &perlin,
+                ),
+                surface_neighbor_height(
+                    column,
+                    PackedVoxelFace::MinusZ,
+                    chunk_pos,
+                    context,
+                    edit_store,
+                    &perlin,
+                ),
+            ],
+            column.top_block,
+        )
+    }));
 }
 
 fn build_surface_packed_columns_for_chunk(

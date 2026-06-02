@@ -3052,23 +3052,23 @@ pub fn update_packed_gpu_generation_regions(
 
         for chunk_z in region_origin_z..region_origin_z + region_size {
             for chunk_x in region_origin_x..region_origin_x + region_size {
-                let mut chunk_columns =
-                    crate::voxel_packed_quads::build_surface_gpu_generation_columns_for_chunk(
-                        ChunkPos::new(chunk_x, chunk_z),
-                        &context,
-                        cell_size,
-                        sand_block,
-                        &edit_store,
-                    );
+                let appended_start = columns.len();
+                crate::voxel_packed_quads::append_surface_gpu_generation_columns_for_chunk(
+                    &mut columns,
+                    ChunkPos::new(chunk_x, chunk_z),
+                    &context,
+                    cell_size,
+                    sand_block,
+                    &edit_store,
+                );
                 let offset_x =
                     (chunk_x - region_origin_x) as u32 * rumpel_world::chunk::CHUNK_SIZE as u32;
                 let offset_z =
                     (chunk_z - region_origin_z) as u32 * rumpel_world::chunk::CHUNK_SIZE as u32;
-                for column in &mut chunk_columns {
+                for column in &mut columns[appended_start..] {
                     column.local[0] = column.local[0].saturating_add(offset_x);
                     column.local[1] = column.local[1].saturating_add(offset_z);
                 }
-                columns.extend(chunk_columns);
             }
         }
 
