@@ -2806,6 +2806,33 @@ pub fn update_packed_gpu_generation_regions(
     let cache_frame = region_cache.next_frame();
     let view_center = IVec2::new(camera_chunk_x, camera_chunk_z);
     let view_radius = packed_view_radius_from_env();
+    let mut target_keys = std::collections::HashSet::new();
+    let mut active_regions = Vec::new();
+    let mut loaded_regions = 0usize;
+
+    for region_z in -region_radius..=region_radius {
+        for region_x in -region_radius..=region_radius {
+            let region_origin_x = center_origin_x + region_x * region_size;
+            let region_origin_z = center_origin_z + region_z * region_size;
+            let region_key = pack_chunk_key(region_origin_x, region_origin_z);
+            target_keys.insert(region_key);
+            loaded_regions = loaded_regions.saturating_add(1);
+
+            if crate::packed_quad_gpu_generation::region_has_active_chunks(
+                region_origin_x,
+                region_origin_z,
+                region_size,
+                view_center,
+                view_radius,
+            ) {
+                active_regions.push((region_origin_x, region_origin_z, region_key));
+            }
+        }
+    }
+    let (active_region_count, active_region_hash) =
+        PackedGpuGenerationTarget::active_region_signature(
+            active_regions.iter().map(|(_, _, region_key)| *region_key),
+        );
     let target = PackedGpuGenerationTarget::new(
         camera_chunk_x,
         camera_chunk_z,
@@ -2816,153 +2843,133 @@ pub fn update_packed_gpu_generation_regions(
         view_radius,
         contract_generation,
         edit_store.generation(),
+        active_region_count,
+        active_region_hash,
     );
 
-    if gpu_batches.target == Some(target) && !gpu_batches.batches.is_empty() {
-        record_packed_gpu_generation_region_mask(
-            target.loaded_regions(),
-            gpu_batches.batches.len(),
-        );
+    if gpu_batches
+        .target
+        .is_some_and(|previous| previous.matches_active_region_window(target))
+        && !gpu_batches.batches.is_empty()
+    {
+        record_packed_gpu_generation_region_mask(loaded_regions, active_region_count);
         record_packed_gpu_generation_cache_lifecycle(0, 0, 0, 0);
         record_packed_gpu_generation_update(elapsed_us(update_started), true);
+        gpu_batches.target = Some(target);
         return;
     }
 
     let mut generated_batches = Vec::new();
-    let mut target_keys = std::collections::HashSet::new();
-    let mut loaded_regions = 0usize;
     let mut cache_hits = 0usize;
     let mut cache_misses = 0usize;
     let mut cache_invalidated = 0usize;
 
-    for region_z in -region_radius..=region_radius {
-        for region_x in -region_radius..=region_radius {
-            let region_origin_x = center_origin_x + region_x * region_size;
-            let region_origin_z = center_origin_z + region_z * region_size;
-            let region_key = pack_chunk_key(region_origin_x, region_origin_z);
-            target_keys.insert(region_key);
-            loaded_regions = loaded_regions.saturating_add(1);
+    for (region_origin_x, region_origin_z, region_key) in active_regions {
+        if let Some(batch) = reuse_generated_region_cache_entry(
+            &mut region_cache,
+            region_key,
+            region_origin_x,
+            region_origin_z,
+            region_size,
+            contract,
+            &edit_store,
+            cache_frame,
+        ) {
+            cache_hits = cache_hits.saturating_add(1);
+            generated_batches.push(batch);
+            continue;
+        }
 
-            let region_active = crate::packed_quad_gpu_generation::region_has_active_chunks(
+        if let Some(stale) = region_cache.entries.remove(&region_key) {
+            cache_invalidated = cache_invalidated.saturating_add(1);
+            let invalidated_by_edits = edit_store.region_has_edits_since(
                 region_origin_x,
                 region_origin_z,
                 region_size,
-                view_center,
-                view_radius,
+                stale.edit_store_generation,
             );
-
-            if region_active
-                && let Some(batch) = reuse_generated_region_cache_entry(
-                    &mut region_cache,
-                    region_key,
-                    region_origin_x,
-                    region_origin_z,
-                    region_size,
-                    contract,
-                    &edit_store,
-                    cache_frame,
-                )
-            {
-                cache_hits = cache_hits.saturating_add(1);
-                generated_batches.push(batch);
-                continue;
-            }
-
-            if !region_active {
-                continue;
-            }
-
-            if let Some(stale) = region_cache.entries.remove(&region_key) {
-                cache_invalidated = cache_invalidated.saturating_add(1);
-                let invalidated_by_edits = edit_store.region_has_edits_since(
-                    region_origin_x,
-                    region_origin_z,
-                    region_size,
-                    stale.edit_store_generation,
-                );
-                info!(
-                    region_key,
-                    old_generation = stale.generation,
-                    new_generation = contract_generation,
-                    invalidated_by_edits,
-                    old_edit_store_generation = stale.edit_store_generation,
-                    edit_store_generation = edit_store.generation(),
-                    "PACKED GPU GENERATION: invalidated stale generated region cache entry"
-                );
-            } else {
-                cache_misses = cache_misses.saturating_add(1);
-            }
-
-            let source_chunk_count = {
-                let side = region_size.max(0) as usize;
-                side.saturating_mul(side)
-            };
-            if source_chunk_count == 0 {
-                continue;
-            }
-
-            let mut columns = Vec::new();
-
-            for chunk_z in region_origin_z..region_origin_z + region_size {
-                for chunk_x in region_origin_x..region_origin_x + region_size {
-                    let mut chunk_columns =
-                        crate::voxel_packed_quads::build_surface_gpu_generation_columns_for_chunk(
-                            ChunkPos::new(chunk_x, chunk_z),
-                            &context,
-                            cell_size,
-                            sand_block,
-                            &edit_store,
-                        );
-                    let offset_x =
-                        (chunk_x - region_origin_x) as u32 * rumpel_world::chunk::CHUNK_SIZE as u32;
-                    let offset_z =
-                        (chunk_z - region_origin_z) as u32 * rumpel_world::chunk::CHUNK_SIZE as u32;
-                    for column in &mut chunk_columns {
-                        column.local[0] = column.local[0].saturating_add(offset_x);
-                        column.local[1] = column.local[1].saturating_add(offset_z);
-                    }
-                    columns.extend(chunk_columns);
-                }
-            }
-
-            let max_output_quads = columns
-                .len()
-                .saturating_mul(PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN);
-            let params = PackedGpuGenerationParams::new(
-                columns.len(),
-                max_output_quads,
-                packed_gpu_generation_lod_for_cell_size(cell_size),
-                context.palette.air,
-                context.palette.dirt,
-                context.palette.grass,
-                context.palette.stone,
+            info!(
+                region_key,
+                old_generation = stale.generation,
+                new_generation = contract_generation,
+                invalidated_by_edits,
+                old_edit_store_generation = stale.edit_store_generation,
+                edit_store_generation = edit_store.generation(),
+                "PACKED GPU GENERATION: invalidated stale generated region cache entry"
             );
-            let (bounds_min, bounds_max) = packed_region_world_bounds(region_key, region_size);
-
-            let entry = crate::packed_quad_gpu_generation::GeneratedRegionCacheEntry {
-                key: region_key,
-                columns: Arc::new(columns),
-                params,
-                source_chunk_count,
-                max_output_quads,
-                translation: Vec4::new(
-                    (region_origin_x * rumpel_world::chunk::CHUNK_SIZE as i32) as f32,
-                    0.0,
-                    (region_origin_z * rumpel_world::chunk::CHUNK_SIZE as i32) as f32,
-                    0.0,
-                ),
-                bounds_min,
-                bounds_max,
-                generation: contract_generation,
-                contract,
-                edit_store_generation: edit_store.generation(),
-                last_seen_frame: cache_frame,
-            };
-
-            let batch = entry.to_batch();
-            region_cache.entries.insert(region_key, entry);
-            generated_batches.push(batch);
+        } else {
+            cache_misses = cache_misses.saturating_add(1);
         }
+
+        let source_chunk_count = {
+            let side = region_size.max(0) as usize;
+            side.saturating_mul(side)
+        };
+        if source_chunk_count == 0 {
+            continue;
+        }
+
+        let mut columns = Vec::new();
+
+        for chunk_z in region_origin_z..region_origin_z + region_size {
+            for chunk_x in region_origin_x..region_origin_x + region_size {
+                let mut chunk_columns =
+                    crate::voxel_packed_quads::build_surface_gpu_generation_columns_for_chunk(
+                        ChunkPos::new(chunk_x, chunk_z),
+                        &context,
+                        cell_size,
+                        sand_block,
+                        &edit_store,
+                    );
+                let offset_x =
+                    (chunk_x - region_origin_x) as u32 * rumpel_world::chunk::CHUNK_SIZE as u32;
+                let offset_z =
+                    (chunk_z - region_origin_z) as u32 * rumpel_world::chunk::CHUNK_SIZE as u32;
+                for column in &mut chunk_columns {
+                    column.local[0] = column.local[0].saturating_add(offset_x);
+                    column.local[1] = column.local[1].saturating_add(offset_z);
+                }
+                columns.extend(chunk_columns);
+            }
+        }
+
+        let max_output_quads = columns
+            .len()
+            .saturating_mul(PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN);
+        let params = PackedGpuGenerationParams::new(
+            columns.len(),
+            max_output_quads,
+            packed_gpu_generation_lod_for_cell_size(cell_size),
+            context.palette.air,
+            context.palette.dirt,
+            context.palette.grass,
+            context.palette.stone,
+        );
+        let (bounds_min, bounds_max) = packed_region_world_bounds(region_key, region_size);
+
+        let entry = crate::packed_quad_gpu_generation::GeneratedRegionCacheEntry {
+            key: region_key,
+            columns: Arc::new(columns),
+            params,
+            source_chunk_count,
+            max_output_quads,
+            translation: Vec4::new(
+                (region_origin_x * rumpel_world::chunk::CHUNK_SIZE as i32) as f32,
+                0.0,
+                (region_origin_z * rumpel_world::chunk::CHUNK_SIZE as i32) as f32,
+                0.0,
+            ),
+            bounds_min,
+            bounds_max,
+            generation: contract_generation,
+            contract,
+            edit_store_generation: edit_store.generation(),
+            last_seen_frame: cache_frame,
+        };
+
+        let batch = entry.to_batch();
+        region_cache.entries.insert(region_key, entry);
+        generated_batches.push(batch);
     }
 
     let cache_entries_before_retain = region_cache.entries.len();

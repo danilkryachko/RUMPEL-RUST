@@ -48,6 +48,8 @@ pub struct PackedGpuGenerationTarget {
     pub view_radius: i32,
     pub contract_generation: u64,
     pub edit_store_generation: u64,
+    pub active_region_count: usize,
+    pub active_region_hash: u64,
 }
 
 impl PackedGpuGenerationTarget {
@@ -63,6 +65,8 @@ impl PackedGpuGenerationTarget {
         view_radius: i32,
         contract_generation: u64,
         edit_store_generation: u64,
+        active_region_count: usize,
+        active_region_hash: u64,
     ) -> Self {
         Self {
             camera_chunk_x,
@@ -74,6 +78,8 @@ impl PackedGpuGenerationTarget {
             view_radius,
             contract_generation,
             edit_store_generation,
+            active_region_count,
+            active_region_hash,
         }
     }
 
@@ -85,6 +91,33 @@ impl PackedGpuGenerationTarget {
             .saturating_add(1)
             .max(1) as usize;
         side.saturating_mul(side)
+    }
+
+    #[must_use]
+    pub fn active_region_signature<I>(active_region_keys: I) -> (usize, u64)
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut count = 0usize;
+        let mut hash = FNV64_OFFSET;
+        for key in active_region_keys {
+            count = count.saturating_add(1);
+            hash = fnv64(hash, key);
+        }
+        (count, hash)
+    }
+
+    #[must_use]
+    pub fn matches_active_region_window(self, other: Self) -> bool {
+        self.center_origin_x == other.center_origin_x
+            && self.center_origin_z == other.center_origin_z
+            && self.region_size == other.region_size
+            && self.region_radius == other.region_radius
+            && self.view_radius == other.view_radius
+            && self.contract_generation == other.contract_generation
+            && self.edit_store_generation == other.edit_store_generation
+            && self.active_region_count == other.active_region_count
+            && self.active_region_hash == other.active_region_hash
     }
 }
 
@@ -628,17 +661,98 @@ mod tests {
 
     #[test]
     fn packed_gpu_generation_target_tracks_stable_window_signature() {
-        let base = PackedGpuGenerationTarget::new(1, 2, 0, 0, 4, 1, 16, 10, 20);
-        let same = PackedGpuGenerationTarget::new(1, 2, 0, 0, 4, 1, 16, 10, 20);
-        let moved = PackedGpuGenerationTarget::new(2, 2, 0, 0, 4, 1, 16, 10, 20);
-        let edited = PackedGpuGenerationTarget::new(1, 2, 0, 0, 4, 1, 16, 10, 21);
+        let (active_region_count, active_region_hash) =
+            PackedGpuGenerationTarget::active_region_signature([1, 2, 3]);
+        let (_, changed_active_region_hash) =
+            PackedGpuGenerationTarget::active_region_signature([1, 2, 4]);
+        let base = PackedGpuGenerationTarget::new(
+            1,
+            2,
+            0,
+            0,
+            4,
+            1,
+            16,
+            10,
+            20,
+            active_region_count,
+            active_region_hash,
+        );
+        let same = PackedGpuGenerationTarget::new(
+            1,
+            2,
+            0,
+            0,
+            4,
+            1,
+            16,
+            10,
+            20,
+            active_region_count,
+            active_region_hash,
+        );
+        let moved = PackedGpuGenerationTarget::new(
+            2,
+            2,
+            0,
+            0,
+            4,
+            1,
+            16,
+            10,
+            20,
+            active_region_count,
+            active_region_hash,
+        );
+        let edited = PackedGpuGenerationTarget::new(
+            1,
+            2,
+            0,
+            0,
+            4,
+            1,
+            16,
+            10,
+            21,
+            active_region_count,
+            active_region_hash,
+        );
+        let changed_active = PackedGpuGenerationTarget::new(
+            1,
+            2,
+            0,
+            0,
+            4,
+            1,
+            16,
+            10,
+            20,
+            active_region_count,
+            changed_active_region_hash,
+        );
 
         assert_eq!(base, same);
         assert_ne!(base, moved);
         assert_ne!(base, edited);
+        assert!(base.matches_active_region_window(moved));
+        assert!(!base.matches_active_region_window(edited));
+        assert!(!base.matches_active_region_window(changed_active));
         assert_eq!(base.loaded_regions(), 9);
         assert_eq!(
-            PackedGpuGenerationTarget::new(1, 2, 0, 0, 4, 0, 16, 10, 20).loaded_regions(),
+            PackedGpuGenerationTarget::new(
+                1,
+                2,
+                0,
+                0,
+                4,
+                0,
+                16,
+                10,
+                20,
+                active_region_count,
+                active_region_hash
+            )
+            .loaded_regions(),
             1
         );
     }
