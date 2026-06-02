@@ -514,6 +514,10 @@ pub struct PackedQuadPipelineStats {
     pub generated_regions_active: usize,
     /// Generated regions drawn after per-view frustum culling.
     pub generated_regions_visible: usize,
+    /// CPU time spent in the main-world GPU-generated region update system.
+    pub generated_update_us: u64,
+    /// Whether the main-world GPU-generated region update skipped stable target planning.
+    pub generated_update_skipped: bool,
 }
 
 struct PackedQuadMetricsBridge {
@@ -581,6 +585,8 @@ struct PackedQuadMetricsBridge {
     generated_regions_loaded: AtomicUsize,
     generated_regions_active: AtomicUsize,
     generated_regions_visible: AtomicUsize,
+    generated_update_us: AtomicU64,
+    generated_update_skipped: AtomicUsize,
 }
 
 static METRICS_BRIDGE: PackedQuadMetricsBridge = PackedQuadMetricsBridge {
@@ -648,6 +654,8 @@ static METRICS_BRIDGE: PackedQuadMetricsBridge = PackedQuadMetricsBridge {
     generated_regions_loaded: AtomicUsize::new(0),
     generated_regions_active: AtomicUsize::new(0),
     generated_regions_visible: AtomicUsize::new(0),
+    generated_update_us: AtomicU64::new(0),
+    generated_update_skipped: AtomicUsize::new(0),
 };
 
 static CONFIRMED_PACKED_BATCH_GENERATIONS: LazyLock<Mutex<HashMap<u64, u64>>> =
@@ -2234,6 +2242,15 @@ pub fn record_packed_gpu_generation_visible_draws(visible_regions: usize, visibl
         .store(visible_regions, Ordering::Relaxed);
 }
 
+pub fn record_packed_gpu_generation_update(update_us: u64, skipped: bool) {
+    METRICS_BRIDGE
+        .generated_update_us
+        .store(update_us, Ordering::Relaxed);
+    METRICS_BRIDGE
+        .generated_update_skipped
+        .store(usize::from(skipped), Ordering::Relaxed);
+}
+
 pub fn record_packed_gpu_generation_prepare(
     capacity_quads: usize,
     slot_quads: usize,
@@ -2560,6 +2577,11 @@ fn write_packed_quad_metrics(stats: &mut PackedQuadPipelineStats) {
     stats.generated_regions_visible = METRICS_BRIDGE
         .generated_regions_visible
         .load(Ordering::Relaxed);
+    stats.generated_update_us = METRICS_BRIDGE.generated_update_us.load(Ordering::Relaxed);
+    stats.generated_update_skipped = METRICS_BRIDGE
+        .generated_update_skipped
+        .load(Ordering::Relaxed)
+        != 0;
 
     if stats.draw_mode == PACKED_DRAW_MODE_MATERIAL {
         stats.batches = stats.material_entities;
@@ -2710,6 +2732,7 @@ pub fn update_packed_gpu_generation_regions(
     mut region_cache: ResMut<crate::packed_quad_gpu_generation::GeneratedRegionCache>,
     camera_query: Query<&GlobalTransform, With<Camera3d>>,
 ) {
+    let update_started = Instant::now();
     let context = WorldGenerationContext::from_registry(&registry);
     let region_size = packed_region_size_from_env();
     let region_radius = packed_gpu_generation_region_radius_from_env();
@@ -2754,6 +2777,7 @@ pub fn update_packed_gpu_generation_regions(
             target.loaded_regions(),
             gpu_batches.batches.len(),
         );
+        record_packed_gpu_generation_update(elapsed_us(update_started), true);
         return;
     }
 
@@ -2931,6 +2955,8 @@ pub fn update_packed_gpu_generation_regions(
             "PACKED GPU GENERATION: updated compact column source batches for new camera target"
         );
     }
+
+    record_packed_gpu_generation_update(elapsed_us(update_started), false);
 }
 
 /// Region-grid half-width in region tiles needed to cover a circular chunk view radius.

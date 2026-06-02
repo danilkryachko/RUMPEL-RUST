@@ -165,7 +165,7 @@ report="$compare_dir/report.txt"
     printf 'view_radius=%s\n' "$view_radius"
     printf 'generated_region_radius=%s\n' "$region_radius"
     printf '\n'
-    printf 'variant ready_status avg_raw_fps worst_frame_ms frames_ge_25ms draw_mode generated_regions_loaded generated_regions_active generated_regions_visible visible_quads uploaded_quads indirect_draw_commands gpu_cull_input_commands gpu_cull_visible_commands gpu_cull_visible_quads cpu_visible_commands log summary\n'
+    printf 'variant ready_status avg_raw_fps worst_frame_ms frames_ge_25ms draw_mode generated_regions_loaded generated_regions_active generated_regions_visible generated_update_us generated_update_skipped visible_quads uploaded_quads indirect_draw_commands gpu_cull_input_commands gpu_cull_visible_commands gpu_cull_visible_quads cpu_visible_commands log summary\n'
     for variant in cpu generated; do
         stdout_log="$(cat "$compare_dir/${variant}.stdout.path")"
         summary="$compare_dir/${variant}.summary.txt"
@@ -179,6 +179,8 @@ report="$compare_dir/report.txt"
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_regions_loaded")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_regions_active")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_regions_visible")" \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_update_us")" \
+            "$(extract_profile_field "$stdout_log" "profile worst_packed" "generated_update_skipped")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "visible_quads")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "uploaded_quads")" \
             "$(extract_profile_field "$stdout_log" "profile worst_packed" "indirect_draw_commands")" \
