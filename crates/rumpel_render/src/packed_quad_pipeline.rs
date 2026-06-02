@@ -140,6 +140,7 @@ pub struct PackedGpuGenerationRegionScratch {
     loaded_region_keys: Vec<u64>,
     active_regions: Vec<(i32, i32, u64)>,
     target_keys: HashSet<u64>,
+    generated_batches: Vec<PackedGpuGenerationBatch>,
 }
 
 /// Represents a prepared batch of packed voxel quads in the Render World.
@@ -2985,7 +2986,7 @@ pub fn update_packed_gpu_generation_regions(
         return;
     }
 
-    let mut generated_batches = Vec::new();
+    scratch.generated_batches.clear();
     let mut cache_hits = 0usize;
     let mut cache_misses = 0usize;
     let mut cache_invalidated = 0usize;
@@ -3011,7 +3012,7 @@ pub fn update_packed_gpu_generation_regions(
             cache_frame,
         ) {
             cache_hits = cache_hits.saturating_add(1);
-            generated_batches.push(batch);
+            scratch.generated_batches.push(batch);
             continue;
         }
 
@@ -3104,9 +3105,10 @@ pub fn update_packed_gpu_generation_regions(
 
         let batch = entry.to_batch();
         region_cache.entries.insert(region_key, entry);
-        generated_batches.push(batch);
+        scratch.generated_batches.push(batch);
     }
-    generated_batches.sort_by_key(|batch| batch.key);
+    scratch.generated_batches.sort_by_key(|batch| batch.key);
+    let generated_batch_count = scratch.generated_batches.len();
 
     let cache_entries_before_retain = region_cache.entries.len();
     region_cache
@@ -3115,7 +3117,7 @@ pub fn update_packed_gpu_generation_regions(
     let cache_evicted = cache_entries_before_retain.saturating_sub(region_cache.entries.len());
 
     cpu_batches.batches.clear();
-    record_packed_gpu_generation_region_mask(loaded_regions, generated_batches.len());
+    record_packed_gpu_generation_region_mask(loaded_regions, generated_batch_count);
     record_packed_gpu_generation_cache_lifecycle(
         cache_hits,
         cache_misses,
@@ -3123,8 +3125,9 @@ pub fn update_packed_gpu_generation_regions(
         cache_evicted,
     );
 
-    let batch_signature = PackedGpuGenerationBatches::calculate_batch_signature(&generated_batches);
-    let batch_summary = PackedGpuGenerationBatches::summarize_batches(&generated_batches);
+    let batch_signature =
+        PackedGpuGenerationBatches::calculate_batch_signature(&scratch.generated_batches);
+    let batch_summary = PackedGpuGenerationBatches::summarize_batches(&scratch.generated_batches);
     let changed = gpu_batches.batch_signature != batch_signature;
 
     gpu_batches.target = Some(target);
@@ -3132,7 +3135,7 @@ pub fn update_packed_gpu_generation_regions(
     if changed {
         gpu_batches.batch_signature = batch_signature;
         gpu_batches.summary = batch_summary;
-        gpu_batches.batches = generated_batches;
+        std::mem::swap(&mut gpu_batches.batches, &mut scratch.generated_batches);
 
         info!(
             region_size,
@@ -3146,6 +3149,7 @@ pub fn update_packed_gpu_generation_regions(
             "PACKED GPU GENERATION: updated compact column source batches for new camera target"
         );
     }
+    scratch.generated_batches.clear();
 
     record_packed_gpu_generation_update(elapsed_us(update_started), false);
 }
