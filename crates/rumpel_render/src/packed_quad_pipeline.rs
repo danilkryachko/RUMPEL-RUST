@@ -316,7 +316,7 @@ impl PreparedPackedQuadGpuCull {
         self.dispatched.load(Ordering::Acquire)
     }
 
-    fn disable(&mut self) {
+    pub fn disable(&mut self) {
         self.enabled = false;
         self.compact_enabled = false;
         self.count_supported = false;
@@ -2228,9 +2228,6 @@ pub fn record_packed_gpu_generation_visible_draws(visible_regions: usize, visibl
     METRICS_BRIDGE
         .visible_quads
         .store(visible_quads, Ordering::Relaxed);
-    METRICS_BRIDGE
-        .indirect_draw_commands
-        .store(visible_regions, Ordering::Relaxed);
     METRICS_BRIDGE
         .cpu_visible_commands
         .store(visible_regions, Ordering::Relaxed);
