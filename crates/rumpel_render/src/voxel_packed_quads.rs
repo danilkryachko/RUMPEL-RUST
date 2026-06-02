@@ -620,6 +620,39 @@ fn surface_neighbor_heights(
     let world_x = source.world_origin_x + column.x as i32;
     let world_z = source.world_origin_z + column.z as i32;
 
+    if !source.has_edits {
+        return [
+            terrain_surface_cell_height_with_noise(
+                world_x + column.width as i32,
+                world_z,
+                column.width,
+                column.depth,
+                source.perlin,
+            ),
+            terrain_surface_cell_height_with_noise(
+                world_x - column.width as i32,
+                world_z,
+                column.width,
+                column.depth,
+                source.perlin,
+            ),
+            terrain_surface_cell_height_with_noise(
+                world_x,
+                world_z + column.depth as i32,
+                column.width,
+                column.depth,
+                source.perlin,
+            ),
+            terrain_surface_cell_height_with_noise(
+                world_x,
+                world_z - column.depth as i32,
+                column.width,
+                column.depth,
+                source.perlin,
+            ),
+        ];
+    }
+
     [
         surface_neighbor_sample_height(
             world_x + column.width as i32,
