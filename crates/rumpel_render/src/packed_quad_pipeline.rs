@@ -3091,34 +3091,16 @@ pub fn update_packed_gpu_generation_regions(
         cache_evicted,
     );
 
-    let mut changed = false;
-    if gpu_batches.batches.len() != generated_batches.len() {
-        changed = true;
-    } else {
-        for (a, b) in gpu_batches.batches.iter().zip(generated_batches.iter()) {
-            if a.key != b.key || a.generation != b.generation {
-                changed = true;
-                break;
-            }
-        }
-    }
+    let batch_signature = PackedGpuGenerationBatches::calculate_batch_signature(&generated_batches);
+    let batch_summary = PackedGpuGenerationBatches::summarize_batches(&generated_batches);
+    let changed = gpu_batches.batch_signature != batch_signature;
 
     gpu_batches.target = Some(target);
 
     if changed {
-        gpu_batches.batch_signature =
-            PackedGpuGenerationBatches::calculate_batch_signature(&generated_batches);
+        gpu_batches.batch_signature = batch_signature;
+        gpu_batches.summary = batch_summary;
         gpu_batches.batches = generated_batches;
-        let total_columns = gpu_batches
-            .batches
-            .iter()
-            .map(|batch| batch.columns.len())
-            .sum::<usize>();
-        let total_max_output_quads = gpu_batches
-            .batches
-            .iter()
-            .map(|batch| batch.max_output_quads)
-            .sum::<usize>();
 
         info!(
             region_size,
@@ -3127,8 +3109,8 @@ pub fn update_packed_gpu_generation_regions(
             loaded_regions,
             active_regions = gpu_batches.batches.len(),
             batches = gpu_batches.batches.len(),
-            columns = total_columns,
-            max_output_quads = total_max_output_quads,
+            columns = gpu_batches.summary.total_column_count,
+            max_output_quads = gpu_batches.summary.total_max_output_quads,
             "PACKED GPU GENERATION: updated compact column source batches for new camera target"
         );
     }

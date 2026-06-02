@@ -15,6 +15,7 @@ pub struct PackedGpuGenerationBatches {
     pub batches: Vec<PackedGpuGenerationBatch>,
     pub target: Option<PackedGpuGenerationTarget>,
     pub batch_signature: u64,
+    pub summary: PackedGpuGenerationBatchSummary,
 }
 
 impl ExtractResource for PackedGpuGenerationBatches {
@@ -26,6 +27,28 @@ impl ExtractResource for PackedGpuGenerationBatches {
 }
 
 impl PackedGpuGenerationBatches {
+    #[must_use]
+    pub fn summarize_batches(
+        batches: &[PackedGpuGenerationBatch],
+    ) -> PackedGpuGenerationBatchSummary {
+        let mut summary = PackedGpuGenerationBatchSummary::default();
+        for batch in batches {
+            let column_count = batch.columns.len();
+            if column_count == 0 || batch.max_output_quads == 0 {
+                summary.invalid_batch_count = summary.invalid_batch_count.saturating_add(1);
+            }
+            summary.total_column_count = summary.total_column_count.saturating_add(column_count);
+            summary.total_max_output_quads = summary
+                .total_max_output_quads
+                .saturating_add(batch.max_output_quads.max(1));
+            summary.max_column_count = summary.max_column_count.max(column_count);
+            summary.source_chunk_count = summary
+                .source_chunk_count
+                .saturating_add(batch.source_chunk_count);
+        }
+        summary
+    }
+
     #[must_use]
     pub fn calculate_batch_signature(batches: &[PackedGpuGenerationBatch]) -> u64 {
         let mut hash = FNV64_OFFSET;
@@ -54,6 +77,22 @@ impl PackedGpuGenerationBatches {
             }
         }
         hash.max(1)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PackedGpuGenerationBatchSummary {
+    pub invalid_batch_count: usize,
+    pub total_column_count: usize,
+    pub total_max_output_quads: usize,
+    pub max_column_count: usize,
+    pub source_chunk_count: usize,
+}
+
+impl PackedGpuGenerationBatchSummary {
+    #[must_use]
+    pub fn is_renderable(self, batch_count: usize) -> bool {
+        batch_count > 0 && self.invalid_batch_count == 0
     }
 }
 
@@ -604,6 +643,47 @@ mod tests {
         assert_eq!(packed_gpu_generation_workgroups(64), 1);
         assert_eq!(packed_gpu_generation_workgroups(65), 2);
         assert_eq!(packed_gpu_generation_workgroups(usize::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn packed_gpu_generation_batch_summary_tracks_renderable_totals() {
+        let make_batch = |key, column_count, max_output_quads, source_chunk_count| {
+            let columns = (0..column_count)
+                .map(|column| {
+                    PackedGpuSurfaceColumn::from_parts([column, column, 1, 1], [4, 4, 4, 4, 4], 2)
+                })
+                .collect::<Vec<_>>();
+            PackedGpuGenerationBatch {
+                key,
+                columns: Arc::new(columns),
+                params: PackedGpuGenerationParams::new(
+                    column_count,
+                    max_output_quads,
+                    0,
+                    0,
+                    1,
+                    2,
+                    3,
+                ),
+                source_chunk_count,
+                max_output_quads,
+                translation: Vec4::ZERO,
+                bounds_min: Vec3::ZERO,
+                bounds_max: Vec3::ONE,
+                generation: 1,
+            }
+        };
+
+        let batches = [make_batch(1, 3, 21, 2), make_batch(2, 0, 0, 4)];
+        let summary = PackedGpuGenerationBatches::summarize_batches(&batches);
+
+        assert_eq!(summary.invalid_batch_count, 1);
+        assert_eq!(summary.total_column_count, 3);
+        assert_eq!(summary.total_max_output_quads, 22);
+        assert_eq!(summary.max_column_count, 3);
+        assert_eq!(summary.source_chunk_count, 6);
+        assert!(!summary.is_renderable(batches.len()));
+        assert!(!PackedGpuGenerationBatchSummary::default().is_renderable(0));
     }
 
     #[test]

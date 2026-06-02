@@ -755,12 +755,13 @@ fn prepare_packed_gpu_generated_draw(
     } else {
         extracted_batches.batch_signature
     };
+    let batch_summary = if extracted_batches.batch_signature == 0 {
+        PackedGpuGenerationBatches::summarize_batches(ordered_batches)
+    } else {
+        extracted_batches.summary
+    };
 
-    if ordered_batches.is_empty()
-        || ordered_batches
-            .iter()
-            .any(|batch| batch.columns.is_empty() || batch.max_output_quads == 0)
-    {
+    if !batch_summary.is_renderable(ordered_batches.len()) {
         prepared.disable();
         return;
     }
@@ -839,21 +840,11 @@ fn prepare_packed_gpu_generated_draw(
         );
 
     let mut planned_regions = Vec::with_capacity(ordered_batches.len());
-    let mut total_max_output_quads = 0usize;
-    let mut total_column_count = 0usize;
-    let mut max_column_count = 0usize;
-    let mut source_chunk_count = 0usize;
-
     for (draw_command_index, batch) in ordered_batches.iter().enumerate() {
         let requested_quads = batch.max_output_quads.max(1);
         let Some(allocation) = new_allocations.get(&batch.key) else {
             continue;
         };
-
-        total_max_output_quads = total_max_output_quads.saturating_add(requested_quads);
-        total_column_count = total_column_count.saturating_add(batch.columns.len());
-        max_column_count = max_column_count.max(batch.columns.len());
-        source_chunk_count = source_chunk_count.saturating_add(batch.source_chunk_count);
 
         planned_regions.push(PreparedPackedGpuGeneratedRegion {
             key: batch.key,
@@ -886,9 +877,11 @@ fn prepare_packed_gpu_generated_draw(
 
     arena.allocations = new_allocations;
     arena.next_free_quads = next_free_quads;
-    arena.stats.used_quads = total_max_output_quads;
+    arena.stats.used_quads = batch_summary.total_max_output_quads;
     arena.stats.allocated_slot_quads = next_free_quads;
-    arena.stats.free_quads = arena.capacity_quads.saturating_sub(total_max_output_quads);
+    arena.stats.free_quads = arena
+        .capacity_quads
+        .saturating_sub(batch_summary.total_max_output_quads);
     arena.stats.uploaded_bytes = 0;
 
     if prepared.matches_regions(&planned_regions, arena.generation)
@@ -901,10 +894,10 @@ fn prepare_packed_gpu_generated_draw(
         crate::packed_quad_pipeline::record_packed_gpu_generation_prepare(
             arena.capacity_quads,
             next_free_quads,
-            total_max_output_quads,
-            total_column_count,
+            batch_summary.total_max_output_quads,
+            batch_summary.total_column_count,
             ordered_batches.len(),
-            source_chunk_count,
+            batch_summary.source_chunk_count,
         );
         prepare_generated_gpu_cull(
             &render_device,
@@ -934,8 +927,11 @@ fn prepare_packed_gpu_generated_draw(
         buffers.jobs_capacity = next_capacity;
     }
 
-    if buffers.columns_buffer.is_none() || buffers.columns_capacity < total_column_count {
-        let next_capacity = next_packed_gpu_generation_buffer_capacity(total_column_count, 256);
+    if buffers.columns_buffer.is_none()
+        || buffers.columns_capacity < batch_summary.total_column_count
+    {
+        let next_capacity =
+            next_packed_gpu_generation_buffer_capacity(batch_summary.total_column_count, 256);
         buffers.columns_buffer =
             Some(
                 render_device.create_buffer(&BufferDescriptor {
@@ -1021,7 +1017,7 @@ fn prepare_packed_gpu_generated_draw(
     };
 
     let mut jobs = Vec::with_capacity(ordered_batches.len());
-    let mut columns = Vec::with_capacity(total_column_count);
+    let mut columns = Vec::with_capacity(batch_summary.total_column_count);
     let mut draw_params = Vec::with_capacity(ordered_batches.len());
     let mut column_offset = 0usize;
 
@@ -1076,10 +1072,10 @@ fn prepare_packed_gpu_generated_draw(
 
     prepared.enabled = true;
     prepared.regions = planned_regions;
-    prepared.total_column_count = total_column_count;
-    prepared.max_column_count = max_column_count;
-    prepared.total_max_output_quads = total_max_output_quads;
-    prepared.source_chunk_count = source_chunk_count;
+    prepared.total_column_count = batch_summary.total_column_count;
+    prepared.max_column_count = batch_summary.max_column_count;
+    prepared.total_max_output_quads = batch_summary.total_max_output_quads;
+    prepared.source_chunk_count = batch_summary.source_chunk_count;
     prepared.command_count = ordered_batches.len();
     prepared.arena_generation = arena.generation;
     prepared.batch_signature = batch_signature;
@@ -1095,10 +1091,10 @@ fn prepare_packed_gpu_generated_draw(
     crate::packed_quad_pipeline::record_packed_gpu_generation_prepare(
         arena.capacity_quads,
         next_free_quads,
-        total_max_output_quads,
-        total_column_count,
+        batch_summary.total_max_output_quads,
+        batch_summary.total_column_count,
         ordered_batches.len(),
-        source_chunk_count,
+        batch_summary.source_chunk_count,
     );
     prepare_generated_gpu_cull(
         &render_device,
