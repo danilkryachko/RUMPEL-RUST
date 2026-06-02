@@ -2018,32 +2018,30 @@ impl render_graph::Node for PackedQuadRenderNode {
                     }
                     crate::packed_quad_pipeline::record_packed_quad_cpu_visible_indirect(false, 0);
                 } else {
-                    let visible_regions = gpu_generated
-                        .regions
-                        .iter()
-                        .filter(|region| {
-                            crate::packed_quad_pipeline::generated_region_bounds_visible(
-                                view_position,
-                                clip_from_world,
-                                region.bounds_min,
-                                region.bounds_max,
-                            )
-                        })
-                        .collect::<Vec<_>>();
                     let draw_command_stride = std::mem::size_of::<
                         crate::packed_quad_buffer::PackedQuadDrawCommand,
                     >() as u64;
+                    let mut visible_regions = 0usize;
                     let mut visible_quads = 0usize;
-                    for region in &visible_regions {
+                    for region in &gpu_generated.regions {
+                        if !crate::packed_quad_pipeline::generated_region_bounds_visible(
+                            view_position,
+                            clip_from_world,
+                            region.bounds_min,
+                            region.bounds_max,
+                        ) {
+                            continue;
+                        }
+                        visible_regions = visible_regions.saturating_add(1);
                         visible_quads = visible_quads.saturating_add(region.max_output_quads);
                         let draw_offset = region
                             .draw_command_index
                             .saturating_mul(draw_command_stride as usize);
                         render_pass.draw_indirect(indirect_buffer, draw_offset as u64);
                     }
-                    render_draw_calls = visible_regions.len();
+                    render_draw_calls = visible_regions;
                     crate::packed_quad_pipeline::record_packed_gpu_generation_visible_draws(
-                        visible_regions.len(),
+                        visible_regions,
                         visible_quads,
                     );
                     crate::packed_quad_pipeline::record_packed_quad_cpu_visible_indirect(false, 0);
