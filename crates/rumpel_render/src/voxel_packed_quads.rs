@@ -424,46 +424,16 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
         has_edits,
     };
     for_each_surface_packed_column_for_chunk(source, |column| {
+        let neighbor_heights =
+            surface_neighbor_heights(column, chunk_pos, context, edit_store, &perlin, has_edits);
         gpu_columns.push(PackedGpuSurfaceColumn::from_parts(
             [column.x, column.z, column.width, column.depth],
             [
                 column.height,
-                surface_neighbor_height(
-                    column,
-                    PackedVoxelFace::PlusX,
-                    chunk_pos,
-                    context,
-                    edit_store,
-                    &perlin,
-                    has_edits,
-                ),
-                surface_neighbor_height(
-                    column,
-                    PackedVoxelFace::MinusX,
-                    chunk_pos,
-                    context,
-                    edit_store,
-                    &perlin,
-                    has_edits,
-                ),
-                surface_neighbor_height(
-                    column,
-                    PackedVoxelFace::PlusZ,
-                    chunk_pos,
-                    context,
-                    edit_store,
-                    &perlin,
-                    has_edits,
-                ),
-                surface_neighbor_height(
-                    column,
-                    PackedVoxelFace::MinusZ,
-                    chunk_pos,
-                    context,
-                    edit_store,
-                    &perlin,
-                    has_edits,
-                ),
+                neighbor_heights[0],
+                neighbor_heights[1],
+                neighbor_heights[2],
+                neighbor_heights[3],
             ],
             column.top_block,
         ));
@@ -613,6 +583,71 @@ fn surface_neighbor_height(
         PackedVoxelFace::PlusY | PackedVoxelFace::MinusY => return column.height,
     };
 
+    surface_neighbor_sample_height(
+        sample_x, sample_z, column, context, edit_store, perlin, has_edits,
+    )
+}
+
+fn surface_neighbor_heights(
+    column: SurfacePackedColumn,
+    chunk_pos: ChunkPos,
+    context: &WorldGenerationContext,
+    edit_store: &WorldEditStore,
+    perlin: &Perlin,
+    has_edits: bool,
+) -> [usize; 4] {
+    let world_x = chunk_pos.x * CHUNK_SIZE as i32 + column.x as i32;
+    let world_z = chunk_pos.z * CHUNK_SIZE as i32 + column.z as i32;
+
+    [
+        surface_neighbor_sample_height(
+            world_x + column.width as i32,
+            world_z,
+            column,
+            context,
+            edit_store,
+            perlin,
+            has_edits,
+        ),
+        surface_neighbor_sample_height(
+            world_x - column.width as i32,
+            world_z,
+            column,
+            context,
+            edit_store,
+            perlin,
+            has_edits,
+        ),
+        surface_neighbor_sample_height(
+            world_x,
+            world_z + column.depth as i32,
+            column,
+            context,
+            edit_store,
+            perlin,
+            has_edits,
+        ),
+        surface_neighbor_sample_height(
+            world_x,
+            world_z - column.depth as i32,
+            column,
+            context,
+            edit_store,
+            perlin,
+            has_edits,
+        ),
+    ]
+}
+
+fn surface_neighbor_sample_height(
+    sample_x: i32,
+    sample_z: i32,
+    column: SurfacePackedColumn,
+    context: &WorldGenerationContext,
+    edit_store: &WorldEditStore,
+    perlin: &Perlin,
+    has_edits: bool,
+) -> usize {
     if !has_edits {
         return terrain_surface_cell_height_with_noise(
             sample_x,
