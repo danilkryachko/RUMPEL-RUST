@@ -329,14 +329,15 @@ pub fn build_surface_packed_quads_for_chunk(
     sand_block: BlockId,
 ) -> Vec<PackedVoxelQuad> {
     let empty_edits = WorldEditStore::default();
-    let columns = build_surface_packed_columns_for_chunk(
+    let perlin = terrain_perlin();
+    let columns = build_surface_packed_columns_for_chunk_with_perlin(
         chunk_pos,
         context,
         requested_cell_size,
         sand_block,
         &empty_edits,
+        &perlin,
     );
-    let perlin = terrain_perlin();
     let cell_size = requested_cell_size.clamp(1, CHUNK_SIZE);
 
     let mut quads = Vec::with_capacity(columns.len() * 3);
@@ -403,6 +404,7 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
         requested_cell_size,
         sand_block,
         edit_store,
+        &perlin,
         |column| {
             gpu_columns.push(PackedGpuSurfaceColumn::from_parts(
                 [column.x, column.z, column.width, column.depth],
@@ -447,12 +449,13 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
     );
 }
 
-fn build_surface_packed_columns_for_chunk(
+fn build_surface_packed_columns_for_chunk_with_perlin(
     chunk_pos: ChunkPos,
     context: &WorldGenerationContext,
     requested_cell_size: usize,
     sand_block: BlockId,
     edit_store: &WorldEditStore,
+    perlin: &Perlin,
 ) -> Vec<SurfacePackedColumn> {
     let mut columns =
         Vec::with_capacity(packed_gpu_generation_columns_per_chunk(requested_cell_size));
@@ -462,6 +465,7 @@ fn build_surface_packed_columns_for_chunk(
         requested_cell_size,
         sand_block,
         edit_store,
+        perlin,
         |column| columns.push(column),
     );
     columns
@@ -473,12 +477,12 @@ fn for_each_surface_packed_column_for_chunk(
     requested_cell_size: usize,
     sand_block: BlockId,
     edit_store: &WorldEditStore,
+    perlin: &Perlin,
     mut visit: impl FnMut(SurfacePackedColumn),
 ) {
     let cell_size = requested_cell_size.clamp(1, CHUNK_SIZE);
     let cells_x = CHUNK_SIZE.div_ceil(cell_size);
     let cells_z = CHUNK_SIZE.div_ceil(cell_size);
-    let perlin = terrain_perlin();
     let chunk_edited = edit_store.chunk_revision(chunk_pos) > 0;
 
     for cell_z in 0..cells_z {
@@ -498,7 +502,7 @@ fn for_each_surface_packed_column_for_chunk(
                     context.palette,
                     sand_block,
                     edit_store,
-                    &perlin,
+                    perlin,
                 )
             } else {
                 terrain_surface_cell_sample_with_noise(
@@ -508,7 +512,7 @@ fn for_each_surface_packed_column_for_chunk(
                     depth,
                     context.palette,
                     sand_block,
-                    &perlin,
+                    perlin,
                 )
             };
 
@@ -1375,12 +1379,13 @@ mod tests {
         ] {
             for cell_size in [1, 2, 4, 8] {
                 let edit_store = WorldEditStore::default();
-                let cpu_columns = build_surface_packed_columns_for_chunk(
+                let cpu_columns = build_surface_packed_columns_for_chunk_with_perlin(
                     chunk_pos,
                     &context,
                     cell_size,
                     sand_block,
                     &edit_store,
+                    &perlin,
                 );
                 let gpu_columns = build_surface_gpu_generation_columns_for_chunk(
                     chunk_pos,
