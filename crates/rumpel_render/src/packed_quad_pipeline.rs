@@ -518,6 +518,14 @@ pub struct PackedQuadPipelineStats {
     pub generated_update_us: u64,
     /// Whether the main-world GPU-generated region update skipped stable target planning.
     pub generated_update_skipped: bool,
+    /// Generated regions reused from the CPU-side source cache this frame.
+    pub generated_cache_hits: usize,
+    /// Generated regions built because no reusable cache entry was available this frame.
+    pub generated_cache_misses: usize,
+    /// Generated cache entries invalidated by source-contract or edit-store changes this frame.
+    pub generated_cache_invalidated: usize,
+    /// Generated cache entries evicted because they left the loaded region window this frame.
+    pub generated_cache_evicted: usize,
 }
 
 struct PackedQuadMetricsBridge {
@@ -587,6 +595,10 @@ struct PackedQuadMetricsBridge {
     generated_regions_visible: AtomicUsize,
     generated_update_us: AtomicU64,
     generated_update_skipped: AtomicUsize,
+    generated_cache_hits: AtomicUsize,
+    generated_cache_misses: AtomicUsize,
+    generated_cache_invalidated: AtomicUsize,
+    generated_cache_evicted: AtomicUsize,
 }
 
 static METRICS_BRIDGE: PackedQuadMetricsBridge = PackedQuadMetricsBridge {
@@ -656,6 +668,10 @@ static METRICS_BRIDGE: PackedQuadMetricsBridge = PackedQuadMetricsBridge {
     generated_regions_visible: AtomicUsize::new(0),
     generated_update_us: AtomicU64::new(0),
     generated_update_skipped: AtomicUsize::new(0),
+    generated_cache_hits: AtomicUsize::new(0),
+    generated_cache_misses: AtomicUsize::new(0),
+    generated_cache_invalidated: AtomicUsize::new(0),
+    generated_cache_evicted: AtomicUsize::new(0),
 };
 
 static CONFIRMED_PACKED_BATCH_GENERATIONS: LazyLock<Mutex<HashMap<u64, u64>>> =
@@ -2251,6 +2267,26 @@ pub fn record_packed_gpu_generation_update(update_us: u64, skipped: bool) {
         .store(usize::from(skipped), Ordering::Relaxed);
 }
 
+pub fn record_packed_gpu_generation_cache_lifecycle(
+    hits: usize,
+    misses: usize,
+    invalidated: usize,
+    evicted: usize,
+) {
+    METRICS_BRIDGE
+        .generated_cache_hits
+        .store(hits, Ordering::Relaxed);
+    METRICS_BRIDGE
+        .generated_cache_misses
+        .store(misses, Ordering::Relaxed);
+    METRICS_BRIDGE
+        .generated_cache_invalidated
+        .store(invalidated, Ordering::Relaxed);
+    METRICS_BRIDGE
+        .generated_cache_evicted
+        .store(evicted, Ordering::Relaxed);
+}
+
 pub fn record_packed_gpu_generation_prepare(
     capacity_quads: usize,
     slot_quads: usize,
@@ -2582,6 +2618,16 @@ fn write_packed_quad_metrics(stats: &mut PackedQuadPipelineStats) {
         .generated_update_skipped
         .load(Ordering::Relaxed)
         != 0;
+    stats.generated_cache_hits = METRICS_BRIDGE.generated_cache_hits.load(Ordering::Relaxed);
+    stats.generated_cache_misses = METRICS_BRIDGE
+        .generated_cache_misses
+        .load(Ordering::Relaxed);
+    stats.generated_cache_invalidated = METRICS_BRIDGE
+        .generated_cache_invalidated
+        .load(Ordering::Relaxed);
+    stats.generated_cache_evicted = METRICS_BRIDGE
+        .generated_cache_evicted
+        .load(Ordering::Relaxed);
 
     if stats.draw_mode == PACKED_DRAW_MODE_MATERIAL {
         stats.batches = stats.material_entities;
@@ -2777,6 +2823,7 @@ pub fn update_packed_gpu_generation_regions(
             target.loaded_regions(),
             gpu_batches.batches.len(),
         );
+        record_packed_gpu_generation_cache_lifecycle(0, 0, 0, 0);
         record_packed_gpu_generation_update(elapsed_us(update_started), true);
         return;
     }
@@ -2784,6 +2831,9 @@ pub fn update_packed_gpu_generation_regions(
     let mut generated_batches = Vec::new();
     let mut target_keys = std::collections::HashSet::new();
     let mut loaded_regions = 0usize;
+    let mut cache_hits = 0usize;
+    let mut cache_misses = 0usize;
+    let mut cache_invalidated = 0usize;
 
     for region_z in -region_radius..=region_radius {
         for region_x in -region_radius..=region_radius {
@@ -2813,6 +2863,7 @@ pub fn update_packed_gpu_generation_regions(
                     cache_frame,
                 )
             {
+                cache_hits = cache_hits.saturating_add(1);
                 generated_batches.push(batch);
                 continue;
             }
@@ -2822,6 +2873,7 @@ pub fn update_packed_gpu_generation_regions(
             }
 
             if let Some(stale) = region_cache.entries.remove(&region_key) {
+                cache_invalidated = cache_invalidated.saturating_add(1);
                 let invalidated_by_edits = edit_store.region_has_edits_since(
                     region_origin_x,
                     region_origin_z,
@@ -2837,6 +2889,8 @@ pub fn update_packed_gpu_generation_regions(
                     edit_store_generation = edit_store.generation(),
                     "PACKED GPU GENERATION: invalidated stale generated region cache entry"
                 );
+            } else {
+                cache_misses = cache_misses.saturating_add(1);
             }
 
             let source_chunk_count = {
@@ -2911,10 +2965,18 @@ pub fn update_packed_gpu_generation_regions(
         }
     }
 
+    let cache_entries_before_retain = region_cache.entries.len();
     region_cache.entries.retain(|k, _| target_keys.contains(k));
+    let cache_evicted = cache_entries_before_retain.saturating_sub(region_cache.entries.len());
 
     cpu_batches.batches.clear();
     record_packed_gpu_generation_region_mask(loaded_regions, generated_batches.len());
+    record_packed_gpu_generation_cache_lifecycle(
+        cache_hits,
+        cache_misses,
+        cache_invalidated,
+        cache_evicted,
+    );
 
     let mut changed = false;
     if gpu_batches.batches.len() != generated_batches.len() {
