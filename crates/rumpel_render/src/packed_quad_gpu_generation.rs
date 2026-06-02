@@ -13,6 +13,7 @@ pub const PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN: usize =
 #[derive(Resource, Default, Clone)]
 pub struct PackedGpuGenerationBatches {
     pub batches: Vec<PackedGpuGenerationBatch>,
+    pub target: Option<PackedGpuGenerationTarget>,
 }
 
 impl ExtractResource for PackedGpuGenerationBatches {
@@ -34,6 +35,57 @@ pub struct PackedGpuGenerationBatch {
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
     pub generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedGpuGenerationTarget {
+    pub camera_chunk_x: i32,
+    pub camera_chunk_z: i32,
+    pub center_origin_x: i32,
+    pub center_origin_z: i32,
+    pub region_size: i32,
+    pub region_radius: i32,
+    pub view_radius: i32,
+    pub contract_generation: u64,
+    pub edit_store_generation: u64,
+}
+
+impl PackedGpuGenerationTarget {
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        camera_chunk_x: i32,
+        camera_chunk_z: i32,
+        center_origin_x: i32,
+        center_origin_z: i32,
+        region_size: i32,
+        region_radius: i32,
+        view_radius: i32,
+        contract_generation: u64,
+        edit_store_generation: u64,
+    ) -> Self {
+        Self {
+            camera_chunk_x,
+            camera_chunk_z,
+            center_origin_x,
+            center_origin_z,
+            region_size,
+            region_radius: region_radius.max(0),
+            view_radius,
+            contract_generation,
+            edit_store_generation,
+        }
+    }
+
+    #[must_use]
+    pub fn loaded_regions(self) -> usize {
+        let side = self
+            .region_radius
+            .saturating_mul(2)
+            .saturating_add(1)
+            .max(1) as usize;
+        side.saturating_mul(side)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,6 +624,23 @@ mod tests {
         assert_eq!(quad.block_id, 7);
         assert_eq!(quad.face(), PackedVoxelFace::PlusY as u8);
         assert_eq!(quad.lod(), 2);
+    }
+
+    #[test]
+    fn packed_gpu_generation_target_tracks_stable_window_signature() {
+        let base = PackedGpuGenerationTarget::new(1, 2, 0, 0, 4, 1, 16, 10, 20);
+        let same = PackedGpuGenerationTarget::new(1, 2, 0, 0, 4, 1, 16, 10, 20);
+        let moved = PackedGpuGenerationTarget::new(2, 2, 0, 0, 4, 1, 16, 10, 20);
+        let edited = PackedGpuGenerationTarget::new(1, 2, 0, 0, 4, 1, 16, 10, 21);
+
+        assert_eq!(base, same);
+        assert_ne!(base, moved);
+        assert_ne!(base, edited);
+        assert_eq!(base.loaded_regions(), 9);
+        assert_eq!(
+            PackedGpuGenerationTarget::new(1, 2, 0, 0, 4, 0, 16, 10, 20).loaded_regions(),
+            1
+        );
     }
 
     #[test]

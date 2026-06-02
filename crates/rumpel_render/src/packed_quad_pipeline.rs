@@ -24,7 +24,7 @@ use rumpel_world::world_gen::{WorldGenerationContext, terrain_surface_contract_v
 use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuGenerationBatch,
     PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationParams,
-    packed_gpu_generation_lod_for_cell_size,
+    PackedGpuGenerationTarget, packed_gpu_generation_lod_for_cell_size,
 };
 use crate::voxel_material::load_block_atlas;
 use crate::voxel_packed_quads::{PackedVoxelFace, PackedVoxelQuad};
@@ -2737,6 +2737,25 @@ pub fn update_packed_gpu_generation_regions(
     let cache_frame = region_cache.next_frame();
     let view_center = IVec2::new(camera_chunk_x, camera_chunk_z);
     let view_radius = packed_view_radius_from_env();
+    let target = PackedGpuGenerationTarget::new(
+        camera_chunk_x,
+        camera_chunk_z,
+        center_origin_x,
+        center_origin_z,
+        region_size,
+        region_radius,
+        view_radius,
+        contract_generation,
+        edit_store.generation(),
+    );
+
+    if gpu_batches.target == Some(target) && !gpu_batches.batches.is_empty() {
+        record_packed_gpu_generation_region_mask(
+            target.loaded_regions(),
+            gpu_batches.batches.len(),
+        );
+        return;
+    }
 
     let mut generated_batches = Vec::new();
     let mut target_keys = std::collections::HashSet::new();
@@ -2884,6 +2903,8 @@ pub fn update_packed_gpu_generation_regions(
             }
         }
     }
+
+    gpu_batches.target = Some(target);
 
     if changed {
         gpu_batches.batches = generated_batches;
