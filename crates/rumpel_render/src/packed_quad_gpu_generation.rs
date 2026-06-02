@@ -228,16 +228,13 @@ pub fn region_has_active_chunks(
 ) -> bool {
     let region_size = region_size.max(1);
     let radius_sq = i64::from(view_radius.max(0)).pow(2);
-    for chunk_z in region_origin_z..region_origin_z + region_size {
-        for chunk_x in region_origin_x..region_origin_x + region_size {
-            let dx = i64::from(chunk_x - center_chunk.x);
-            let dz = i64::from(chunk_z - center_chunk.y);
-            if dx * dx + dz * dz <= radius_sq {
-                return true;
-            }
-        }
-    }
-    false
+    let max_x = region_origin_x.saturating_add(region_size.saturating_sub(1));
+    let max_z = region_origin_z.saturating_add(region_size.saturating_sub(1));
+    let closest_x = center_chunk.x.clamp(region_origin_x, max_x);
+    let closest_z = center_chunk.y.clamp(region_origin_z, max_z);
+    let dx = i64::from(closest_x - center_chunk.x);
+    let dz = i64::from(closest_z - center_chunk.y);
+    dx * dx + dz * dz <= radius_sq
 }
 
 const FNV64_OFFSET: u64 = 14_695_981_039_346_656_037;
@@ -769,6 +766,13 @@ mod tests {
         let center = IVec2::new(0, 0);
         assert!(region_has_active_chunks(6, 0, 4, center, 8));
         assert!(!region_has_active_chunks(10, 0, 4, center, 8));
+    }
+
+    #[test]
+    fn region_has_active_chunks_handles_center_inside_region() {
+        let center = IVec2::new(9, -3);
+        assert!(region_has_active_chunks(8, -4, 4, center, 0));
+        assert!(!region_has_active_chunks(12, -4, 4, center, 0));
     }
 
     #[test]
