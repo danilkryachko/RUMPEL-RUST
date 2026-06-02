@@ -135,6 +135,13 @@ impl ExtractResource for PackedQuadBatches {
     }
 }
 
+#[derive(Resource, Default)]
+pub struct PackedGpuGenerationRegionScratch {
+    loaded_region_keys: Vec<u64>,
+    active_regions: Vec<(i32, i32, u64)>,
+    target_keys: HashSet<u64>,
+}
+
 /// Represents a prepared batch of packed voxel quads in the Render World.
 pub struct PreparedPackedQuadBatch {
     /// Unique identifier matching the CPU-side batch.
@@ -2877,6 +2884,7 @@ pub fn update_packed_gpu_generation_regions(
     mut cpu_batches: ResMut<PackedQuadBatches>,
     mut gpu_batches: ResMut<PackedGpuGenerationBatches>,
     mut region_cache: ResMut<crate::packed_quad_gpu_generation::GeneratedRegionCache>,
+    mut region_scratch: ResMut<PackedGpuGenerationRegionScratch>,
     camera_query: Query<&GlobalTransform, With<Camera3d>>,
 ) {
     let update_started = Instant::now();
@@ -2909,15 +2917,26 @@ pub fn update_packed_gpu_generation_regions(
     let view_radius = packed_view_radius_from_env();
     let generated_region_side = region_radius.saturating_mul(2).saturating_add(1).max(1) as usize;
     let loaded_region_capacity = generated_region_side.saturating_mul(generated_region_side);
-    let mut loaded_region_keys = Vec::with_capacity(loaded_region_capacity);
-    let mut active_regions = Vec::with_capacity(loaded_region_capacity);
+    let scratch = &mut *region_scratch;
+    scratch.loaded_region_keys.clear();
+    if scratch.loaded_region_keys.capacity() < loaded_region_capacity {
+        scratch
+            .loaded_region_keys
+            .reserve(loaded_region_capacity - scratch.loaded_region_keys.capacity());
+    }
+    scratch.active_regions.clear();
+    if scratch.active_regions.capacity() < loaded_region_capacity {
+        scratch
+            .active_regions
+            .reserve(loaded_region_capacity - scratch.active_regions.capacity());
+    }
 
     for region_z in -region_radius..=region_radius {
         for region_x in -region_radius..=region_radius {
             let region_origin_x = center_origin_x + region_x * region_size;
             let region_origin_z = center_origin_z + region_z * region_size;
             let region_key = pack_chunk_key(region_origin_x, region_origin_z);
-            loaded_region_keys.push(region_key);
+            scratch.loaded_region_keys.push(region_key);
 
             if crate::packed_quad_gpu_generation::region_has_active_chunks(
                 region_origin_x,
@@ -2926,14 +2945,19 @@ pub fn update_packed_gpu_generation_regions(
                 view_center,
                 view_radius,
             ) {
-                active_regions.push((region_origin_x, region_origin_z, region_key));
+                scratch
+                    .active_regions
+                    .push((region_origin_x, region_origin_z, region_key));
             }
         }
     }
-    let loaded_regions = loaded_region_keys.len();
+    let loaded_regions = scratch.loaded_region_keys.len();
     let (active_region_count, active_region_hash) =
         PackedGpuGenerationTarget::active_region_signature(
-            active_regions.iter().map(|(_, _, region_key)| *region_key),
+            scratch
+                .active_regions
+                .iter()
+                .map(|(_, _, region_key)| *region_key),
         );
     let target = PackedGpuGenerationTarget::new(
         camera_chunk_x,
@@ -2965,11 +2989,17 @@ pub fn update_packed_gpu_generation_regions(
     let mut cache_hits = 0usize;
     let mut cache_misses = 0usize;
     let mut cache_invalidated = 0usize;
-    let target_keys = loaded_region_keys
-        .into_iter()
-        .collect::<std::collections::HashSet<_>>();
+    scratch.target_keys.clear();
+    if scratch.target_keys.capacity() < loaded_regions {
+        scratch
+            .target_keys
+            .reserve(loaded_regions - scratch.target_keys.capacity());
+    }
+    for region_key in &scratch.loaded_region_keys {
+        scratch.target_keys.insert(*region_key);
+    }
 
-    for (region_origin_x, region_origin_z, region_key) in active_regions {
+    for (region_origin_x, region_origin_z, region_key) in scratch.active_regions.iter().copied() {
         if let Some(batch) = reuse_generated_region_cache_entry(
             &mut region_cache,
             region_key,
@@ -3079,7 +3109,9 @@ pub fn update_packed_gpu_generation_regions(
     generated_batches.sort_by_key(|batch| batch.key);
 
     let cache_entries_before_retain = region_cache.entries.len();
-    region_cache.entries.retain(|k, _| target_keys.contains(k));
+    region_cache
+        .entries
+        .retain(|k, _| scratch.target_keys.contains(k));
     let cache_evicted = cache_entries_before_retain.saturating_sub(region_cache.entries.len());
 
     cpu_batches.batches.clear();
@@ -3179,6 +3211,7 @@ impl Plugin for PackedQuadPipelinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PackedQuadBatches>();
         app.init_resource::<PackedGpuGenerationBatches>();
+        app.init_resource::<PackedGpuGenerationRegionScratch>();
         app.init_resource::<PackedQuadBlockTexturePalette>();
         app.init_resource::<PackedQuadPipelineStats>();
         let atlas = {
