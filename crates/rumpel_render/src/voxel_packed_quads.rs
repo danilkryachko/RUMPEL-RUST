@@ -438,6 +438,26 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
     sand_block: BlockId,
     edit_store: &WorldEditStore,
 ) {
+    append_surface_gpu_generation_columns_for_chunk_with_local_offset(
+        gpu_columns,
+        chunk_pos,
+        context,
+        requested_cell_size,
+        sand_block,
+        edit_store,
+        [0, 0],
+    );
+}
+
+pub fn append_surface_gpu_generation_columns_for_chunk_with_local_offset(
+    gpu_columns: &mut Vec<PackedGpuSurfaceColumn>,
+    chunk_pos: ChunkPos,
+    context: &WorldGenerationContext,
+    requested_cell_size: usize,
+    sand_block: BlockId,
+    edit_store: &WorldEditStore,
+    local_offset: [usize; 2],
+) {
     let perlin = terrain_perlin();
     let has_edits = !edit_store.is_empty();
     let source = SurfaceColumnSource::new(
@@ -452,7 +472,12 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
     for_each_surface_packed_column_for_chunk(source, |column| {
         let neighbor_heights = surface_neighbor_heights(column, source);
         gpu_columns.push(PackedGpuSurfaceColumn::from_parts(
-            [column.x, column.z, column.width, column.depth],
+            [
+                column.x.saturating_add(local_offset[0]),
+                column.z.saturating_add(local_offset[1]),
+                column.width,
+                column.depth,
+            ],
             [
                 column.height,
                 neighbor_heights[0],
@@ -1594,6 +1619,42 @@ mod tests {
         );
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn generated_surface_columns_apply_local_offset_without_repacking() {
+        let registry = test_block_registry();
+        let context = WorldGenerationContext::from_registry(&registry);
+        let sand_block = registry.get_id("sand").unwrap_or(context.palette.dirt);
+        let chunk_pos = ChunkPos::new(2, -3);
+        let edit_store = WorldEditStore::default();
+        let base = build_surface_gpu_generation_columns_for_chunk(
+            chunk_pos,
+            &context,
+            4,
+            sand_block,
+            &edit_store,
+        );
+        let mut offset = Vec::new();
+
+        append_surface_gpu_generation_columns_for_chunk_with_local_offset(
+            &mut offset,
+            chunk_pos,
+            &context,
+            4,
+            sand_block,
+            &edit_store,
+            [64, 96],
+        );
+
+        assert_eq!(offset.len(), base.len());
+        for (base_column, offset_column) in base.iter().zip(offset.iter()) {
+            assert_eq!(offset_column.local[0], base_column.local[0] + 64);
+            assert_eq!(offset_column.local[1], base_column.local[1] + 96);
+            assert_eq!(&offset_column.local[2..], &base_column.local[2..]);
+            assert_eq!(offset_column.heights, base_column.heights);
+            assert_eq!(offset_column.material, base_column.material);
+        }
     }
 
     #[test]
