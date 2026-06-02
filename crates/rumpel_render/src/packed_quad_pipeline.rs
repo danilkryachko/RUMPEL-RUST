@@ -301,6 +301,8 @@ pub struct PreparedPackedQuadGpuCull {
     pub config_buffer: Option<Buffer>,
     pub output_indirect_buffer: Option<Buffer>,
     pub count_buffer: Option<Buffer>,
+    pub metadata_signature: u64,
+    pub config_signature: u64,
     dispatched: AtomicBool,
 }
 
@@ -322,6 +324,8 @@ impl PreparedPackedQuadGpuCull {
         self.compact_enabled = false;
         self.count_supported = false;
         self.command_count = 0;
+        self.metadata_signature = 0;
+        self.config_signature = 0;
         self.reset_dispatched();
     }
 }
@@ -338,6 +342,8 @@ impl FromWorld for PreparedPackedQuadGpuCull {
             config_buffer: None,
             output_indirect_buffer: None,
             count_buffer: None,
+            metadata_signature: 0,
+            config_signature: 0,
             dispatched: AtomicBool::new(false),
         }
     }
