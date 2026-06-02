@@ -1305,13 +1305,25 @@ fn prepare_generated_gpu_cull(
     let metadata_uploaded =
         metadata_buffer_recreated || gpu_cull.metadata_signature != metadata_signature;
     if metadata_uploaded && let Some(metadata_buffer) = &gpu_cull.metadata_buffer {
-        let cull_metadata = input
-            .regions
-            .iter()
-            .map(generated_region_cull_metadata)
-            .map(crate::packed_quad_pipeline::packed_gpu_cull_metadata_from_command)
-            .collect::<Vec<_>>();
-        render_queue.write_buffer(metadata_buffer, 0, bytemuck::cast_slice(&cull_metadata));
+        gpu_cull.metadata_scratch.clear();
+        let metadata_capacity = gpu_cull.metadata_scratch.capacity();
+        if metadata_capacity < command_count {
+            gpu_cull
+                .metadata_scratch
+                .reserve(command_count - metadata_capacity);
+        }
+        gpu_cull
+            .metadata_scratch
+            .extend(input.regions.iter().map(|region| {
+                crate::packed_quad_pipeline::packed_gpu_cull_metadata_from_command(
+                    generated_region_cull_metadata(region),
+                )
+            }));
+        render_queue.write_buffer(
+            metadata_buffer,
+            0,
+            bytemuck::cast_slice(&gpu_cull.metadata_scratch),
+        );
     }
     let config_uploaded = config_buffer_recreated || gpu_cull.config_signature != config_signature;
     if config_uploaded && let Some(config_buffer) = &gpu_cull.config_buffer {
