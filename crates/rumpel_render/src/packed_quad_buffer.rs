@@ -1,7 +1,7 @@
 use crate::voxel_packed_quads::PackedVoxelQuad;
 use bevy::render::render_resource::{Buffer, BufferDescriptor, BufferUsages};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// Configuration descriptor for creating a `PackedQuadBuffer`.
 #[derive(Debug, Clone)]
@@ -166,20 +166,20 @@ pub fn plan_gpu_generated_arena_allocations(
     let mut sorted_requests = requests.to_vec();
     sorted_requests.sort_by_key(|request| request.key);
 
-    let active_keys = sorted_requests
-        .iter()
-        .map(|request| request.key)
-        .collect::<HashSet<_>>();
-
-    let mut remaining_existing = existing_allocations.clone();
+    let mut remaining_existing =
+        HashMap::with_capacity(existing_allocations.len().min(sorted_requests.len()));
     let mut free_slots = Vec::new();
     for (key, allocation) in existing_allocations {
-        if !active_keys.contains(key) {
+        if sorted_requests
+            .binary_search_by_key(key, |request| request.key)
+            .is_ok()
+        {
+            remaining_existing.insert(*key, *allocation);
+        } else {
             free_slots.push(PackedQuadArenaFreeSlot {
                 offset_quads: allocation.offset_quads,
                 capacity_quads: allocation.capacity_quads,
             });
-            remaining_existing.remove(key);
         }
     }
 
