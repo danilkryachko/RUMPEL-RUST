@@ -28,8 +28,8 @@ use std::{
 use wgpu::{QuerySet, QuerySetDescriptor, QueryType, RenderPassTimestampWrites};
 
 use crate::packed_quad_gpu_generation::{
-    PackedGpuGenerationBatch, PackedGpuGenerationBatches, PackedGpuGenerationJob,
-    packed_gpu_generation_enabled_from_env, packed_gpu_generation_workgroups,
+    PackedGpuGenerationBatches, PackedGpuGenerationJob, packed_gpu_generation_enabled_from_env,
+    packed_gpu_generation_workgroups,
 };
 use crate::packed_quad_pipeline::{PreparedPackedQuadBatch, PreparedPackedQuadBatches};
 
@@ -119,6 +119,7 @@ pub struct PreparedPackedGpuGeneratedDraw {
     pub indirect_buffer: Option<Buffer>,
     pub command_count: usize,
     pub arena_generation: u64,
+    pub batch_signature: u64,
     pub cull_metadata_signature: u64,
     pub cull_source_signature: u64,
     dispatched: AtomicBool,
@@ -149,6 +150,7 @@ impl PreparedPackedGpuGeneratedDraw {
         self.indirect_buffer = None;
         self.command_count = 0;
         self.arena_generation = 0;
+        self.batch_signature = 0;
         self.cull_metadata_signature = 0;
         self.cull_source_signature = 0;
         self.dispatched.store(false, Ordering::Release);
@@ -188,22 +190,17 @@ impl PreparedPackedGpuGeneratedDraw {
             })
     }
 
-    fn matches_batches(&self, batches: &[PackedGpuGenerationBatch], arena_generation: u64) -> bool {
+    fn matches_batches(
+        &self,
+        batch_count: usize,
+        batch_signature: u64,
+        arena_generation: u64,
+    ) -> bool {
         self.enabled
             && self.was_dispatched()
             && self.arena_generation == arena_generation
-            && self.regions.len() == batches.len()
-            && self.regions.iter().zip(batches).enumerate().all(
-                |(draw_command_index, (region, batch))| {
-                    region.key == batch.key
-                        && region.generation == batch.generation
-                        && region.column_count == batch.columns.len()
-                        && region.max_output_quads == batch.max_output_quads.max(1)
-                        && region.draw_command_index == draw_command_index
-                        && region.bounds_min == batch.bounds_min
-                        && region.bounds_max == batch.bounds_max
-                },
-            )
+            && self.regions.len() == batch_count
+            && self.batch_signature == batch_signature
     }
 }
 
@@ -753,6 +750,11 @@ fn prepare_packed_gpu_generated_draw(
     };
 
     let ordered_batches = extracted_batches.batches.as_slice();
+    let batch_signature = if extracted_batches.batch_signature == 0 {
+        PackedGpuGenerationBatches::calculate_batch_signature(ordered_batches)
+    } else {
+        extracted_batches.batch_signature
+    };
 
     if ordered_batches.is_empty()
         || ordered_batches
@@ -771,7 +773,7 @@ fn prepare_packed_gpu_generated_draw(
         return;
     }
 
-    if prepared.matches_batches(ordered_batches, arena.generation)
+    if prepared.matches_batches(ordered_batches.len(), batch_signature, arena.generation)
         && prepared.generation_bind_group.is_some()
         && prepared.render_bind_group.is_some()
         && prepared.indirect_buffer.is_some()
@@ -890,6 +892,7 @@ fn prepare_packed_gpu_generated_draw(
     arena.stats.uploaded_bytes = 0;
 
     if prepared.matches_regions(&planned_regions, arena.generation)
+        && prepared.batch_signature == batch_signature
         && prepared.generation_bind_group.is_some()
         && prepared.render_bind_group.is_some()
         && prepared.indirect_buffer.is_some()
@@ -1079,6 +1082,7 @@ fn prepare_packed_gpu_generated_draw(
     prepared.source_chunk_count = source_chunk_count;
     prepared.command_count = ordered_batches.len();
     prepared.arena_generation = arena.generation;
+    prepared.batch_signature = batch_signature;
     prepared.cull_metadata_signature = generated_regions_cull_metadata_signature(&prepared.regions);
     prepared.cull_source_signature =
         generated_regions_cull_source_signature(&prepared.regions, prepared.arena_generation);
@@ -2728,7 +2732,7 @@ mod tests {
 
     #[test]
     fn packed_gpu_generation_prepared_matches_batches_for_render_prepare_skip() {
-        let batch = PackedGpuGenerationBatch {
+        let batch = crate::packed_quad_gpu_generation::PackedGpuGenerationBatch {
             key: 42,
             columns: std::sync::Arc::new(vec![
                 crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
@@ -2747,6 +2751,8 @@ mod tests {
             bounds_max: Vec3::new(3.0, 4.0, 5.0),
             generation: 9,
         };
+        let batch_signature =
+            PackedGpuGenerationBatches::calculate_batch_signature(std::slice::from_ref(&batch));
         let prepared = PreparedPackedGpuGeneratedDraw {
             enabled: true,
             regions: vec![PreparedPackedGpuGeneratedRegion {
@@ -2761,19 +2767,32 @@ mod tests {
                 bounds_max: batch.bounds_max,
             }],
             arena_generation: 3,
+            batch_signature,
             ..Default::default()
         };
         prepared.mark_dispatched();
 
-        assert!(prepared.matches_batches(std::slice::from_ref(&batch), 3));
+        assert!(prepared.matches_batches(1, batch_signature, 3));
 
         let mut changed_generation = batch.clone();
         changed_generation.generation = changed_generation.generation.saturating_add(1);
-        assert!(!prepared.matches_batches(std::slice::from_ref(&changed_generation), 3));
+        assert!(!prepared.matches_batches(
+            1,
+            PackedGpuGenerationBatches::calculate_batch_signature(std::slice::from_ref(
+                &changed_generation
+            )),
+            3
+        ));
 
         let mut changed_bounds = batch.clone();
         changed_bounds.bounds_max.x += 1.0;
-        assert!(!prepared.matches_batches(std::slice::from_ref(&changed_bounds), 3));
+        assert!(!prepared.matches_batches(
+            1,
+            PackedGpuGenerationBatches::calculate_batch_signature(std::slice::from_ref(
+                &changed_bounds
+            )),
+            3
+        ));
     }
 
     #[test]

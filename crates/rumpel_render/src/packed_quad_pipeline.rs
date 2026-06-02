@@ -3106,6 +3106,8 @@ pub fn update_packed_gpu_generation_regions(
     gpu_batches.target = Some(target);
 
     if changed {
+        gpu_batches.batch_signature =
+            PackedGpuGenerationBatches::calculate_batch_signature(&generated_batches);
         gpu_batches.batches = generated_batches;
         let total_columns = gpu_batches
             .batches

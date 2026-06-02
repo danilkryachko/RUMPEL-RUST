@@ -14,6 +14,7 @@ pub const PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN: usize =
 pub struct PackedGpuGenerationBatches {
     pub batches: Vec<PackedGpuGenerationBatch>,
     pub target: Option<PackedGpuGenerationTarget>,
+    pub batch_signature: u64,
 }
 
 impl ExtractResource for PackedGpuGenerationBatches {
@@ -21,6 +22,38 @@ impl ExtractResource for PackedGpuGenerationBatches {
 
     fn extract_resource(source: &Self::Source) -> Self {
         source.clone()
+    }
+}
+
+impl PackedGpuGenerationBatches {
+    #[must_use]
+    pub fn calculate_batch_signature(batches: &[PackedGpuGenerationBatch]) -> u64 {
+        let mut hash = FNV64_OFFSET;
+        hash = fnv64(hash, batches.len() as u64);
+        for (index, batch) in batches.iter().enumerate() {
+            hash = fnv64(hash, index as u64);
+            hash = fnv64(hash, batch.key);
+            hash = fnv64(hash, batch.generation);
+            hash = fnv64(hash, batch.columns.len() as u64);
+            hash = fnv64(hash, batch.source_chunk_count as u64);
+            hash = fnv64(hash, batch.max_output_quads as u64);
+            for value in batch.params.config {
+                hash = fnv64(hash, u64::from(value));
+            }
+            for value in batch.params.palette {
+                hash = fnv64(hash, u64::from(value));
+            }
+            for value in batch.translation.to_array() {
+                hash = fnv64(hash, u64::from(value.to_bits()));
+            }
+            for value in batch.bounds_min.to_array() {
+                hash = fnv64(hash, u64::from(value.to_bits()));
+            }
+            for value in batch.bounds_max.to_array() {
+                hash = fnv64(hash, u64::from(value.to_bits()));
+            }
+        }
+        hash.max(1)
     }
 }
 
