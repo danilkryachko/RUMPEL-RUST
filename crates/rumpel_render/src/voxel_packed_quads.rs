@@ -339,6 +339,7 @@ pub fn build_surface_packed_quads_for_chunk(
         &perlin,
     );
     let cell_size = requested_cell_size.clamp(1, CHUNK_SIZE);
+    let has_edits = !empty_edits.is_empty();
 
     let mut quads = Vec::with_capacity(columns.len() * 3);
     let lod = lod_for_surface_cell_size(cell_size);
@@ -359,6 +360,7 @@ pub fn build_surface_packed_quads_for_chunk(
                 &perlin,
                 context,
                 &empty_edits,
+                has_edits,
                 lod,
             );
         }
@@ -398,6 +400,7 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
     edit_store: &WorldEditStore,
 ) {
     let perlin = terrain_perlin();
+    let has_edits = !edit_store.is_empty();
     for_each_surface_packed_column_for_chunk(
         chunk_pos,
         context,
@@ -417,6 +420,7 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
                         context,
                         edit_store,
                         &perlin,
+                        has_edits,
                     ),
                     surface_neighbor_height(
                         column,
@@ -425,6 +429,7 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
                         context,
                         edit_store,
                         &perlin,
+                        has_edits,
                     ),
                     surface_neighbor_height(
                         column,
@@ -433,6 +438,7 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
                         context,
                         edit_store,
                         &perlin,
+                        has_edits,
                     ),
                     surface_neighbor_height(
                         column,
@@ -441,6 +447,7 @@ pub fn append_surface_gpu_generation_columns_for_chunk(
                         context,
                         edit_store,
                         &perlin,
+                        has_edits,
                     ),
                 ],
                 column.top_block,
@@ -483,7 +490,8 @@ fn for_each_surface_packed_column_for_chunk(
     let cell_size = requested_cell_size.clamp(1, CHUNK_SIZE);
     let cells_x = CHUNK_SIZE.div_ceil(cell_size);
     let cells_z = CHUNK_SIZE.div_ceil(cell_size);
-    let chunk_edited = edit_store.chunk_revision(chunk_pos) > 0;
+    let has_edits = !edit_store.is_empty();
+    let chunk_edited = has_edits && edit_store.chunk_revision(chunk_pos) > 0;
 
     for cell_z in 0..cells_z {
         let z = cell_z * cell_size;
@@ -565,10 +573,12 @@ fn push_surface_packed_wall(
     perlin: &Perlin,
     context: &WorldGenerationContext,
     edit_store: &WorldEditStore,
+    has_edits: bool,
     lod: u8,
 ) {
-    let neighbor_height =
-        surface_neighbor_height(column, face, chunk_pos, context, edit_store, perlin);
+    let neighbor_height = surface_neighbor_height(
+        column, face, chunk_pos, context, edit_store, perlin, has_edits,
+    );
     if neighbor_height >= column.height {
         return;
     }
@@ -595,6 +605,7 @@ fn surface_neighbor_height(
     context: &WorldGenerationContext,
     edit_store: &WorldEditStore,
     perlin: &Perlin,
+    has_edits: bool,
 ) -> usize {
     let world_x = chunk_pos.x * CHUNK_SIZE as i32 + column.x as i32;
     let world_z = chunk_pos.z * CHUNK_SIZE as i32 + column.z as i32;
@@ -605,6 +616,16 @@ fn surface_neighbor_height(
         PackedVoxelFace::MinusZ => (world_x, world_z - column.depth as i32),
         PackedVoxelFace::PlusY | PackedVoxelFace::MinusY => return column.height,
     };
+
+    if !has_edits {
+        return terrain_surface_cell_height_with_noise(
+            sample_x,
+            sample_z,
+            column.width,
+            column.depth,
+            perlin,
+        );
+    }
 
     let neighbor_chunk = ChunkPos::new(
         sample_x.div_euclid(CHUNK_SIZE as i32),
@@ -1379,6 +1400,7 @@ mod tests {
         ] {
             for cell_size in [1, 2, 4, 8] {
                 let edit_store = WorldEditStore::default();
+                let has_edits = !edit_store.is_empty();
                 let cpu_columns = build_surface_packed_columns_for_chunk_with_perlin(
                     chunk_pos,
                     &context,
@@ -1416,6 +1438,7 @@ mod tests {
                             &context,
                             &edit_store,
                             &perlin,
+                            has_edits,
                         ) as u32
                     );
                     assert_eq!(
@@ -1427,6 +1450,7 @@ mod tests {
                             &context,
                             &edit_store,
                             &perlin,
+                            has_edits,
                         ) as u32
                     );
                     assert_eq!(
@@ -1438,6 +1462,7 @@ mod tests {
                             &context,
                             &edit_store,
                             &perlin,
+                            has_edits,
                         ) as u32
                     );
                     assert_eq!(
@@ -1449,6 +1474,7 @@ mod tests {
                             &context,
                             &edit_store,
                             &perlin,
+                            has_edits,
                         ) as u32
                     );
                     assert_eq!(gpu.material[1], u32::from(cpu.top_block));
