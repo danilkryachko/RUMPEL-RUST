@@ -3076,6 +3076,7 @@ pub fn update_packed_gpu_generation_regions(
         region_cache.entries.insert(region_key, entry);
         generated_batches.push(batch);
     }
+    generated_batches.sort_by_key(|batch| batch.key);
 
     let cache_entries_before_retain = region_cache.entries.len();
     region_cache.entries.retain(|k, _| target_keys.contains(k));
