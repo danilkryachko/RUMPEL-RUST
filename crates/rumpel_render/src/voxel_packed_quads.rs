@@ -1510,6 +1510,78 @@ mod tests {
     }
 
     #[test]
+    fn generated_surface_columns_apply_world_edit_heights() {
+        let registry = test_block_registry();
+        let context = WorldGenerationContext::from_registry(&registry);
+        let sand_block = registry.get_id("sand").unwrap_or(context.palette.dirt);
+        let perlin = terrain_perlin();
+        let chunk_pos = ChunkPos::new(0, 0);
+        let (local_x, local_z, baseline) = (0..CHUNK_SIZE)
+            .find_map(|local_z| {
+                (0..CHUNK_SIZE).find_map(|local_x| {
+                    let global_x = chunk_pos.x * CHUNK_SIZE as i32 + local_x as i32;
+                    let global_z = chunk_pos.z * CHUNK_SIZE as i32 + local_z as i32;
+                    let sample = terrain_surface_cell_sample_with_noise(
+                        global_x,
+                        global_z,
+                        1,
+                        1,
+                        context.palette,
+                        sand_block,
+                        &perlin,
+                    );
+                    (sample.height.saturating_add(4) < CHUNK_SIZE)
+                        .then_some((local_x, local_z, sample))
+                })
+            })
+            .expect("test terrain should contain an editable low surface inside the origin chunk");
+        let edit_y = baseline.height.saturating_add(4);
+        let mut edit_store = WorldEditStore::default();
+        let edit_index = local_z * CHUNK_SIZE * CHUNK_SIZE + edit_y * CHUNK_SIZE + local_x;
+
+        assert!(
+            edit_store.apply_edit(
+                rumpel_world::chunk::WorldBlockEdit::from_single_chunk_index(
+                    edit_index,
+                    context.palette.grass,
+                )
+                .expect("editable test surface should fit inside one chunk"),
+            )
+        );
+        let global_x = chunk_pos.x * CHUNK_SIZE as i32 + local_x as i32;
+        let global_z = chunk_pos.z * CHUNK_SIZE as i32 + local_z as i32;
+        let edited_sample = terrain_surface_cell_sample_with_edits(
+            global_x,
+            global_z,
+            1,
+            1,
+            context.palette,
+            sand_block,
+            &edit_store,
+            &perlin,
+        );
+        assert!(edited_sample.height > baseline.height);
+
+        let gpu_columns = build_surface_gpu_generation_columns_for_chunk(
+            chunk_pos,
+            &context,
+            1,
+            sand_block,
+            &edit_store,
+        );
+        let edited_column = gpu_columns
+            .iter()
+            .find(|column| column.local[0] == local_x as u32 && column.local[1] == local_z as u32)
+            .expect("edited surface column should be generated");
+
+        assert_eq!(edited_column.heights[0], edited_sample.height as u32);
+        assert_eq!(
+            edited_column.material[1],
+            u32::from(edited_sample.top_block)
+        );
+    }
+
+    #[test]
     fn surface_shell_height_smoothing_reduces_adjacent_step_noise() {
         let perlin = terrain_perlin();
         let mut raw_delta_sum = 0usize;
