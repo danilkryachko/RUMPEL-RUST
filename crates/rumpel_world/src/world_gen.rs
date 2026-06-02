@@ -1,9 +1,9 @@
-use crate::chunk::{CHUNK_SIZE, ChunkData};
+use crate::chunk::{CHUNK_SIZE, ChunkData, WorldEditStore};
 use bevy::{platform::collections::HashMap, prelude::error};
 use noise::{NoiseFn, Perlin};
 use rumpel_blocks::AIR_BLOCK_ID;
 use rumpel_blocks::{BlockId, BlockRegistry};
-use rumpel_coords::ChunkPos;
+use rumpel_coords::{ChunkPos, LocalBlockPos};
 use std::{cell::RefCell, fs, rc::Rc};
 
 const TERRAIN_SEED: u32 = 1337;
@@ -11,6 +11,11 @@ const TERRAIN_NOISE_SCALE: f64 = 0.02;
 const TERRAIN_BASE_HEIGHT: f64 = 10.0;
 const TERRAIN_HEIGHT_RANGE: f64 = 40.0;
 const DIRT_DEPTH: usize = 3;
+pub const SURFACE_BEACH_HEIGHT_THRESHOLD: usize = 14;
+const SURFACE_SHELL_HEIGHT_KERNEL: [usize; 5] = [1, 4, 6, 4, 1];
+const SURFACE_SHELL_HEIGHT_RADIUS: i32 = 2;
+const SURFACE_EDIT_SCAN_HEADROOM: usize = 24;
+const SURFACE_EDIT_SCAN_MAX_Y: usize = 96;
 const WORLD_GEN_SCRIPT_PATH: &str = "assets/mods/world_gen.lua";
 const LUA_WORLD_GEN_CHUNK: ChunkPos = ChunkPos { x: 0, z: 0 };
 
@@ -23,6 +28,17 @@ pub fn terrain_generation_contract_version() -> u64 {
     hash = fnv64(hash, TERRAIN_HEIGHT_RANGE.to_bits());
     hash = fnv64(hash, DIRT_DEPTH as u64);
     hash = fnv64(hash, CHUNK_SIZE as u64);
+    hash.max(1)
+}
+
+#[must_use]
+pub fn terrain_surface_contract_version() -> u64 {
+    let mut hash = fnv64(FNV64_OFFSET, terrain_generation_contract_version());
+    hash = fnv64(hash, SURFACE_BEACH_HEIGHT_THRESHOLD as u64);
+    hash = fnv64(hash, SURFACE_SHELL_HEIGHT_RADIUS as u64);
+    for weight in SURFACE_SHELL_HEIGHT_KERNEL {
+        hash = fnv64(hash, weight as u64);
+    }
     hash.max(1)
 }
 
@@ -91,6 +107,12 @@ impl TerrainBlockPalette {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerrainSurfaceSample {
+    pub height: usize,
+    pub top_block: BlockId,
+}
+
 #[must_use]
 pub fn terrain_height_at(global_x: i32, global_z: i32) -> usize {
     let perlin = Perlin::new(TERRAIN_SEED);
@@ -105,6 +127,257 @@ pub fn terrain_height_with_noise(global_x: i32, global_z: i32, perlin: &Perlin) 
     ]);
 
     ((noise_val + 1.0) * 0.5 * TERRAIN_HEIGHT_RANGE + TERRAIN_BASE_HEIGHT) as usize
+}
+
+#[must_use]
+pub fn terrain_perlin() -> Perlin {
+    Perlin::new(TERRAIN_SEED)
+}
+
+#[must_use]
+pub fn terrain_surface_shell_height_with_noise(
+    global_x: i32,
+    global_z: i32,
+    perlin: &Perlin,
+) -> usize {
+    let mut weighted_sum = 0;
+    let mut weight_sum = 0;
+
+    for (kernel_z, weight_z) in SURFACE_SHELL_HEIGHT_KERNEL.iter().copied().enumerate() {
+        let sample_z = global_z + kernel_z as i32 - SURFACE_SHELL_HEIGHT_RADIUS;
+        for (kernel_x, weight_x) in SURFACE_SHELL_HEIGHT_KERNEL.iter().copied().enumerate() {
+            let sample_x = global_x + kernel_x as i32 - SURFACE_SHELL_HEIGHT_RADIUS;
+            let weight = weight_x * weight_z;
+            weighted_sum += terrain_height_with_noise(sample_x, sample_z, perlin) * weight;
+            weight_sum += weight;
+        }
+    }
+
+    (weighted_sum + weight_sum / 2) / weight_sum
+}
+
+#[must_use]
+pub fn terrain_surface_cell_height_with_noise(
+    global_x: i32,
+    global_z: i32,
+    width: usize,
+    depth: usize,
+    perlin: &Perlin,
+) -> usize {
+    let mut height_sum = 0;
+    let mut sample_count = 0;
+
+    for offset_z in 0..depth {
+        for offset_x in 0..width {
+            height_sum += terrain_surface_shell_height_with_noise(
+                global_x + offset_x as i32,
+                global_z + offset_z as i32,
+                perlin,
+            );
+            sample_count += 1;
+        }
+    }
+
+    (height_sum + sample_count / 2)
+        .checked_div(sample_count)
+        .unwrap_or(0)
+}
+
+#[must_use]
+pub fn terrain_surface_top_block(
+    height: usize,
+    palette: TerrainBlockPalette,
+    surface_material: BlockId,
+) -> BlockId {
+    if height <= SURFACE_BEACH_HEIGHT_THRESHOLD && surface_material != palette.air {
+        surface_material
+    } else {
+        terrain_block_at_height(height.saturating_sub(1), height, palette)
+    }
+}
+
+#[must_use]
+pub fn terrain_surface_cell_sample_with_noise(
+    global_x: i32,
+    global_z: i32,
+    width: usize,
+    depth: usize,
+    palette: TerrainBlockPalette,
+    surface_material: BlockId,
+    perlin: &Perlin,
+) -> TerrainSurfaceSample {
+    let height = terrain_surface_cell_height_with_noise(global_x, global_z, width, depth, perlin);
+    let top_block = terrain_surface_top_block(height, palette, surface_material);
+
+    TerrainSurfaceSample { height, top_block }
+}
+
+#[must_use]
+pub fn terrain_block_at_surface_world(
+    global_x: i32,
+    world_y: usize,
+    global_z: i32,
+    palette: TerrainBlockPalette,
+    edit_store: &WorldEditStore,
+    perlin: &Perlin,
+) -> BlockId {
+    let chunk_x = global_x.div_euclid(CHUNK_SIZE as i32);
+    let chunk_z = global_z.div_euclid(CHUNK_SIZE as i32);
+    let local_x = global_x.rem_euclid(CHUNK_SIZE as i32);
+    let local_z = global_z.rem_euclid(CHUNK_SIZE as i32);
+    let chunk_pos = ChunkPos::new(chunk_x, chunk_z);
+
+    if let (Ok(local_x), Ok(local_z), Ok(local_y)) = (
+        u8::try_from(local_x),
+        u8::try_from(local_z),
+        u16::try_from(world_y),
+    ) {
+        let local = LocalBlockPos::new(local_x, local_y, local_z);
+        if let Some(block) = edit_store.block_at(chunk_pos, local) {
+            return block;
+        }
+    }
+
+    let surface_height = terrain_height_with_noise(global_x, global_z, perlin);
+    terrain_block_at_height(world_y, surface_height, palette)
+}
+
+#[must_use]
+pub fn terrain_surface_column_top_height_with_edits(
+    global_x: i32,
+    global_z: i32,
+    palette: TerrainBlockPalette,
+    edit_store: &WorldEditStore,
+    perlin: &Perlin,
+) -> usize {
+    let procedural = terrain_surface_shell_height_with_noise(global_x, global_z, perlin);
+    let scan_top = procedural
+        .saturating_add(SURFACE_EDIT_SCAN_HEADROOM)
+        .clamp(1, SURFACE_EDIT_SCAN_MAX_Y);
+    let mut top = 0usize;
+
+    for world_y in 0..scan_top {
+        let block = terrain_block_at_surface_world(
+            global_x, world_y, global_z, palette, edit_store, perlin,
+        );
+        if block != palette.air {
+            top = top.max(world_y + 1);
+        }
+    }
+
+    if top == 0 { procedural } else { top }
+}
+
+#[must_use]
+pub fn terrain_surface_shell_height_with_edits(
+    global_x: i32,
+    global_z: i32,
+    palette: TerrainBlockPalette,
+    edit_store: &WorldEditStore,
+    perlin: &Perlin,
+) -> usize {
+    let mut weighted_sum = 0;
+    let mut weight_sum = 0;
+
+    for (kernel_z, weight_z) in SURFACE_SHELL_HEIGHT_KERNEL.iter().copied().enumerate() {
+        let sample_z = global_z + kernel_z as i32 - SURFACE_SHELL_HEIGHT_RADIUS;
+        for (kernel_x, weight_x) in SURFACE_SHELL_HEIGHT_KERNEL.iter().copied().enumerate() {
+            let sample_x = global_x + kernel_x as i32 - SURFACE_SHELL_HEIGHT_RADIUS;
+            let weight = weight_x * weight_z;
+            weighted_sum += terrain_surface_column_top_height_with_edits(
+                sample_x, sample_z, palette, edit_store, perlin,
+            ) * weight;
+            weight_sum += weight;
+        }
+    }
+
+    (weighted_sum + weight_sum / 2) / weight_sum
+}
+
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn terrain_surface_cell_height_with_edits(
+    global_x: i32,
+    global_z: i32,
+    width: usize,
+    depth: usize,
+    palette: TerrainBlockPalette,
+    edit_store: &WorldEditStore,
+    perlin: &Perlin,
+) -> usize {
+    let mut height_sum = 0;
+    let mut sample_count = 0;
+
+    for offset_z in 0..depth {
+        for offset_x in 0..width {
+            height_sum += terrain_surface_shell_height_with_edits(
+                global_x + offset_x as i32,
+                global_z + offset_z as i32,
+                palette,
+                edit_store,
+                perlin,
+            );
+            sample_count += 1;
+        }
+    }
+
+    (height_sum + sample_count / 2)
+        .checked_div(sample_count)
+        .unwrap_or(0)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn terrain_surface_cell_sample_with_edits(
+    global_x: i32,
+    global_z: i32,
+    width: usize,
+    depth: usize,
+    palette: TerrainBlockPalette,
+    surface_material: BlockId,
+    edit_store: &WorldEditStore,
+    perlin: &Perlin,
+) -> TerrainSurfaceSample {
+    let height = terrain_surface_cell_height_with_edits(
+        global_x, global_z, width, depth, palette, edit_store, perlin,
+    );
+    let sample_x = global_x + (width / 2) as i32;
+    let sample_z = global_z + (depth / 2) as i32;
+    let top_y = height.saturating_sub(1);
+    let edited_top =
+        terrain_block_at_surface_world(sample_x, top_y, sample_z, palette, edit_store, perlin);
+    let top_block = if edited_top != palette.air {
+        edited_top
+    } else {
+        terrain_surface_top_block(height, palette, surface_material)
+    };
+
+    TerrainSurfaceSample { height, top_block }
+}
+
+#[must_use]
+pub fn terrain_surface_wall_block_at_y(
+    top_block: BlockId,
+    surface_height: usize,
+    y: usize,
+    width: usize,
+    depth: usize,
+    palette: TerrainBlockPalette,
+) -> BlockId {
+    if top_block != palette.grass {
+        return top_block;
+    }
+
+    if width > 1 || depth > 1 {
+        let vegetated_depth = width.max(depth);
+        if y.saturating_add(vegetated_depth) >= surface_height {
+            palette.grass
+        } else {
+            palette.dirt
+        }
+    } else {
+        terrain_block_at_height(y, surface_height, palette)
+    }
 }
 
 #[must_use]
@@ -248,5 +521,155 @@ mod tests {
 
         assert_ne!(version, 0);
         assert_eq!(version, terrain_generation_contract_version());
+    }
+
+    #[test]
+    fn terrain_surface_contract_version_is_stable_and_nonzero() {
+        let version = terrain_surface_contract_version();
+
+        assert_ne!(version, 0);
+        assert_eq!(version, terrain_surface_contract_version());
+    }
+
+    #[test]
+    fn terrain_height_sampling_is_deterministic_across_regions() {
+        let perlin = terrain_perlin();
+        let samples = [
+            (-256, -256),
+            (-65, 17),
+            (0, 0),
+            (31, 31),
+            (127, -93),
+            (512, 384),
+        ];
+
+        for (x, z) in samples {
+            assert_eq!(
+                terrain_height_with_noise(x, z, &perlin),
+                terrain_height_with_noise(x, z, &perlin)
+            );
+            assert_eq!(
+                terrain_height_at(x, z),
+                terrain_height_with_noise(x, z, &perlin)
+            );
+        }
+    }
+
+    #[test]
+    fn terrain_surface_sampling_picks_beach_and_grass_materials() {
+        let palette = TerrainBlockPalette {
+            air: 0,
+            dirt: 1,
+            grass: 2,
+            stone: 3,
+        };
+        let sand = 4;
+        let perlin = terrain_perlin();
+
+        let beach = (-128..=128)
+            .flat_map(|z| (-128..=128).map(move |x| (x, z)))
+            .map(|(x, z)| {
+                terrain_surface_cell_sample_with_noise(x, z, 1, 1, palette, sand, &perlin)
+            })
+            .find(|sample| sample.height <= SURFACE_BEACH_HEIGHT_THRESHOLD)
+            .expect("deterministic terrain should expose a beach-height sample");
+        assert_eq!(beach.top_block, sand);
+
+        let grass = (-128..=128)
+            .flat_map(|z| (-128..=128).map(move |x| (x, z)))
+            .map(|(x, z)| {
+                terrain_surface_cell_sample_with_noise(x, z, 1, 1, palette, sand, &perlin)
+            })
+            .find(|sample| sample.height > SURFACE_BEACH_HEIGHT_THRESHOLD)
+            .expect("deterministic terrain should expose a grass-height sample");
+        assert_eq!(grass.top_block, palette.grass);
+    }
+
+    #[test]
+    fn terrain_surface_edits_can_raise_generated_column_height() {
+        let perlin = terrain_perlin();
+        let palette = TerrainBlockPalette {
+            air: 0,
+            dirt: 1,
+            grass: 2,
+            stone: 3,
+        };
+        let mut edit_store = WorldEditStore::default();
+        let global_x = 16;
+        let global_z = 16;
+        let before = terrain_surface_column_top_height_with_edits(
+            global_x,
+            global_z,
+            palette,
+            &edit_store,
+            &perlin,
+        );
+        assert!(before > 0);
+
+        let edit_y = before.saturating_add(4);
+        assert!(edit_store.apply_edit(crate::chunk::WorldBlockEdit::new(
+            ChunkPos::new(
+                global_x.div_euclid(CHUNK_SIZE as i32),
+                global_z.div_euclid(CHUNK_SIZE as i32)
+            ),
+            LocalBlockPos::new(
+                global_x.rem_euclid(CHUNK_SIZE as i32) as u8,
+                u16::try_from(edit_y).expect("edited surface within chunk"),
+                global_z.rem_euclid(CHUNK_SIZE as i32) as u8,
+            ),
+            palette.grass,
+        )));
+
+        let after = terrain_surface_column_top_height_with_edits(
+            global_x,
+            global_z,
+            palette,
+            &edit_store,
+            &perlin,
+        );
+        assert_eq!(after, edit_y + 1);
+        assert_eq!(
+            terrain_block_at_surface_world(
+                global_x,
+                edit_y,
+                global_z,
+                palette,
+                &edit_store,
+                &perlin,
+            ),
+            palette.grass
+        );
+    }
+
+    #[test]
+    fn terrain_surface_wall_sampling_matches_material_layers() {
+        let palette = TerrainBlockPalette {
+            air: 0,
+            dirt: 1,
+            grass: 2,
+            stone: 3,
+        };
+        let height = 20;
+
+        assert_eq!(
+            terrain_surface_wall_block_at_y(palette.grass, height, 0, 1, 1, palette),
+            palette.stone
+        );
+        assert_eq!(
+            terrain_surface_wall_block_at_y(palette.grass, height, 18, 1, 1, palette),
+            palette.dirt
+        );
+        assert_eq!(
+            terrain_surface_wall_block_at_y(palette.grass, height, 19, 1, 1, palette),
+            palette.grass
+        );
+        assert_eq!(
+            terrain_surface_wall_block_at_y(palette.grass, height, 16, 4, 4, palette),
+            palette.grass
+        );
+        assert_eq!(
+            terrain_surface_wall_block_at_y(4, height, 2, 1, 1, palette),
+            4
+        );
     }
 }

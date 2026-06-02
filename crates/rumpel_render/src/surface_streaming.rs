@@ -5,6 +5,9 @@ use bevy::{
 };
 use noise::Perlin;
 use rumpel_prelude::*;
+use rumpel_world::world_gen::{
+    terrain_perlin, terrain_surface_top_block, terrain_surface_wall_block_at_y,
+};
 use std::time::Instant;
 
 use crate::{
@@ -598,7 +601,7 @@ fn build_surface_region_mesh(
     let estimated_columns = columns_per_region * columns_per_region;
     let estimated_lod_columns = estimated_columns / (lod_step * lod_step).max(1);
     let mut buffers = SurfaceMeshBuffers::with_block_capacity(estimated_lod_columns);
-    let perlin = Perlin::new(1337);
+    let perlin = terrain_perlin();
 
     let region_origin_x = region_pos.x * REGION_SIZE_CHUNKS * TERRAIN_CHUNK_SIZE;
     let region_origin_z = region_pos.y * REGION_SIZE_CHUNKS * TERRAIN_CHUNK_SIZE;
@@ -625,11 +628,8 @@ fn build_surface_region_mesh(
             let world_x = region_origin_x + local_x as i32;
             let world_z = region_origin_z + local_z as i32;
             let height = terrain_height_with_noise(world_x, world_z, &perlin) as i32;
-            let top_block = if height <= 14 {
-                context.sand
-            } else {
-                context.grass
-            };
+            let top_block =
+                terrain_surface_top_block(height as usize, context.world.palette, context.sand);
 
             columns[cell_z * cells_x + cell_x] = Some(SurfaceColumn {
                 local_x,
@@ -911,7 +911,6 @@ fn surface_wall_block_at_y(
         y,
         column.cell_size,
         context.world.palette,
-        context.sand,
     )
 }
 
@@ -921,23 +920,17 @@ fn surface_wall_block_for_layer(
     y: i32,
     cell_size: usize,
     palette: TerrainBlockPalette,
-    sand: BlockId,
 ) -> Option<BlockId> {
-    if top_block == sand {
-        return Some(sand);
-    }
-
     let surface_height = usize::try_from(surface_height).ok()?;
     let y = usize::try_from(y).ok()?;
-    if cell_size > 1 {
-        return if y + 1 >= surface_height {
-            Some(palette.grass)
-        } else {
-            Some(palette.dirt)
-        };
-    }
-
-    let block = terrain_block_at_height(y, surface_height, palette);
+    let block = terrain_surface_wall_block_at_y(
+        top_block,
+        surface_height,
+        y,
+        cell_size,
+        cell_size,
+        palette,
+    );
     (block != palette.air).then_some(block)
 }
 
@@ -963,7 +956,6 @@ struct SurfaceBuildContext {
     textures: SurfaceTexturePalette,
     colors: HashMap<BlockId, [f32; 4]>,
     air: BlockId,
-    grass: BlockId,
     sand: BlockId,
 }
 
@@ -975,7 +967,6 @@ impl SurfaceBuildContext {
             textures: SurfaceTexturePalette::from_registry(registry),
             colors: block_colors_from_registry(registry),
             air: world.palette.air,
-            grass: world.palette.grass,
             sand: registry.get_id("sand").unwrap_or(world.palette.dirt),
             world,
         }
@@ -1407,24 +1398,20 @@ mod tests {
             grass: 1,
             stone: 3,
         };
-        let sand = 4;
 
         assert_eq!(
-            surface_wall_block_for_layer(palette.grass, 12, 11, 1, palette, sand),
+            surface_wall_block_for_layer(palette.grass, 12, 11, 1, palette),
             Some(palette.grass)
         );
         assert_eq!(
-            surface_wall_block_for_layer(palette.grass, 12, 10, 1, palette, sand),
+            surface_wall_block_for_layer(palette.grass, 12, 10, 1, palette),
             Some(palette.dirt)
         );
         assert_eq!(
-            surface_wall_block_for_layer(palette.grass, 12, 7, 1, palette, sand),
+            surface_wall_block_for_layer(palette.grass, 12, 7, 1, palette),
             Some(palette.stone)
         );
-        assert_eq!(
-            surface_wall_block_for_layer(sand, 12, 7, 1, palette, sand),
-            Some(sand)
-        );
+        assert_eq!(surface_wall_block_for_layer(4, 12, 7, 1, palette), Some(4));
     }
 
     #[test]
@@ -1435,14 +1422,13 @@ mod tests {
             grass: 1,
             stone: 3,
         };
-        let sand = 4;
 
         assert_eq!(
-            surface_wall_block_for_layer(palette.grass, 20, 19, 4, palette, sand),
+            surface_wall_block_for_layer(palette.grass, 20, 19, 4, palette),
             Some(palette.grass)
         );
         assert_eq!(
-            surface_wall_block_for_layer(palette.grass, 20, 8, 4, palette, sand),
+            surface_wall_block_for_layer(palette.grass, 20, 8, 4, palette),
             Some(palette.dirt)
         );
     }

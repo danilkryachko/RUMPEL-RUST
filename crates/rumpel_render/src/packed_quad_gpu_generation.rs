@@ -97,6 +97,7 @@ pub struct GeneratedRegionCacheEntry {
     pub bounds_max: Vec3,
     pub generation: u64,
     pub contract: PackedGpuGenerationCacheContract,
+    pub edit_store_generation: u64,
     pub last_seen_frame: u64,
 }
 

@@ -18,7 +18,8 @@ use std::time::Instant;
 
 use rumpel_blocks::{AIR_BLOCK_ID, BlockId, BlockRegistry};
 use rumpel_prelude::ChunkPos;
-use rumpel_world::world_gen::{WorldGenerationContext, terrain_generation_contract_version};
+use rumpel_world::chunk::WorldEditStore;
+use rumpel_world::world_gen::{WorldGenerationContext, terrain_surface_contract_version};
 
 use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuGenerationBatch,
@@ -2668,19 +2669,32 @@ fn build_packed_gpu_generation_cache_contract(
         cell_size,
         terrain_palette,
         surface_top_material,
-        terrain_generation_contract_version(),
+        terrain_surface_contract_version(),
         material_contract_version,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reuse_generated_region_cache_entry(
     region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
     region_key: u64,
+    region_origin_x: i32,
+    region_origin_z: i32,
+    region_size: i32,
     contract: PackedGpuGenerationCacheContract,
+    edit_store: &WorldEditStore,
     cache_frame: u64,
 ) -> Option<PackedGpuGenerationBatch> {
     let existing = region_cache.entries.get_mut(&region_key)?;
     if existing.contract != contract {
+        return None;
+    }
+    if edit_store.region_has_edits_since(
+        region_origin_x,
+        region_origin_z,
+        region_size,
+        existing.edit_store_generation,
+    ) {
         return None;
     }
 
@@ -2690,6 +2704,7 @@ fn reuse_generated_region_cache_entry(
 
 pub fn update_packed_gpu_generation_regions(
     registry: Res<BlockRegistry>,
+    edit_store: Res<WorldEditStore>,
     mut cpu_batches: ResMut<PackedQuadBatches>,
     mut gpu_batches: ResMut<PackedGpuGenerationBatches>,
     mut region_cache: ResMut<crate::packed_quad_gpu_generation::GeneratedRegionCache>,
@@ -2747,7 +2762,11 @@ pub fn update_packed_gpu_generation_regions(
                 && let Some(batch) = reuse_generated_region_cache_entry(
                     &mut region_cache,
                     region_key,
+                    region_origin_x,
+                    region_origin_z,
+                    region_size,
                     contract,
+                    &edit_store,
                     cache_frame,
                 )
             {
@@ -2760,10 +2779,19 @@ pub fn update_packed_gpu_generation_regions(
             }
 
             if let Some(stale) = region_cache.entries.remove(&region_key) {
+                let invalidated_by_edits = edit_store.region_has_edits_since(
+                    region_origin_x,
+                    region_origin_z,
+                    region_size,
+                    stale.edit_store_generation,
+                );
                 info!(
                     region_key,
                     old_generation = stale.generation,
                     new_generation = contract_generation,
+                    invalidated_by_edits,
+                    old_edit_store_generation = stale.edit_store_generation,
+                    edit_store_generation = edit_store.generation(),
                     "PACKED GPU GENERATION: invalidated stale generated region cache entry"
                 );
             }
@@ -2786,6 +2814,7 @@ pub fn update_packed_gpu_generation_regions(
                             &context,
                             cell_size,
                             sand_block,
+                            &edit_store,
                         );
                     let offset_x =
                         (chunk_x - region_origin_x) as u32 * rumpel_world::chunk::CHUNK_SIZE as u32;
@@ -2829,6 +2858,7 @@ pub fn update_packed_gpu_generation_regions(
                 bounds_max,
                 generation: contract_generation,
                 contract,
+                edit_store_generation: edit_store.generation(),
                 last_seen_frame: cache_frame,
             };
 
@@ -4047,17 +4077,38 @@ mod tests {
                 bounds_max: Vec3::ZERO,
                 generation: contract.generation(),
                 contract,
+                edit_store_generation: 0,
                 last_seen_frame: 1,
             },
         );
 
-        let reused =
-            reuse_generated_region_cache_entry(&mut cache, region_key, contract, 7).expect("reuse");
+        let edit_store = WorldEditStore::default();
+        let reused = reuse_generated_region_cache_entry(
+            &mut cache,
+            region_key,
+            0,
+            0,
+            4,
+            contract,
+            &edit_store,
+            7,
+        )
+        .expect("reuse");
         assert_eq!(reused.generation, contract.generation());
         assert_eq!(cache.entries[&region_key].last_seen_frame, 7);
 
         assert!(
-            reuse_generated_region_cache_entry(&mut cache, region_key, stale_contract, 8).is_none()
+            reuse_generated_region_cache_entry(
+                &mut cache,
+                region_key,
+                0,
+                0,
+                4,
+                stale_contract,
+                &edit_store,
+                8,
+            )
+            .is_none()
         );
         let stale_entry = cache
             .entries
@@ -4065,6 +4116,67 @@ mod tests {
             .expect("stale entry remains available for rebuild logging");
         assert_eq!(stale_entry.contract, contract);
         assert_eq!(stale_entry.generation, contract.generation());
+    }
+
+    #[test]
+    fn test_generated_region_cache_rejects_edits_after_snapshot() {
+        let region_key = pack_chunk_key(0, 0);
+        let contract = PackedGpuGenerationCacheContract::new(4, 2, [0, 1, 2, 3], 4, 10, 20);
+        let mut cache = crate::packed_quad_gpu_generation::GeneratedRegionCache::default();
+        let mut edit_store = WorldEditStore::default();
+
+        cache.entries.insert(
+            region_key,
+            crate::packed_quad_gpu_generation::GeneratedRegionCacheEntry {
+                key: region_key,
+                columns: Arc::new(Vec::new()),
+                params: PackedGpuGenerationParams::new(0, 0, 0, 0, 1, 2, 3),
+                source_chunk_count: 0,
+                max_output_quads: 0,
+                translation: Vec4::ZERO,
+                bounds_min: Vec3::ZERO,
+                bounds_max: Vec3::ZERO,
+                generation: contract.generation(),
+                contract,
+                edit_store_generation: edit_store.generation(),
+                last_seen_frame: 1,
+            },
+        );
+
+        assert!(
+            reuse_generated_region_cache_entry(
+                &mut cache,
+                region_key,
+                0,
+                0,
+                4,
+                contract,
+                &edit_store,
+                2,
+            )
+            .is_some()
+        );
+
+        let edit = rumpel_world::chunk::WorldBlockEdit::from_single_chunk_index(
+            rumpel_world::chunk::ChunkData::get_index(1, 10, 1),
+            7,
+        )
+        .expect("valid edit index");
+        assert!(edit_store.apply_edit(edit));
+
+        assert!(
+            reuse_generated_region_cache_entry(
+                &mut cache,
+                region_key,
+                0,
+                0,
+                4,
+                contract,
+                &edit_store,
+                3,
+            )
+            .is_none()
+        );
     }
 
     #[test]

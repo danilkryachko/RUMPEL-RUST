@@ -209,6 +209,7 @@ impl WorldBlockEditKey {
 pub struct WorldEditStore {
     edits: HashMap<WorldBlockEditKey, BlockId>,
     generation: u64,
+    chunk_revisions: HashMap<ChunkPos, u64>,
 }
 
 impl WorldEditStore {
@@ -227,7 +228,31 @@ impl WorldEditStore {
 
         self.edits.insert(key, edit.block);
         self.generation = self.generation.wrapping_add(1);
+        self.chunk_revisions.insert(edit.chunk_pos, self.generation);
         true
+    }
+
+    #[must_use]
+    pub fn chunk_revision(&self, chunk_pos: ChunkPos) -> u64 {
+        self.chunk_revisions.get(&chunk_pos).copied().unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn region_has_edits_since(
+        &self,
+        region_origin_x: i32,
+        region_origin_z: i32,
+        region_size: i32,
+        since_generation: u64,
+    ) -> bool {
+        for chunk_z in region_origin_z..region_origin_z.saturating_add(region_size) {
+            for chunk_x in region_origin_x..region_origin_x.saturating_add(region_size) {
+                if self.chunk_revision(ChunkPos::new(chunk_x, chunk_z)) > since_generation {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     #[must_use]
@@ -373,6 +398,21 @@ mod tests {
         assert_eq!(store.generation(), 2);
         assert_eq!(store.len(), 1);
         assert_eq!(store.block_at(second.chunk_pos, pos), Some(7));
+    }
+
+    #[test]
+    fn world_edit_store_tracks_per_chunk_revision_for_region_invalidation() {
+        let mut store = WorldEditStore::default();
+        let chunk_a = ChunkPos { x: 0, z: 0 };
+        let chunk_b = ChunkPos { x: 1, z: 0 };
+
+        assert!(!store.region_has_edits_since(0, 0, 2, 0));
+        assert!(store.apply_edit(WorldBlockEdit::new(chunk_a, LocalBlockPos::new(1, 2, 3), 4,)));
+        assert_eq!(store.chunk_revision(chunk_a), 1);
+        assert_eq!(store.chunk_revision(chunk_b), 0);
+        assert!(store.region_has_edits_since(0, 0, 2, 0));
+        assert!(!store.region_has_edits_since(0, 0, 2, 1));
+        assert!(!store.region_has_edits_since(2, 0, 2, 0));
     }
 
     #[test]

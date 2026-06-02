@@ -40,6 +40,7 @@ impl Plugin for RumpelRenderPlugin {
                     app.add_systems(
                         Update,
                         packed_quad_pipeline::update_packed_gpu_generation_regions
+                            .after(rumpel_world::chunk::record_world_block_edits)
                             .run_if(in_state(rumpel_prelude::GameState::InGame)),
                     );
                 } else {

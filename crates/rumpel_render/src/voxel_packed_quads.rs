@@ -1,9 +1,12 @@
 use noise::Perlin;
 use rumpel_blocks::{AIR_BLOCK_ID, BlockId};
 use rumpel_prelude::ChunkPos;
-use rumpel_world::chunk::{CHUNK_SIZE, ChunkData};
+use rumpel_world::chunk::{CHUNK_SIZE, ChunkData, WorldEditStore};
 use rumpel_world::world_gen::{
-    TerrainBlockPalette, WorldGenerationContext, terrain_block_at_height, terrain_height_with_noise,
+    TerrainBlockPalette, WorldGenerationContext, terrain_perlin,
+    terrain_surface_cell_height_with_edits, terrain_surface_cell_height_with_noise,
+    terrain_surface_cell_sample_with_edits, terrain_surface_cell_sample_with_noise,
+    terrain_surface_wall_block_at_y,
 };
 
 /// Represents the six cardinal directions of a voxel face.
@@ -306,8 +309,6 @@ struct SurfacePackedColumn {
     top_block: BlockId,
 }
 
-const SURFACE_SHELL_HEIGHT_KERNEL: [usize; 5] = [1, 4, 6, 4, 1];
-const SURFACE_SHELL_HEIGHT_RADIUS: i32 = 2;
 const PACKED_QUAD_FLAG_SIDE_BLENDS_TOP_TILE: u32 = 1;
 
 /// Builds packed quads for the visible heightmap shell of one terrain chunk column.
@@ -323,33 +324,16 @@ pub fn build_surface_packed_quads_for_chunk(
     requested_cell_size: usize,
     sand_block: BlockId,
 ) -> Vec<PackedVoxelQuad> {
+    let empty_edits = WorldEditStore::default();
+    let columns = build_surface_packed_columns_for_chunk(
+        chunk_pos,
+        context,
+        requested_cell_size,
+        sand_block,
+        &empty_edits,
+    );
+    let perlin = terrain_perlin();
     let cell_size = requested_cell_size.clamp(1, CHUNK_SIZE);
-    let cells_x = CHUNK_SIZE.div_ceil(cell_size);
-    let cells_z = CHUNK_SIZE.div_ceil(cell_size);
-    let perlin = Perlin::new(1337);
-    let mut columns = Vec::with_capacity(cells_x * cells_z);
-
-    for cell_z in 0..cells_z {
-        let z = cell_z * cell_size;
-        for cell_x in 0..cells_x {
-            let x = cell_x * cell_size;
-            let width = cell_size.min(CHUNK_SIZE - x);
-            let depth = cell_size.min(CHUNK_SIZE - z);
-            let world_x = chunk_pos.x * CHUNK_SIZE as i32 + x as i32;
-            let world_z = chunk_pos.z * CHUNK_SIZE as i32 + z as i32;
-            let height = surface_cell_height_with_noise(world_x, world_z, width, depth, &perlin);
-            let top_block = surface_top_block(height, context.palette, sand_block);
-
-            columns.push(SurfacePackedColumn {
-                x,
-                z,
-                width,
-                depth,
-                height,
-                top_block,
-            });
-        }
-    }
 
     let mut quads = Vec::with_capacity(columns.len() * 3);
     let lod = lod_for_surface_cell_size(cell_size);
@@ -362,7 +346,16 @@ pub fn build_surface_packed_quads_for_chunk(
             PackedVoxelFace::PlusZ,
             PackedVoxelFace::MinusZ,
         ] {
-            push_surface_packed_wall(&mut quads, *column, face, chunk_pos, &perlin, context, lod);
+            push_surface_packed_wall(
+                &mut quads,
+                *column,
+                face,
+                chunk_pos,
+                &perlin,
+                context,
+                &empty_edits,
+                lod,
+            );
         }
     }
 
@@ -376,11 +369,74 @@ pub fn build_surface_gpu_generation_columns_for_chunk(
     context: &WorldGenerationContext,
     requested_cell_size: usize,
     sand_block: BlockId,
+    edit_store: &WorldEditStore,
 ) -> Vec<crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn> {
+    let columns = build_surface_packed_columns_for_chunk(
+        chunk_pos,
+        context,
+        requested_cell_size,
+        sand_block,
+        edit_store,
+    );
+    let perlin = terrain_perlin();
+    columns
+        .into_iter()
+        .map(|column| {
+            crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
+                [column.x, column.z, column.width, column.depth],
+                [
+                    column.height,
+                    surface_neighbor_height(
+                        column,
+                        PackedVoxelFace::PlusX,
+                        chunk_pos,
+                        context,
+                        edit_store,
+                        &perlin,
+                    ),
+                    surface_neighbor_height(
+                        column,
+                        PackedVoxelFace::MinusX,
+                        chunk_pos,
+                        context,
+                        edit_store,
+                        &perlin,
+                    ),
+                    surface_neighbor_height(
+                        column,
+                        PackedVoxelFace::PlusZ,
+                        chunk_pos,
+                        context,
+                        edit_store,
+                        &perlin,
+                    ),
+                    surface_neighbor_height(
+                        column,
+                        PackedVoxelFace::MinusZ,
+                        chunk_pos,
+                        context,
+                        edit_store,
+                        &perlin,
+                    ),
+                ],
+                column.top_block,
+            )
+        })
+        .collect()
+}
+
+fn build_surface_packed_columns_for_chunk(
+    chunk_pos: ChunkPos,
+    context: &WorldGenerationContext,
+    requested_cell_size: usize,
+    sand_block: BlockId,
+    edit_store: &WorldEditStore,
+) -> Vec<SurfacePackedColumn> {
     let cell_size = requested_cell_size.clamp(1, CHUNK_SIZE);
     let cells_x = CHUNK_SIZE.div_ceil(cell_size);
     let cells_z = CHUNK_SIZE.div_ceil(cell_size);
-    let perlin = Perlin::new(1337);
+    let perlin = terrain_perlin();
+    let chunk_edited = edit_store.chunk_revision(chunk_pos) > 0;
     let mut columns = Vec::with_capacity(cells_x * cells_z);
 
     for cell_z in 0..cells_z {
@@ -391,87 +447,41 @@ pub fn build_surface_gpu_generation_columns_for_chunk(
             let depth = cell_size.min(CHUNK_SIZE - z);
             let world_x = chunk_pos.x * CHUNK_SIZE as i32 + x as i32;
             let world_z = chunk_pos.z * CHUNK_SIZE as i32 + z as i32;
-            let height = surface_cell_height_with_noise(world_x, world_z, width, depth, &perlin);
-            let top_block = surface_top_block(height, context.palette, sand_block);
-            let column = SurfacePackedColumn {
+            let sample = if chunk_edited {
+                terrain_surface_cell_sample_with_edits(
+                    world_x,
+                    world_z,
+                    width,
+                    depth,
+                    context.palette,
+                    sand_block,
+                    edit_store,
+                    &perlin,
+                )
+            } else {
+                terrain_surface_cell_sample_with_noise(
+                    world_x,
+                    world_z,
+                    width,
+                    depth,
+                    context.palette,
+                    sand_block,
+                    &perlin,
+                )
+            };
+
+            columns.push(SurfacePackedColumn {
                 x,
                 z,
                 width,
                 depth,
-                height,
-                top_block,
-            };
-
-            columns.push(
-                crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
-                    [x, z, width, depth],
-                    [
-                        height,
-                        surface_neighbor_height(column, PackedVoxelFace::PlusX, chunk_pos, &perlin),
-                        surface_neighbor_height(
-                            column,
-                            PackedVoxelFace::MinusX,
-                            chunk_pos,
-                            &perlin,
-                        ),
-                        surface_neighbor_height(column, PackedVoxelFace::PlusZ, chunk_pos, &perlin),
-                        surface_neighbor_height(
-                            column,
-                            PackedVoxelFace::MinusZ,
-                            chunk_pos,
-                            &perlin,
-                        ),
-                    ],
-                    top_block,
-                ),
-            );
+                height: sample.height,
+                top_block: sample.top_block,
+            });
         }
     }
 
     columns
-}
-
-fn surface_shell_height_with_noise(global_x: i32, global_z: i32, perlin: &Perlin) -> usize {
-    let mut weighted_sum = 0;
-    let mut weight_sum = 0;
-
-    for (kernel_z, weight_z) in SURFACE_SHELL_HEIGHT_KERNEL.iter().copied().enumerate() {
-        let sample_z = global_z + kernel_z as i32 - SURFACE_SHELL_HEIGHT_RADIUS;
-        for (kernel_x, weight_x) in SURFACE_SHELL_HEIGHT_KERNEL.iter().copied().enumerate() {
-            let sample_x = global_x + kernel_x as i32 - SURFACE_SHELL_HEIGHT_RADIUS;
-            let weight = weight_x * weight_z;
-            weighted_sum += terrain_height_with_noise(sample_x, sample_z, perlin) * weight;
-            weight_sum += weight;
-        }
-    }
-
-    (weighted_sum + weight_sum / 2) / weight_sum
-}
-
-fn surface_cell_height_with_noise(
-    global_x: i32,
-    global_z: i32,
-    width: usize,
-    depth: usize,
-    perlin: &Perlin,
-) -> usize {
-    let mut height_sum = 0;
-    let mut sample_count = 0;
-
-    for offset_z in 0..depth {
-        for offset_x in 0..width {
-            height_sum += surface_shell_height_with_noise(
-                global_x + offset_x as i32,
-                global_z + offset_z as i32,
-                perlin,
-            );
-            sample_count += 1;
-        }
-    }
-
-    (height_sum + sample_count / 2)
-        .checked_div(sample_count)
-        .unwrap_or(0)
 }
 
 fn lod_for_surface_cell_size(cell_size: usize) -> u8 {
@@ -480,14 +490,6 @@ fn lod_for_surface_cell_size(cell_size: usize) -> u8 {
         2 => 1,
         3 | 4 => 2,
         _ => 3,
-    }
-}
-
-fn surface_top_block(height: usize, palette: TerrainBlockPalette, sand_block: BlockId) -> BlockId {
-    if height <= 14 && sand_block != palette.air {
-        sand_block
-    } else {
-        terrain_block_at_height(height.saturating_sub(1), height, palette)
     }
 }
 
@@ -510,6 +512,7 @@ fn push_surface_packed_top(quads: &mut Vec<PackedVoxelQuad>, column: SurfacePack
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_surface_packed_wall(
     quads: &mut Vec<PackedVoxelQuad>,
     column: SurfacePackedColumn,
@@ -517,9 +520,11 @@ fn push_surface_packed_wall(
     chunk_pos: ChunkPos,
     perlin: &Perlin,
     context: &WorldGenerationContext,
+    edit_store: &WorldEditStore,
     lod: u8,
 ) {
-    let neighbor_height = surface_neighbor_height(column, face, chunk_pos, perlin);
+    let neighbor_height =
+        surface_neighbor_height(column, face, chunk_pos, context, edit_store, perlin);
     if neighbor_height >= column.height {
         return;
     }
@@ -543,6 +548,8 @@ fn surface_neighbor_height(
     column: SurfacePackedColumn,
     face: PackedVoxelFace,
     chunk_pos: ChunkPos,
+    context: &WorldGenerationContext,
+    edit_store: &WorldEditStore,
     perlin: &Perlin,
 ) -> usize {
     let world_x = chunk_pos.x * CHUNK_SIZE as i32 + column.x as i32;
@@ -555,7 +562,29 @@ fn surface_neighbor_height(
         PackedVoxelFace::PlusY | PackedVoxelFace::MinusY => return column.height,
     };
 
-    surface_cell_height_with_noise(sample_x, sample_z, column.width, column.depth, perlin)
+    let neighbor_chunk = ChunkPos::new(
+        sample_x.div_euclid(CHUNK_SIZE as i32),
+        sample_z.div_euclid(CHUNK_SIZE as i32),
+    );
+    if edit_store.chunk_revision(neighbor_chunk) > 0 {
+        terrain_surface_cell_height_with_edits(
+            sample_x,
+            sample_z,
+            column.width,
+            column.depth,
+            context.palette,
+            edit_store,
+            perlin,
+        )
+    } else {
+        terrain_surface_cell_height_with_noise(
+            sample_x,
+            sample_z,
+            column.width,
+            column.depth,
+            perlin,
+        )
+    }
 }
 
 fn surface_wall_block(
@@ -563,20 +592,14 @@ fn surface_wall_block(
     y: usize,
     palette: TerrainBlockPalette,
 ) -> BlockId {
-    if column.top_block != palette.grass {
-        return column.top_block;
-    }
-
-    if column.width > 1 || column.depth > 1 {
-        let vegetated_depth = column.width.max(column.depth);
-        if y.saturating_add(vegetated_depth) >= column.height {
-            palette.grass
-        } else {
-            palette.dirt
-        }
-    } else {
-        terrain_block_at_height(y, column.height, palette)
-    }
+    terrain_surface_wall_block_at_y(
+        column.top_block,
+        column.height,
+        y,
+        column.width,
+        column.depth,
+        palette,
+    )
 }
 
 fn push_surface_wall_segment(
@@ -1161,6 +1184,9 @@ pub fn compact_packed_quads(quads: &mut Vec<PackedVoxelQuad>) {
 mod tests {
     use super::*;
     use rumpel_blocks::{BlockData, BlockRegistry};
+    use rumpel_world::world_gen::{
+        terrain_height_with_noise, terrain_surface_shell_height_with_noise,
+    };
 
     #[test]
     fn test_packed_voxel_quad_abi() {
@@ -1295,21 +1321,140 @@ mod tests {
     }
 
     #[test]
+    fn generated_surface_columns_match_cpu_packed_columns_across_regions() {
+        let registry = test_block_registry();
+        let context = WorldGenerationContext::from_registry(&registry);
+        let sand_block = registry.get_id("sand").unwrap_or(context.palette.dirt);
+        let perlin = terrain_perlin();
+
+        for chunk_pos in [
+            ChunkPos::new(-8, -8),
+            ChunkPos::new(-3, 5),
+            ChunkPos::new(0, 0),
+            ChunkPos::new(7, -4),
+        ] {
+            for cell_size in [1, 2, 4, 8] {
+                let edit_store = WorldEditStore::default();
+                let cpu_columns = build_surface_packed_columns_for_chunk(
+                    chunk_pos,
+                    &context,
+                    cell_size,
+                    sand_block,
+                    &edit_store,
+                );
+                let gpu_columns = build_surface_gpu_generation_columns_for_chunk(
+                    chunk_pos,
+                    &context,
+                    cell_size,
+                    sand_block,
+                    &edit_store,
+                );
+
+                assert_eq!(cpu_columns.len(), gpu_columns.len());
+                for (cpu, gpu) in cpu_columns.iter().zip(gpu_columns.iter()) {
+                    assert_eq!(
+                        gpu.local,
+                        [
+                            cpu.x as u32,
+                            cpu.z as u32,
+                            cpu.width as u32,
+                            cpu.depth as u32
+                        ]
+                    );
+                    assert_eq!(gpu.heights[0], cpu.height as u32);
+                    assert_eq!(
+                        gpu.heights[1],
+                        surface_neighbor_height(
+                            *cpu,
+                            PackedVoxelFace::PlusX,
+                            chunk_pos,
+                            &context,
+                            &edit_store,
+                            &perlin,
+                        ) as u32
+                    );
+                    assert_eq!(
+                        gpu.heights[2],
+                        surface_neighbor_height(
+                            *cpu,
+                            PackedVoxelFace::MinusX,
+                            chunk_pos,
+                            &context,
+                            &edit_store,
+                            &perlin,
+                        ) as u32
+                    );
+                    assert_eq!(
+                        gpu.heights[3],
+                        surface_neighbor_height(
+                            *cpu,
+                            PackedVoxelFace::PlusZ,
+                            chunk_pos,
+                            &context,
+                            &edit_store,
+                            &perlin,
+                        ) as u32
+                    );
+                    assert_eq!(
+                        gpu.material[0],
+                        surface_neighbor_height(
+                            *cpu,
+                            PackedVoxelFace::MinusZ,
+                            chunk_pos,
+                            &context,
+                            &edit_store,
+                            &perlin,
+                        ) as u32
+                    );
+                    assert_eq!(gpu.material[1], u32::from(cpu.top_block));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_surface_columns_are_deterministic_between_runs() {
+        let registry = test_block_registry();
+        let context = WorldGenerationContext::from_registry(&registry);
+        let sand_block = registry.get_id("sand").unwrap_or(context.palette.dirt);
+        let chunk_pos = ChunkPos::new(11, -9);
+
+        let edit_store = WorldEditStore::default();
+        let first = build_surface_gpu_generation_columns_for_chunk(
+            chunk_pos,
+            &context,
+            4,
+            sand_block,
+            &edit_store,
+        );
+        let second = build_surface_gpu_generation_columns_for_chunk(
+            chunk_pos,
+            &context,
+            4,
+            sand_block,
+            &edit_store,
+        );
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
     fn surface_shell_height_smoothing_reduces_adjacent_step_noise() {
-        let perlin = Perlin::new(1337);
+        let perlin = terrain_perlin();
         let mut raw_delta_sum = 0usize;
         let mut shell_delta_sum = 0usize;
 
         for z in -64..64 {
             for x in -64..64 {
                 let raw_height = terrain_height_with_noise(x, z, &perlin);
-                let shell_height = surface_shell_height_with_noise(x, z, &perlin);
+                let shell_height = terrain_surface_shell_height_with_noise(x, z, &perlin);
 
                 for (sample_x, sample_z) in [(x + 1, z), (x, z + 1)] {
                     raw_delta_sum +=
                         raw_height.abs_diff(terrain_height_with_noise(sample_x, sample_z, &perlin));
-                    shell_delta_sum += shell_height
-                        .abs_diff(surface_shell_height_with_noise(sample_x, sample_z, &perlin));
+                    shell_delta_sum += shell_height.abs_diff(
+                        terrain_surface_shell_height_with_noise(sample_x, sample_z, &perlin),
+                    );
                 }
             }
         }
@@ -1319,7 +1464,7 @@ mod tests {
 
     #[test]
     fn surface_cell_height_averages_covered_shell_samples() {
-        let perlin = Perlin::new(1337);
+        let perlin = terrain_perlin();
         let global_x = 17;
         let global_z = -23;
         let width = 4;
@@ -1328,7 +1473,7 @@ mod tests {
 
         for offset_z in 0..depth {
             for offset_x in 0..width {
-                expected_sum += surface_shell_height_with_noise(
+                expected_sum += terrain_surface_shell_height_with_noise(
                     global_x + offset_x as i32,
                     global_z + offset_z as i32,
                     &perlin,
@@ -1337,20 +1482,21 @@ mod tests {
         }
 
         assert_eq!(
-            surface_cell_height_with_noise(global_x, global_z, width, depth, &perlin),
+            terrain_surface_cell_height_with_noise(global_x, global_z, width, depth, &perlin),
             (expected_sum + (width * depth) / 2) / (width * depth)
         );
     }
 
     fn max_sampled_surface_height(chunk_pos: ChunkPos) -> usize {
-        let perlin = Perlin::new(1337);
+        let perlin = terrain_perlin();
         let mut max_height = 0;
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let world_x = chunk_pos.x * CHUNK_SIZE as i32 + x as i32;
                 let world_z = chunk_pos.z * CHUNK_SIZE as i32 + z as i32;
-                max_height =
-                    max_height.max(surface_shell_height_with_noise(world_x, world_z, &perlin));
+                max_height = max_height.max(terrain_surface_shell_height_with_noise(
+                    world_x, world_z, &perlin,
+                ));
             }
         }
         max_height
