@@ -125,6 +125,7 @@ pub struct PreparedPackedGpuGeneratedDraw {
     dispatched: AtomicBool,
 }
 
+#[derive(Clone)]
 pub struct PreparedPackedGpuGeneratedRegion {
     pub key: u64,
     pub generation: u64,
@@ -217,6 +218,7 @@ struct PackedGpuGenerationBuffers {
     indirect_buffer: Option<Buffer>,
     indirect_capacity_commands: usize,
     allocation_requests: Vec<crate::packed_quad_buffer::PackedGpuGenerationAllocationRequest>,
+    planned_regions: Vec<PreparedPackedGpuGeneratedRegion>,
     jobs: Vec<PackedGpuGenerationJob>,
     columns: Vec<PackedGpuSurfaceColumn>,
     draw_params: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
@@ -826,24 +828,32 @@ fn prepare_packed_gpu_generated_draw(
             next_packed_gpu_generation_slot_capacity,
         );
 
-    let mut planned_regions = Vec::with_capacity(ordered_batches.len());
+    buffers.planned_regions.clear();
+    let planned_regions_capacity = buffers.planned_regions.capacity();
+    if planned_regions_capacity < ordered_batches.len() {
+        buffers
+            .planned_regions
+            .reserve(ordered_batches.len() - planned_regions_capacity);
+    }
     for (draw_command_index, batch) in ordered_batches.iter().enumerate() {
         let requested_quads = batch.max_output_quads.max(1);
         let Some(allocation) = new_allocations.get(&batch.key) else {
             continue;
         };
 
-        planned_regions.push(PreparedPackedGpuGeneratedRegion {
-            key: batch.key,
-            generation: batch.generation,
-            column_count: batch.columns.len(),
-            max_output_quads: requested_quads,
-            arena_offset_quads: allocation.offset_quads,
-            arena_capacity_quads: allocation.capacity_quads,
-            draw_command_index,
-            bounds_min: batch.bounds_min,
-            bounds_max: batch.bounds_max,
-        });
+        buffers
+            .planned_regions
+            .push(PreparedPackedGpuGeneratedRegion {
+                key: batch.key,
+                generation: batch.generation,
+                column_count: batch.columns.len(),
+                max_output_quads: requested_quads,
+                arena_offset_quads: allocation.offset_quads,
+                arena_capacity_quads: allocation.capacity_quads,
+                draw_command_index,
+                bounds_min: batch.bounds_min,
+                bounds_max: batch.bounds_max,
+            });
     }
 
     if arena.buffer.is_none() || next_free_quads > arena.capacity_quads {
@@ -871,7 +881,7 @@ fn prepare_packed_gpu_generated_draw(
         .saturating_sub(batch_summary.total_max_output_quads);
     arena.stats.uploaded_bytes = 0;
 
-    if prepared.matches_regions(&planned_regions, arena.generation)
+    if prepared.matches_regions(&buffers.planned_regions, arena.generation)
         && prepared.batch_signature == batch_signature
         && prepared.generation_bind_group.is_some()
         && prepared.render_bind_group.is_some()
@@ -891,7 +901,7 @@ fn prepare_packed_gpu_generated_draw(
             &render_queue,
             &mut gpu_cull,
             GeneratedGpuCullPrepareInput {
-                regions: &planned_regions,
+                regions: &buffers.planned_regions,
                 source_indirect_buffer: prepared.indirect_buffer.as_ref(),
                 cull_bind_group_layout: cull_pipeline
                     .as_deref()
@@ -999,7 +1009,10 @@ fn prepare_packed_gpu_generated_draw(
     }
     let mut column_offset = 0usize;
 
-    for (draw_index, (batch, region)) in ordered_batches.iter().zip(&planned_regions).enumerate() {
+    for region_index in 0..buffers.planned_regions.len() {
+        let region = buffers.planned_regions[region_index].clone();
+        let draw_index = region.draw_command_index;
+        let batch = &ordered_batches[draw_index];
         let mut params = batch.params;
         params.config[0] = batch.columns.len().min(u32::MAX as usize) as u32;
         params.config[1] = region.max_output_quads.min(u32::MAX as usize) as u32;
@@ -1080,7 +1093,7 @@ fn prepare_packed_gpu_generated_draw(
     );
 
     prepared.enabled = true;
-    prepared.regions = planned_regions;
+    prepared.regions.clone_from(&buffers.planned_regions);
     prepared.total_column_count = batch_summary.total_column_count;
     prepared.max_column_count = batch_summary.max_column_count;
     prepared.total_max_output_quads = batch_summary.total_max_output_quads;
