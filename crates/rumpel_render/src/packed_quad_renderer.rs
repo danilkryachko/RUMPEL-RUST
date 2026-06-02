@@ -18,7 +18,6 @@ use bevy::{
 };
 use bevy_asset::{embedded_asset, load_embedded_asset};
 use std::{
-    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -504,7 +503,7 @@ fn collect_visible_indirect_commands(
     clip_from_world: Mat4,
     face_range_cull_enabled: bool,
 ) -> VisibleIndirectSelection {
-    let mut visible_batch_keys = HashSet::new();
+    let mut last_visible_batch_key = None;
     let mut selection = VisibleIndirectSelection {
         indices: Vec::with_capacity(command_count.min(draw_commands.len())),
         commands: Vec::with_capacity(command_count.min(draw_commands.len())),
@@ -543,10 +542,12 @@ fn collect_visible_indirect_commands(
         selection.indices.push(index);
         selection.commands.push(*draw_command);
         selection.visible_quads += command.len_quads;
-        visible_batch_keys.insert(command.batch_key);
+        if last_visible_batch_key != Some(command.batch_key) {
+            selection.visible_batches += 1;
+            last_visible_batch_key = Some(command.batch_key);
+        }
     }
 
-    selection.visible_batches = visible_batch_keys.len();
     selection
 }
 
@@ -557,8 +558,9 @@ fn estimate_visible_indirect_commands(
     clip_from_world: Mat4,
     face_range_cull_enabled: bool,
 ) -> IndirectVisibilityEstimate {
-    let mut visible_batch_keys = HashSet::new();
+    let mut last_visible_batch_key = None;
     let mut visible_commands = 0;
+    let mut visible_batches = 0;
     let mut visible_quads = 0;
 
     for command in commands.iter().take(command_count) {
@@ -584,12 +586,15 @@ fn estimate_visible_indirect_commands(
 
         visible_commands += 1;
         visible_quads += command.len_quads;
-        visible_batch_keys.insert(command.batch_key);
+        if last_visible_batch_key != Some(command.batch_key) {
+            visible_batches += 1;
+            last_visible_batch_key = Some(command.batch_key);
+        }
     }
 
     IndirectVisibilityEstimate {
         visible_commands,
-        visible_batches: visible_batch_keys.len(),
+        visible_batches,
         visible_quads,
     }
 }
@@ -2160,7 +2165,8 @@ impl render_graph::Node for PackedQuadRenderNode {
                 render_pass.multi_draw_indirect(indirect_buffer, 0, indirect.command_count as u32);
                 render_draw_calls = usize::from(indirect.command_count > 0);
                 render_items_considered = indirect.command_count;
-                let mut batch_keys = HashSet::new();
+                let mut visible_batches = 0usize;
+                let mut last_visible_batch_key = None;
                 let mut visible_quads = 0;
                 for command in indirect
                     .command_metadata
@@ -2168,10 +2174,13 @@ impl render_graph::Node for PackedQuadRenderNode {
                     .take(indirect.command_count)
                 {
                     visible_quads += command.len_quads;
-                    batch_keys.insert(command.batch_key);
+                    if last_visible_batch_key != Some(command.batch_key) {
+                        visible_batches = visible_batches.saturating_add(1);
+                        last_visible_batch_key = Some(command.batch_key);
+                    }
                 }
                 crate::packed_quad_pipeline::record_packed_quad_visible_draws(
-                    batch_keys.len(),
+                    visible_batches,
                     visible_quads,
                 );
                 crate::packed_quad_pipeline::record_packed_quad_cpu_visible_indirect(false, 0);
@@ -2870,10 +2879,16 @@ mod tests {
                 first_instance: 10,
             },
             crate::packed_quad_buffer::PackedQuadDrawCommand {
-                vertex_count: 120,
+                vertex_count: 30,
                 instance_count: 1,
                 first_vertex: 60,
                 first_instance: 11,
+            },
+            crate::packed_quad_buffer::PackedQuadDrawCommand {
+                vertex_count: 120,
+                instance_count: 1,
+                first_vertex: 90,
+                first_instance: 12,
             },
         ];
         let metadata = vec![
@@ -2881,6 +2896,13 @@ mod tests {
                 batch_key: 1,
                 face: None,
                 len_quads: 10,
+                bounds_min: Vec3::new(-0.5, -0.5, 0.25),
+                bounds_max: Vec3::new(0.5, 0.5, 0.75),
+            },
+            crate::packed_quad_pipeline::PackedQuadIndirectCommandMetadata {
+                batch_key: 1,
+                face: Some(0),
+                len_quads: 5,
                 bounds_min: Vec3::new(-0.5, -0.5, 0.25),
                 bounds_max: Vec3::new(0.5, 0.5, 0.75),
             },
@@ -2902,11 +2924,11 @@ mod tests {
             false,
         );
 
-        assert_eq!(selection.indices, vec![0]);
-        assert_eq!(selection.commands, vec![draw_commands[0]]);
+        assert_eq!(selection.indices, vec![0, 1]);
+        assert_eq!(selection.commands, vec![draw_commands[0], draw_commands[1]]);
         assert_eq!(selection.visible_batches, 1);
-        assert_eq!(selection.visible_quads, 10);
-        assert_eq!(selection.considered_commands, 2);
+        assert_eq!(selection.visible_quads, 15);
+        assert_eq!(selection.considered_commands, 3);
     }
 
     #[test]
