@@ -267,6 +267,10 @@ pub struct PreparedPackedQuadIndirectDraw {
     pub commands: Vec<crate::packed_quad_buffer::PackedQuadDrawCommand>,
     /// CPU-side metadata for each indirect command.
     pub command_metadata: Vec<PackedQuadIndirectCommandMetadata>,
+    /// Reused sorted batch indices for deterministic indirect buffer construction.
+    pub batch_order: Vec<usize>,
+    /// Reused CPU staging copy of draw params before uploading the params buffer.
+    pub params_staging: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
     /// Mode of drawing used (`direct`, `indirect`, `multi-indirect`, or `material`).
     pub draw_mode: String,
     /// Indication if indirect draw is supported and ready.
@@ -1661,15 +1665,28 @@ pub fn prepare_packed_quad_buffers(
     arena.stats.uploaded_bytes = uploaded_bytes;
 
     // 6. Sort extracted batches by key to match allocations order deterministically
-    let mut sorted_batches = extracted_batches.batches.iter().collect::<Vec<_>>();
-    sorted_batches.sort_by_key(|batch| batch.key);
+    indirect_draw.batch_order.clear();
+    let batch_order_capacity = indirect_draw.batch_order.capacity();
+    if batch_order_capacity < extracted_batches.batches.len() {
+        indirect_draw
+            .batch_order
+            .reserve(extracted_batches.batches.len() - batch_order_capacity);
+    }
+    indirect_draw
+        .batch_order
+        .extend(0..extracted_batches.batches.len());
+    indirect_draw
+        .batch_order
+        .sort_by_key(|batch_index| extracted_batches.batches[*batch_index].key);
 
     let face_range_cull_enabled =
         env_flag_default(PACKED_FACE_RANGE_CULL_ENV, DEFAULT_PACKED_FACE_RANGE_CULL);
     let face_range_min_quads = packed_face_range_min_quads_from_env();
-    let estimated_command_capacity = sorted_batches
+    let estimated_command_capacity = indirect_draw
+        .batch_order
         .iter()
-        .map(|batch| {
+        .map(|batch_index| {
+            let batch = &extracted_batches.batches[*batch_index];
             batch
                 .chunk_ranges
                 .iter()
@@ -1678,125 +1695,187 @@ pub fn prepare_packed_quad_buffers(
                 .max(usize::from(batch.chunk_ranges.is_empty()))
         })
         .sum::<usize>()
-        .max(sorted_batches.len());
-    let mut commands_staging = Vec::with_capacity(estimated_command_capacity);
-    let mut params_staging = Vec::with_capacity(estimated_command_capacity);
-    let mut command_metadata = Vec::with_capacity(estimated_command_capacity);
+        .max(indirect_draw.batch_order.len());
+    indirect_draw.commands.clear();
+    let commands_capacity = indirect_draw.commands.capacity();
+    if commands_capacity < estimated_command_capacity {
+        indirect_draw
+            .commands
+            .reserve(estimated_command_capacity - commands_capacity);
+    }
+    indirect_draw.params_staging.clear();
+    let params_capacity = indirect_draw.params_staging.capacity();
+    if params_capacity < estimated_command_capacity {
+        indirect_draw
+            .params_staging
+            .reserve(estimated_command_capacity - params_capacity);
+    }
+    indirect_draw.command_metadata.clear();
+    let metadata_capacity = indirect_draw.command_metadata.capacity();
+    if metadata_capacity < estimated_command_capacity {
+        indirect_draw
+            .command_metadata
+            .reserve(estimated_command_capacity - metadata_capacity);
+    }
     let region_size = packed_region_size_from_env();
 
     // 7. Update direct prepared batches and build indirect command buffers.
-    for batch in sorted_batches {
-        let allocation = new_allocations.get(&batch.key).copied().unwrap_or(
-            crate::packed_quad_buffer::PackedQuadArenaAllocation {
-                key: batch.key,
-                offset_quads: 0,
-                len_quads: 0,
-                capacity_quads: 0,
-                generation: batch.generation,
-            },
-        );
+    {
+        let PreparedPackedQuadIndirectDraw {
+            batch_order,
+            commands: commands_staging,
+            params_staging,
+            command_metadata,
+            ..
+        } = &mut *indirect_draw;
+        for batch_index in batch_order.iter().copied() {
+            let batch = &extracted_batches.batches[batch_index];
+            let allocation = new_allocations.get(&batch.key).copied().unwrap_or(
+                crate::packed_quad_buffer::PackedQuadArenaAllocation {
+                    key: batch.key,
+                    offset_quads: 0,
+                    len_quads: 0,
+                    capacity_quads: 0,
+                    generation: batch.generation,
+                },
+            );
 
-        let (tx, tz) = unpack_chunk_key(batch.key);
-        let (bounds_min, bounds_max) = packed_region_world_bounds(batch.key, region_size);
-        let existing_generation = prepared_batches
-            .batches
-            .get(&batch.key)
-            .map(|prepared| prepared.generation);
-        let face_ranges = if existing_generation == Some(batch.generation) {
-            prepared_batches
+            let (tx, tz) = unpack_chunk_key(batch.key);
+            let (bounds_min, bounds_max) = packed_region_world_bounds(batch.key, region_size);
+            let existing_generation = prepared_batches
                 .batches
                 .get(&batch.key)
-                .map(|prepared| Cow::Borrowed(prepared.face_ranges.as_slice()))
-                .unwrap_or_else(|| Cow::Owned(packed_quad_face_ranges(batch.quads.as_slice())))
-        } else {
-            Cow::Owned(packed_quad_face_ranges(batch.quads.as_slice()))
-        };
-        // Translation Vec4: x, y, z are world translations, w is the base quad offset as float!
-        let translation = Vec4::new(
-            (tx * 32) as f32,
-            0.0,
-            (tz * 32) as f32,
-            allocation.offset_quads as f32,
-        );
-        let translation_uniform = packed_material_uniform(translation);
+                .map(|prepared| prepared.generation);
+            let face_ranges = if existing_generation == Some(batch.generation) {
+                prepared_batches
+                    .batches
+                    .get(&batch.key)
+                    .map(|prepared| Cow::Borrowed(prepared.face_ranges.as_slice()))
+                    .unwrap_or_else(|| Cow::Owned(packed_quad_face_ranges(batch.quads.as_slice())))
+            } else {
+                Cow::Owned(packed_quad_face_ranges(batch.quads.as_slice()))
+            };
+            // Translation Vec4: x, y, z are world translations, w is the base quad offset as float!
+            let translation = Vec4::new(
+                (tx * 32) as f32,
+                0.0,
+                (tz * 32) as f32,
+                allocation.offset_quads as f32,
+            );
+            let translation_uniform = packed_material_uniform(translation);
 
-        if batch.chunk_ranges.is_empty() {
-            if should_split_packed_face_ranges(
-                face_range_cull_enabled && !batch.needs_compaction,
-                allocation.len_quads,
-                face_ranges.as_ref(),
-                face_range_min_quads,
-            ) {
-                for range in face_ranges.as_ref() {
+            if batch.chunk_ranges.is_empty() {
+                if should_split_packed_face_ranges(
+                    face_range_cull_enabled && !batch.needs_compaction,
+                    allocation.len_quads,
+                    face_ranges.as_ref(),
+                    face_range_min_quads,
+                ) {
+                    for range in face_ranges.as_ref() {
+                        push_packed_indirect_command(
+                            commands_staging,
+                            params_staging,
+                            command_metadata,
+                            PackedIndirectCommandInput {
+                                translation,
+                                batch_key: batch.key,
+                                bounds_min,
+                                bounds_max,
+                                start_quads: range.start_quads,
+                                len_quads: range.len_quads,
+                                face: Some(range.face),
+                            },
+                        );
+                    }
+                } else {
                     push_packed_indirect_command(
-                        &mut commands_staging,
-                        &mut params_staging,
-                        &mut command_metadata,
+                        commands_staging,
+                        params_staging,
+                        command_metadata,
                         PackedIndirectCommandInput {
                             translation,
                             batch_key: batch.key,
                             bounds_min,
                             bounds_max,
-                            start_quads: range.start_quads,
-                            len_quads: range.len_quads,
-                            face: Some(range.face),
+                            start_quads: 0,
+                            len_quads: allocation.len_quads,
+                            face: None,
                         },
                     );
                 }
             } else {
-                push_packed_indirect_command(
-                    &mut commands_staging,
-                    &mut params_staging,
-                    &mut command_metadata,
-                    PackedIndirectCommandInput {
-                        translation,
-                        batch_key: batch.key,
-                        bounds_min,
-                        bounds_max,
-                        start_quads: 0,
-                        len_quads: allocation.len_quads,
-                        face: None,
-                    },
-                );
-            }
-        } else {
-            for range in batch.chunk_ranges.iter().copied() {
-                push_packed_chunk_range_indirect_commands(
-                    &mut commands_staging,
-                    &mut params_staging,
-                    &mut command_metadata,
-                    PackedChunkRangeIndirectInput {
-                        batch,
-                        range,
-                        allocation_len_quads: allocation.len_quads,
-                        translation,
-                        face_range_cull_enabled,
-                        face_range_min_quads,
-                    },
-                );
-            }
-        }
-
-        let updated_face_ranges = match face_ranges {
-            Cow::Owned(face_ranges) => Some(face_ranges),
-            Cow::Borrowed(_) => None,
-        };
-
-        // Keep prepared batches for the direct packed render path.
-        if let Some(prepared) = prepared_batches.batches.get_mut(&batch.key) {
-            let layout_or_offset_changed = prepared.offset_quads != allocation.offset_quads
-                || prepared.len_quads != allocation.len_quads
-                || arena_reallocated;
-            prepared.generation = batch.generation;
-            prepared.bounds_min = bounds_min;
-            prepared.bounds_max = bounds_max;
-            if let Some(face_ranges) = updated_face_ranges {
-                prepared.face_ranges = face_ranges;
+                for range in batch.chunk_ranges.iter().copied() {
+                    push_packed_chunk_range_indirect_commands(
+                        commands_staging,
+                        params_staging,
+                        command_metadata,
+                        PackedChunkRangeIndirectInput {
+                            batch,
+                            range,
+                            allocation_len_quads: allocation.len_quads,
+                            translation,
+                            face_range_cull_enabled,
+                            face_range_min_quads,
+                        },
+                    );
+                }
             }
 
-            if layout_or_offset_changed {
+            let updated_face_ranges = match face_ranges {
+                Cow::Owned(face_ranges) => Some(face_ranges),
+                Cow::Borrowed(_) => None,
+            };
+
+            // Keep prepared batches for the direct packed render path.
+            if let Some(prepared) = prepared_batches.batches.get_mut(&batch.key) {
+                let layout_or_offset_changed = prepared.offset_quads != allocation.offset_quads
+                    || prepared.len_quads != allocation.len_quads
+                    || arena_reallocated;
+                prepared.generation = batch.generation;
+                prepared.bounds_min = bounds_min;
+                prepared.bounds_max = bounds_max;
+                if let Some(face_ranges) = updated_face_ranges {
+                    prepared.face_ranges = face_ranges;
+                }
+
+                if layout_or_offset_changed {
+                    render_queue.write_buffer(
+                        &prepared.translation_buffer,
+                        0,
+                        bytemuck::bytes_of(&translation_uniform),
+                    );
+
+                    let bind_group = pipeline_res.map(|pipeline| {
+                        let bind_group_label =
+                            format!("packed_quad_batch_bind_group_{}", batch.key);
+                        render_device.create_bind_group(
+                            Some(bind_group_label.as_str()),
+                            &pipeline.quad_bind_group_layout,
+                            &BindGroupEntries::sequential((
+                                arena.buffer.as_ref().unwrap().as_entire_buffer_binding(),
+                                prepared.translation_buffer.as_entire_buffer_binding(),
+                                texture_palette_buffer.as_entire_buffer_binding(),
+                                BindingResource::TextureView(&gpu_atlas.texture_view),
+                                BindingResource::Sampler(&gpu_atlas.sampler),
+                            )),
+                        )
+                    });
+
+                    prepared.bind_group = bind_group;
+                    prepared.offset_quads = allocation.offset_quads;
+                    prepared.len_quads = allocation.len_quads;
+                }
+            } else {
+                // Fresh prepared batch: allocate translation uniform and cached bind group
+                let trans_label = format!("packed_quad_translation_{}", batch.key);
+                let translation_buffer = render_device.create_buffer(&BufferDescriptor {
+                    label: Some(trans_label.as_str()),
+                    size: crate::packed_quad_material::PackedVoxelUniform::SIZE,
+                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
+                    mapped_at_creation: false,
+                });
                 render_queue.write_buffer(
-                    &prepared.translation_buffer,
+                    &translation_buffer,
                     0,
                     bytemuck::bytes_of(&translation_uniform),
                 );
@@ -1808,7 +1887,7 @@ pub fn prepare_packed_quad_buffers(
                         &pipeline.quad_bind_group_layout,
                         &BindGroupEntries::sequential((
                             arena.buffer.as_ref().unwrap().as_entire_buffer_binding(),
-                            prepared.translation_buffer.as_entire_buffer_binding(),
+                            translation_buffer.as_entire_buffer_binding(),
                             texture_palette_buffer.as_entire_buffer_binding(),
                             BindingResource::TextureView(&gpu_atlas.texture_view),
                             BindingResource::Sampler(&gpu_atlas.sampler),
@@ -1816,59 +1895,26 @@ pub fn prepare_packed_quad_buffers(
                     )
                 });
 
-                prepared.bind_group = bind_group;
-                prepared.offset_quads = allocation.offset_quads;
-                prepared.len_quads = allocation.len_quads;
+                prepared_batches.batches.insert(
+                    batch.key,
+                    PreparedPackedQuadBatch {
+                        key: batch.key,
+                        generation: batch.generation,
+                        offset_quads: allocation.offset_quads,
+                        len_quads: allocation.len_quads,
+                        translation_buffer,
+                        bind_group,
+                        bounds_min,
+                        bounds_max,
+                        face_ranges: updated_face_ranges
+                            .unwrap_or_else(|| packed_quad_face_ranges(batch.quads.as_slice())),
+                    },
+                );
             }
-        } else {
-            // Fresh prepared batch: allocate translation uniform and cached bind group
-            let trans_label = format!("packed_quad_translation_{}", batch.key);
-            let translation_buffer = render_device.create_buffer(&BufferDescriptor {
-                label: Some(trans_label.as_str()),
-                size: crate::packed_quad_material::PackedVoxelUniform::SIZE,
-                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::UNIFORM,
-                mapped_at_creation: false,
-            });
-            render_queue.write_buffer(
-                &translation_buffer,
-                0,
-                bytemuck::bytes_of(&translation_uniform),
-            );
-
-            let bind_group = pipeline_res.map(|pipeline| {
-                let bind_group_label = format!("packed_quad_batch_bind_group_{}", batch.key);
-                render_device.create_bind_group(
-                    Some(bind_group_label.as_str()),
-                    &pipeline.quad_bind_group_layout,
-                    &BindGroupEntries::sequential((
-                        arena.buffer.as_ref().unwrap().as_entire_buffer_binding(),
-                        translation_buffer.as_entire_buffer_binding(),
-                        texture_palette_buffer.as_entire_buffer_binding(),
-                        BindingResource::TextureView(&gpu_atlas.texture_view),
-                        BindingResource::Sampler(&gpu_atlas.sampler),
-                    )),
-                )
-            });
-
-            prepared_batches.batches.insert(
-                batch.key,
-                PreparedPackedQuadBatch {
-                    key: batch.key,
-                    generation: batch.generation,
-                    offset_quads: allocation.offset_quads,
-                    len_quads: allocation.len_quads,
-                    translation_buffer,
-                    bind_group,
-                    bounds_min,
-                    bounds_max,
-                    face_ranges: updated_face_ranges
-                        .unwrap_or_else(|| packed_quad_face_ranges(batch.quads.as_slice())),
-                },
-            );
         }
     }
 
-    let command_count = commands_staging.len();
+    let command_count = indirect_draw.commands.len();
 
     // 8. Reallocate & upload to the unified GPU indirect buffer
     if command_count > 0 {
@@ -1922,10 +1968,10 @@ pub fn prepare_packed_quad_buffers(
 
         // Upload to command buffers
         if let Some(buf) = &indirect_buf.buffer {
-            render_queue.write_buffer(buf, 0, bytemuck::cast_slice(&commands_staging));
+            render_queue.write_buffer(buf, 0, bytemuck::cast_slice(&indirect_draw.commands));
         }
         if let Some(buf) = &params_buf.buffer {
-            render_queue.write_buffer(buf, 0, bytemuck::cast_slice(&params_staging));
+            render_queue.write_buffer(buf, 0, bytemuck::cast_slice(&indirect_draw.params_staging));
         }
     }
 
@@ -2075,7 +2121,8 @@ pub fn prepare_packed_quad_buffers(
                 .reserve(command_count - metadata_capacity);
         }
         gpu_cull.metadata_scratch.extend(
-            command_metadata
+            indirect_draw
+                .command_metadata
                 .iter()
                 .copied()
                 .map(packed_gpu_cull_metadata_from_command),
@@ -2118,15 +2165,11 @@ pub fn prepare_packed_quad_buffers(
     );
     record_packed_quad_cpu_visible_indirect(false, 0);
 
-    *indirect_draw = PreparedPackedQuadIndirectDraw {
-        bind_group: global_bind_group,
-        indirect_buffer: indirect_buf.buffer.clone(),
-        command_count,
-        commands: commands_staging,
-        command_metadata,
-        draw_mode,
-        is_indirect_enabled: use_indirect && command_count > 0,
-    };
+    indirect_draw.bind_group = global_bind_group;
+    indirect_draw.indirect_buffer = indirect_buf.buffer.clone();
+    indirect_draw.command_count = command_count;
+    indirect_draw.draw_mode = draw_mode;
+    indirect_draw.is_indirect_enabled = use_indirect && command_count > 0;
 
     let mut chunk_ranges = 0;
     let mut resident_chunk_ranges = 0;
