@@ -118,6 +118,7 @@ pub struct PreparedPackedGpuGeneratedDraw {
     pub indirect_buffer: Option<Buffer>,
     pub command_count: usize,
     pub arena_generation: u64,
+    pub cull_metadata_signature: u64,
     dispatched: AtomicBool,
 }
 
@@ -146,6 +147,7 @@ impl PreparedPackedGpuGeneratedDraw {
         self.indirect_buffer = None;
         self.command_count = 0;
         self.arena_generation = 0;
+        self.cull_metadata_signature = 0;
         self.dispatched.store(false, Ordering::Release);
     }
 
@@ -756,6 +758,7 @@ fn prepare_packed_gpu_generated_draw(
             &mut gpu_cull,
             &prepared.regions,
             prepared.indirect_buffer.as_ref(),
+            Some(prepared.cull_metadata_signature),
         );
         return;
     }
@@ -866,6 +869,7 @@ fn prepare_packed_gpu_generated_draw(
             &mut gpu_cull,
             &planned_regions,
             prepared.indirect_buffer.as_ref(),
+            Some(prepared.cull_metadata_signature),
         );
         return;
     }
@@ -1028,6 +1032,7 @@ fn prepare_packed_gpu_generated_draw(
     prepared.source_chunk_count = source_chunk_count;
     prepared.command_count = sorted_batches.len();
     prepared.arena_generation = arena.generation;
+    prepared.cull_metadata_signature = generated_regions_cull_metadata_signature(&prepared.regions);
     prepared.generation_bind_group = Some(generation_bind_group);
     prepared.render_bind_group = Some(render_bind_group);
     prepared.indirect_buffer = Some(indirect_buffer.clone());
@@ -1047,6 +1052,7 @@ fn prepare_packed_gpu_generated_draw(
         &mut gpu_cull,
         &prepared.regions,
         prepared.indirect_buffer.as_ref(),
+        Some(prepared.cull_metadata_signature),
     );
 }
 
@@ -1097,6 +1103,7 @@ fn prepare_generated_gpu_cull(
     gpu_cull: &mut crate::packed_quad_pipeline::PreparedPackedQuadGpuCull,
     regions: &[PreparedPackedGpuGeneratedRegion],
     source_indirect_buffer: Option<&Buffer>,
+    metadata_signature: Option<u64>,
 ) {
     let command_count = regions.len();
     let generated_cull_enabled = env_flag_default(PACKED_GPU_CULL_ENV, true)
@@ -1174,7 +1181,8 @@ fn prepare_generated_gpu_cull(
         compact_output: u32::from(compact_enabled),
         _padding: 0,
     };
-    let metadata_signature = generated_regions_cull_metadata_signature(regions);
+    let metadata_signature =
+        metadata_signature.unwrap_or_else(|| generated_regions_cull_metadata_signature(regions));
     let config_signature = generated_cull_config_signature(cull_config);
 
     if (metadata_buffer_recreated || gpu_cull.metadata_signature != metadata_signature)
