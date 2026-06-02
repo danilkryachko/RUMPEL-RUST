@@ -595,6 +595,39 @@ fn estimate_visible_indirect_commands(
     }
 }
 
+fn estimate_visible_generated_regions(
+    regions: &[PreparedPackedGpuGeneratedRegion],
+    command_count: usize,
+    view_position: Vec3,
+    clip_from_world: Mat4,
+) -> IndirectVisibilityEstimate {
+    let mut visible_commands = 0;
+    let mut visible_quads = 0;
+
+    for region in regions.iter().take(command_count) {
+        if region.max_output_quads == 0 {
+            continue;
+        }
+
+        let view_inside_region =
+            point_inside_bounds(view_position, region.bounds_min, region.bounds_max);
+        if !view_inside_region
+            && !bounds_are_visible(region.bounds_min, region.bounds_max, clip_from_world)
+        {
+            continue;
+        }
+
+        visible_commands += 1;
+        visible_quads += region.max_output_quads;
+    }
+
+    IndirectVisibilityEstimate {
+        visible_commands,
+        visible_batches: visible_commands,
+        visible_quads,
+    }
+}
+
 fn packed_fog_range_from_env() -> (f32, f32) {
     let start = env_f32(PACKED_FOG_START_ENV).unwrap_or(DEFAULT_PACKED_FOG_START);
     let end = env_f32(PACKED_FOG_END_ENV).unwrap_or(DEFAULT_PACKED_FOG_END);
@@ -1724,19 +1757,12 @@ impl<'a> PackedQuadGpuCullSource<'a> {
         clip_from_world: Mat4,
     ) -> IndirectVisibilityEstimate {
         match self {
-            Self::Generated { regions, .. } => {
-                let metadata = regions
-                    .iter()
-                    .map(generated_region_cull_metadata)
-                    .collect::<Vec<_>>();
-                estimate_visible_indirect_commands(
-                    &metadata,
-                    command_count,
-                    view_position,
-                    clip_from_world,
-                    false,
-                )
-            }
+            Self::Generated { regions, .. } => estimate_visible_generated_regions(
+                regions,
+                command_count,
+                view_position,
+                clip_from_world,
+            ),
             Self::CpuPrepared { metadata, .. } => estimate_visible_indirect_commands(
                 metadata,
                 command_count,
@@ -2668,6 +2694,40 @@ mod tests {
                 ..input
             })
         );
+    }
+
+    #[test]
+    fn packed_gpu_generation_visibility_estimate_uses_regions_directly() {
+        let regions = [
+            PreparedPackedGpuGeneratedRegion {
+                key: 1,
+                generation: 1,
+                column_count: 4,
+                max_output_quads: 64,
+                arena_offset_quads: 0,
+                arena_capacity_quads: 64,
+                draw_command_index: 0,
+                bounds_min: Vec3::splat(-0.5),
+                bounds_max: Vec3::splat(0.5),
+            },
+            PreparedPackedGpuGeneratedRegion {
+                key: 2,
+                generation: 1,
+                column_count: 4,
+                max_output_quads: 128,
+                arena_offset_quads: 64,
+                arena_capacity_quads: 128,
+                draw_command_index: 1,
+                bounds_min: Vec3::splat(4.0),
+                bounds_max: Vec3::splat(5.0),
+            },
+        ];
+
+        let estimate =
+            estimate_visible_generated_regions(&regions, regions.len(), Vec3::ZERO, Mat4::IDENTITY);
+        assert_eq!(estimate.visible_commands, 1);
+        assert_eq!(estimate.visible_batches, 1);
+        assert_eq!(estimate.visible_quads, 64);
     }
 
     #[test]
