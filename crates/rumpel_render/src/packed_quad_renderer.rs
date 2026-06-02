@@ -18,7 +18,7 @@ use bevy::{
 };
 use bevy_asset::{embedded_asset, load_embedded_asset};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -805,23 +805,6 @@ fn prepare_packed_gpu_generated_draw(
         return;
     }
 
-    let existing_allocations = prepared
-        .regions
-        .iter()
-        .map(|region| {
-            (
-                region.key,
-                crate::packed_quad_buffer::PackedQuadArenaAllocation {
-                    key: region.key,
-                    offset_quads: region.arena_offset_quads,
-                    len_quads: region.max_output_quads,
-                    capacity_quads: region.arena_capacity_quads,
-                    generation: region.generation,
-                },
-            )
-        })
-        .collect::<HashMap<_, _>>();
-
     let allocation_requests = ordered_batches
         .iter()
         .map(
@@ -834,7 +817,7 @@ fn prepare_packed_gpu_generated_draw(
         .collect::<Vec<_>>();
     let (new_allocations, next_free_quads) =
         crate::packed_quad_buffer::plan_gpu_generated_arena_allocations(
-            &existing_allocations,
+            &arena.allocations,
             &allocation_requests,
             next_packed_gpu_generation_slot_capacity,
         );
