@@ -4773,17 +4773,18 @@ fn compact_deferred_packed_region_batch(
         return false;
     };
 
-    let changed = {
+    let changed;
+    {
         let batch = &mut batches.batches_mut()[batch_index];
-        compact_region_batch_preserving_chunk_ranges_with_scratch(
+        changed = compact_region_batch_preserving_chunk_ranges_with_scratch(
             batch,
             &mut state.region_compaction_scratch,
-        )
-    };
-    if changed {
-        batches.batches_mut()[batch_index].generation = next_region_generation(state, region_key);
+        );
+        if changed {
+            batch.generation = next_region_generation(state, region_key);
+        }
+        batch.needs_compaction = false;
     }
-    batches.batches_mut()[batch_index].needs_compaction = false;
     true
 }
 
