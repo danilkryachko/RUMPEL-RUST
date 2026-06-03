@@ -1952,7 +1952,6 @@ fn log_profile_metrics(
     }
 }
 
-fn env_flag(name: &str) -> bool {
 fn packed_draw_mode_label(draw_mode: usize) -> &'static str {
     match draw_mode {
         rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_GPU_GENERATED => "gpu-generated",
@@ -1963,6 +1962,7 @@ fn packed_draw_mode_label(draw_mode: usize) -> &'static str {
     }
 }
 
+fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| {
         matches!(
             value.to_ascii_lowercase().as_str(),

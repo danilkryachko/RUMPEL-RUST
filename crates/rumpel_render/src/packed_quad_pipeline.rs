@@ -311,7 +311,7 @@ pub struct PreparedPackedQuadIndirectDraw {
     /// Reused CPU staging copy of draw params before uploading the params buffer.
     pub params_staging: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
     /// Mode of drawing used (`direct`, `indirect`, `multi-indirect`, or `material`).
-    pub draw_mode: String,
+    pub draw_mode: &'static str,
     /// Indication if indirect draw is supported and ready.
     pub is_indirect_enabled: bool,
 }
@@ -2216,15 +2216,15 @@ pub fn prepare_packed_quad_buffers(
     let use_indirect = indirect_requested && has_first_instance;
     let material_mode = is_packed_material_mode();
     let draw_mode = if material_mode {
-        "material".to_string()
+        "material"
     } else if use_indirect && multi_indirect_requested {
-        "multi-indirect".to_string()
+        "multi-indirect"
     } else if use_indirect {
-        "indirect".to_string()
+        "indirect"
     } else {
-        "direct".to_string()
+        "direct"
     };
-    let mode_code = match draw_mode.as_str() {
+    let mode_code = match draw_mode {
         "material" => PACKED_DRAW_MODE_MATERIAL,
         "multi-indirect" => PACKED_DRAW_MODE_MULTI_INDIRECT,
         "indirect" => PACKED_DRAW_MODE_INDIRECT,
