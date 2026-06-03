@@ -306,6 +306,8 @@ pub struct PreparedPackedQuadIndirectDraw {
         HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
     /// Reused compacted dirty key list scratch for deferred arena compaction.
     pub compacted_dirty_batch_keys: Vec<u64>,
+    /// Last allocation generation signature published to the Main World dirty-range pruner.
+    pub confirmed_generation_signature: (usize, u64),
     /// Reused CPU staging copy of draw params before uploading the params buffer.
     pub params_staging: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
     /// Mode of drawing used (`direct`, `indirect`, `multi-indirect`, or `material`).
@@ -792,6 +794,13 @@ static METRICS_BRIDGE: PackedQuadMetricsBridge = PackedQuadMetricsBridge {
 
 static CONFIRMED_PACKED_BATCH_GENERATIONS: LazyLock<Mutex<HashMap<u64, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const PACKED_CONFIRM_FNV64_OFFSET: u64 = 14_695_981_039_346_656_037;
+const PACKED_CONFIRM_FNV64_PRIME: u64 = 1_099_511_628_211;
+
+fn packed_confirm_fnv64(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(PACKED_CONFIRM_FNV64_PRIME)
+}
 
 /// Pure helper function to determine the next buffer capacity when growing is required.
 pub fn next_packed_quad_capacity(current_capacity: usize, requested_capacity: usize) -> usize {
@@ -1861,7 +1870,13 @@ pub fn prepare_packed_quad_buffers(
             uploaded_batches += usize::from(uploaded_subranges_for_batch);
         }
     }
-    record_confirmed_packed_batch_generations(&indirect_draw.allocation_plan);
+    let confirmed_generation_signature =
+        confirmed_packed_batch_generation_signature(&indirect_draw.allocation_plan);
+    if indirect_draw.confirmed_generation_signature != confirmed_generation_signature
+        && record_confirmed_packed_batch_generations(&indirect_draw.allocation_plan)
+    {
+        indirect_draw.confirmed_generation_signature = confirmed_generation_signature;
+    }
     arena.next_free_quads = next_free_quads;
     arena.stats.used_quads = total_required_quads;
     arena.stats.allocated_slot_quads = next_free_quads;
@@ -2808,16 +2823,35 @@ pub fn record_packed_quad_cpu_visible_indirect(compact_enabled: bool, visible_co
         .store(visible_commands, Ordering::Relaxed);
 }
 
+fn confirmed_packed_batch_generation_signature(
+    allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+) -> (usize, u64) {
+    let mut hash = packed_confirm_fnv64(PACKED_CONFIRM_FNV64_OFFSET, allocations.len() as u64);
+    for (&key, allocation) in allocations {
+        let mut entry_hash = packed_confirm_fnv64(PACKED_CONFIRM_FNV64_OFFSET, key);
+        entry_hash = packed_confirm_fnv64(entry_hash, allocation.generation);
+        hash ^= entry_hash;
+    }
+    (allocations.len(), hash)
+}
+
 fn record_confirmed_packed_batch_generations(
     allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
-) {
+) -> bool {
     if let Ok(mut confirmed_generations) = CONFIRMED_PACKED_BATCH_GENERATIONS.lock() {
         confirmed_generations.clear();
+        let confirmed_capacity = confirmed_generations.capacity();
+        if confirmed_capacity < allocations.len() {
+            confirmed_generations.reserve(allocations.len() - confirmed_capacity);
+        }
         confirmed_generations.extend(
             allocations
                 .iter()
                 .map(|(&key, allocation)| (key, allocation.generation)),
         );
+        true
+    } else {
+        false
     }
 }
 
@@ -6236,6 +6270,82 @@ mod tests {
                 len_quads: 1,
                 generation: 5,
             }]
+        );
+    }
+
+    #[test]
+    fn test_confirmed_generation_signature_tracks_keys_and_generations() {
+        let mut first = HashMap::new();
+        first.insert(
+            20,
+            crate::packed_quad_buffer::PackedQuadArenaAllocation {
+                key: 20,
+                offset_quads: 0,
+                len_quads: 4,
+                capacity_quads: 4,
+                generation: 7,
+            },
+        );
+        first.insert(
+            10,
+            crate::packed_quad_buffer::PackedQuadArenaAllocation {
+                key: 10,
+                offset_quads: 4,
+                len_quads: 2,
+                capacity_quads: 2,
+                generation: 3,
+            },
+        );
+
+        let mut reversed = HashMap::new();
+        reversed.insert(
+            10,
+            crate::packed_quad_buffer::PackedQuadArenaAllocation {
+                key: 10,
+                offset_quads: 4,
+                len_quads: 2,
+                capacity_quads: 2,
+                generation: 3,
+            },
+        );
+        reversed.insert(
+            20,
+            crate::packed_quad_buffer::PackedQuadArenaAllocation {
+                key: 20,
+                offset_quads: 0,
+                len_quads: 4,
+                capacity_quads: 4,
+                generation: 7,
+            },
+        );
+
+        assert_eq!(
+            confirmed_packed_batch_generation_signature(&first),
+            confirmed_packed_batch_generation_signature(&reversed)
+        );
+
+        let mut changed_generation = reversed.clone();
+        changed_generation.get_mut(&20).unwrap().generation = 8;
+        assert_ne!(
+            confirmed_packed_batch_generation_signature(&first),
+            confirmed_packed_batch_generation_signature(&changed_generation)
+        );
+
+        let mut changed_key = first;
+        changed_key.remove(&10);
+        changed_key.insert(
+            11,
+            crate::packed_quad_buffer::PackedQuadArenaAllocation {
+                key: 11,
+                offset_quads: 4,
+                len_quads: 2,
+                capacity_quads: 2,
+                generation: 3,
+            },
+        );
+        assert_ne!(
+            confirmed_packed_batch_generation_signature(&reversed),
+            confirmed_packed_batch_generation_signature(&changed_key)
         );
     }
 

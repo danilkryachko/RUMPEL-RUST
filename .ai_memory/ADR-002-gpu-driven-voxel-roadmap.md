@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-03: Packed indirect prepare now records confirmed batch generations only when the allocation key/generation signature changes, preserving dirty-range pruning while avoiding repeated shared HashMap rebuilds on stable frames. Verified with render check, focused signature test, render clippy with `-D warnings`, and `just verify`.
 - 2026-06-03: GPU-generated active region selection now uses the arithmetic region/view-radius predicate instead of per-region HashSet chunk scans. Added parity coverage against the previous active-chunk set scan and verified render checks, focused tests, clippy, and `just verify`.
 - 2026-06-03: Deferred packed region compaction now coalesces post-compaction generation and flag updates into one Arc-backed packed batch mutable access. Static proof: render check, focused deferred compaction test, render clippy with `-D warnings`, and `just verify`.
 - 2026-06-03: CPU packed `PackedQuadBatches` extraction now shares the batch vector through `Arc<Vec<_>>`; streaming/material mutation paths use explicit COW access. This removes the stable per-frame extracted batch Vec clone on unchanged CPU packed targets. Static proof: render check, extract-sharing test, render clippy with `-D warnings`, and `just verify`.
