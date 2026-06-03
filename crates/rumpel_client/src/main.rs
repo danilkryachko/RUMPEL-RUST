@@ -12,9 +12,10 @@ use bevy::{
 use profiling::RumpelClientProfilingPlugin;
 use rumpel_player::{Player, PlayerCamera, RumpelPlayerPlugin};
 use rumpel_prelude::*;
-use std::{num::NonZeroU32, path::Path, time::Duration};
+use std::{num::NonZeroU32, time::Duration};
 
 mod profiling;
+mod working_dir;
 
 const DEPTH_PREPASS_ENV: &str = "RUMPEL_DEPTH_PREPASS";
 const OCCLUSION_CULLING_ENV: &str = "RUMPEL_OCCLUSION_CULLING";
@@ -26,9 +27,7 @@ const WINDOW_WIDTH_ENV: &str = "RUMPEL_WINDOW_WIDTH";
 const WINDOW_HEIGHT_ENV: &str = "RUMPEL_WINDOW_HEIGHT";
 const SHADOWS_ENV: &str = "RUMPEL_SHADOWS";
 const GPU_PREFLIGHT_ENV: &str = "RUMPEL_GPU_PREFLIGHT";
-const CLIENT_WORKING_DIR_ENV: &str = "RUMPEL_CLIENT_WORKING_DIR";
 const HEADLESS_RENDER_ENV: &str = "RUMPEL_HEADLESS_RENDER";
-const SPLIT_DISPLAY_ENV: &str = rumpel_render::split_display::SPLIT_DISPLAY_ENV;
 const HEADLESS_WAIT_MS_ENV: &str = "RUMPEL_HEADLESS_WAIT_MS";
 const HEADLESS_RENDER_WIDTH_ENV: &str = "RUMPEL_HEADLESS_RENDER_WIDTH";
 const HEADLESS_RENDER_HEIGHT_ENV: &str = "RUMPEL_HEADLESS_RENDER_HEIGHT";
@@ -52,7 +51,7 @@ const DEFAULT_HEADLESS_RENDER_WIDTH: u32 = 1920;
 const DEFAULT_HEADLESS_RENDER_HEIGHT: u32 = 1080;
 
 fn main() {
-    apply_client_working_dir_override();
+    working_dir::install_client_working_dir();
     if env_flag_default(GPU_PREFLIGHT_ENV, true) {
         preflight_gpu_adapter();
     }
@@ -62,7 +61,7 @@ fn main() {
     let mut default_plugins = DefaultPlugins
         .set(ImagePlugin::default_nearest())
         .set(AssetPlugin {
-            file_path: asset_file_path(),
+            file_path: working_dir::asset_file_path(),
             ..default()
         })
         .set(window_plugin(headless_render));
@@ -77,8 +76,8 @@ fn main() {
         .add_plugins(default_plugins)
         .add_plugins(RumpelPlayerPlugin)
         .add_plugins(rumpel_debug::RumpelDebugPlugin)
-        .add_plugins(RumpelClientProfilingPlugin)
         .add_plugins(rumpel_render::RumpelRenderPlugin)
+        .add_plugins(RumpelClientProfilingPlugin)
         .init_state::<GameState>()
         .init_resource::<RumpelTime>()
         .add_systems(Startup, setup_camera_and_light)
@@ -96,24 +95,8 @@ fn main() {
         );
     if headless_render {
         app.add_plugins(ScheduleRunnerPlugin::run_loop(headless_wait_duration()));
-    } else if split_display_enabled() {
-        info!("MAIN: Split display pipeline enabled (offscreen game + Core2d present)");
-        rumpel_render::split_display::install_split_display(&mut app);
     }
     app.run();
-}
-
-fn apply_client_working_dir_override() {
-    let Ok(path) = std::env::var(CLIENT_WORKING_DIR_ENV) else {
-        return;
-    };
-    if path.trim().is_empty() {
-        return;
-    }
-    if let Err(error) = std::env::set_current_dir(&path) {
-        eprintln!("failed to set {CLIENT_WORKING_DIR_ENV}='{path}': {error}");
-        std::process::exit(66);
-    }
 }
 
 fn preflight_gpu_adapter() {
@@ -128,19 +111,6 @@ fn preflight_gpu_adapter() {
         );
         std::process::exit(78);
     }
-}
-
-fn asset_file_path() -> String {
-    std::env::var(CLIENT_WORKING_DIR_ENV)
-        .ok()
-        .filter(|path| !path.trim().is_empty())
-        .map(|path| {
-            Path::new(&path)
-                .join("assets")
-                .to_string_lossy()
-                .into_owned()
-        })
-        .unwrap_or_else(|| "assets".to_string())
 }
 
 fn window_plugin(headless_render: bool) -> WindowPlugin {
@@ -433,8 +403,6 @@ fn setup_camera_and_light(
             ));
             if let Some(render_target) = headless_render_target {
                 camera.insert(render_target);
-            } else if split_display_enabled() {
-                camera.insert(rumpel_render::split_display::SplitDisplayGameView);
             }
             if enable_depth_prepass {
                 camera.insert(DepthPrepass);
@@ -520,10 +488,6 @@ fn camera_lock_enabled() -> bool {
 
 fn headless_render_enabled() -> bool {
     env_flag(HEADLESS_RENDER_ENV)
-}
-
-fn split_display_enabled() -> bool {
-    env_flag(SPLIT_DISPLAY_ENV) && !headless_render_enabled()
 }
 
 fn headless_wait_duration() -> Duration {

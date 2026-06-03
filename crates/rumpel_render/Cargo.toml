@@ -11,7 +11,7 @@ noise = { workspace = true }
 rumpel_prelude = { workspace = true }
 rumpel_blocks = { workspace = true }
 rumpel_world = { workspace = true }
-wgpu = { version = "27.0.1", default-features = false }
+wgpu = { version = "27", default-features = false }
 
 [dev-dependencies]
 naga = { version = "27.0.3", features = ["wgsl-in"] }

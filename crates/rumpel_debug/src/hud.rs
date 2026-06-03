@@ -6,6 +6,7 @@ use bevy::{
 use rumpel_render::{RenderedChunkCount, surface_streaming::SurfaceStreamingMetrics};
 
 const FPS_PENDING_TEXT: &str = "FPS -- | Chunks --";
+const HUD_FONT_SIZE: f32 = 8.0;
 
 #[derive(Component)]
 pub(crate) struct FpsHudText;
@@ -23,24 +24,20 @@ pub(crate) fn update_debug_hud(
     packed_stats: Option<Res<rumpel_render::packed_quad_pipeline::PackedQuadPipelineStats>>,
     cameras: DebugHudCameras,
 ) {
-    let ui_camera = cameras
-        .split_display
-        .iter()
-        .next()
-        .or_else(|| cameras.player.iter().next());
+    let ui_camera = cameras.player.iter().next();
 
     if fps_text.is_empty() {
         info!("HUD: Spawning FPS HUD dynamically!");
         let mut entity = commands.spawn((
             Text::new(FPS_PENDING_TEXT),
-            TextFont::from_font_size(16.0),
+            TextFont::from_font_size(HUD_FONT_SIZE),
             TextColor(Color::srgb(0.86, 0.96, 0.88)),
             Node {
                 position_type: PositionType::Absolute,
-                right: px(12),
-                top: px(10),
-                padding: UiRect::axes(px(8), px(4)),
-                min_width: px(82),
+                right: px(6),
+                top: px(5),
+                padding: UiRect::axes(px(4), px(2)),
+                min_width: px(41),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.02, 0.025, 0.02, 0.72)),
@@ -138,8 +135,6 @@ pub(crate) fn update_debug_hud(
 
 #[derive(SystemParam)]
 pub(crate) struct DebugHudCameras<'w, 's> {
-    split_display:
-        Query<'w, 's, Entity, With<rumpel_render::split_display::SplitDisplayPresentCamera>>,
     player: Query<'w, 's, Entity, With<rumpel_player::PlayerCamera>>,
 }
 

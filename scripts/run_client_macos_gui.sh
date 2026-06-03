@@ -16,6 +16,7 @@ case "$mode" in
 esac
 
 build_profile="${RUMPEL_CLIENT_BUILD_PROFILE:-dev}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_dir/target}"
 target_profile="debug"
 cargo_args=("-p" "rumpel_client")
 case "$build_profile" in
@@ -35,7 +36,7 @@ if [[ "${RUMPEL_CLIENT_SKIP_BUILD:-0}" != "1" ]]; then
     cargo build "${cargo_args[@]}"
 fi
 
-binary="$repo_dir/target/$target_profile/rumpel_client"
+binary="${CARGO_TARGET_DIR}/$target_profile/rumpel_client"
 if [[ ! -x "$binary" ]]; then
     echo "client binary is missing or not executable: $binary" >&2
     exit 66
@@ -186,6 +187,9 @@ close_terminal_by_title() {
         RUMPEL_PACKED_MAX_BUILD_TASKS \
         RUMPEL_PACKED_ADAPTIVE_STREAMING \
         RUMPEL_PACKED_DEFER_COMPACTION \
+        RUMPEL_PACKED_GPU_GENERATION \
+        RUMPEL_PACKED_GPU_GENERATION_REGION_RADIUS \
+        RUMPEL_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME \
         RUMPEL_PACKED_GPU_CULL \
         RUMPEL_PACKED_CPU_VISIBLE_COMPACT \
         RUMPEL_PACKED_GPU_TIMESTAMPS \
@@ -203,7 +207,6 @@ close_terminal_by_title() {
         RUMPEL_COMPUTE_DIRECT_GPU_CULL_COMPACT \
         RUMPEL_PRESENT_MODE \
         RUMPEL_FRAME_LATENCY \
-        RUMPEL_SPLIT_DISPLAY \
         RUMPEL_WINDOW_WIDTH \
         RUMPEL_WINDOW_HEIGHT \
         RUMPEL_SHADOWS \

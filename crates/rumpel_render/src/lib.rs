@@ -1,7 +1,5 @@
 use bevy::prelude::*;
 
-pub mod split_display;
-
 pub mod packed_quad_buffer;
 pub mod packed_quad_gpu_generation;
 pub mod packed_quad_material;

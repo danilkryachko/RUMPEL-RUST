@@ -86,6 +86,7 @@ static RENDER_PREPARE_ASSETS_US: AtomicU64 = AtomicU64::new(0);
 static RENDER_PREPARE_MESHES_US: AtomicU64 = AtomicU64::new(0);
 static RENDER_MANAGE_VIEWS_US: AtomicU64 = AtomicU64::new(0);
 static RENDER_PREPARE_WINDOWS_US: AtomicU64 = AtomicU64::new(0);
+static MAX_RENDER_PREPARE_WINDOWS_US: AtomicU64 = AtomicU64::new(0);
 static RENDER_QUEUE_US: AtomicU64 = AtomicU64::new(0);
 static RENDER_PHASE_SORT_US: AtomicU64 = AtomicU64::new(0);
 static RENDER_PREPARE_US: AtomicU64 = AtomicU64::new(0);
@@ -631,7 +632,7 @@ impl RenderGpuFrameTimestampProfiler {
 struct CameraDriverProfileStartLabel;
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug, RenderLabel)]
-struct CameraDriverProfileEndLabel;
+pub struct CameraDriverProfileEndLabel;
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug, RenderLabel)]
 struct Core3dProfileStartLabel;
@@ -1144,6 +1145,24 @@ fn store_render_phase_metric(metric: &AtomicU64, started_at: Option<Instant>) {
     }
 }
 
+fn update_atomic_max(metric: &AtomicU64, value: u64) {
+    let mut current = metric.load(Ordering::Relaxed);
+    while value > current {
+        match metric.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+pub fn max_render_prepare_windows_us() -> u64 {
+    MAX_RENDER_PREPARE_WINDOWS_US.load(Ordering::Relaxed)
+}
+
+pub fn reset_max_render_prepare_windows_us() {
+    MAX_RENDER_PREPARE_WINDOWS_US.store(0, Ordering::Relaxed);
+}
+
 fn snapshot_render_phase_stats() -> ProfilePhaseStats {
     ProfilePhaseStats {
         render_schedule_us: RENDER_SCHEDULE_US.load(Ordering::Relaxed),
@@ -1279,6 +1298,10 @@ fn mark_render_prepare_windows_start(mut probe: ResMut<RenderFramePhaseProbe>) {
 fn mark_render_prepare_windows_end(mut probe: ResMut<RenderFramePhaseProbe>) {
     let started_at = probe.prepare_windows_started_at.take();
     store_render_phase_metric(&RENDER_PREPARE_WINDOWS_US, started_at);
+    update_atomic_max(
+        &MAX_RENDER_PREPARE_WINDOWS_US,
+        RENDER_PREPARE_WINDOWS_US.load(Ordering::Relaxed),
+    );
 }
 
 fn mark_render_after_manage_views(mut probe: ResMut<RenderFramePhaseProbe>) {
@@ -1685,17 +1708,7 @@ fn log_profile_metrics(
         if let Some(stats) = packed_stats_snapshot {
             let vertex_count =
                 rumpel_render::packed_quad_renderer::vertex_count_for_quads(stats.arena_used_quads);
-            let mode_str = match stats.draw_mode {
-                rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_GPU_GENERATED => {
-                    "gpu-generated"
-                }
-                rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_MATERIAL => "material",
-                rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_MULTI_INDIRECT => {
-                    "multi-indirect"
-                }
-                rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_INDIRECT => "indirect",
-                _ => "direct",
-            };
+            let mode_str = packed_draw_mode_label(stats.draw_mode);
             let face_range_cull =
                 env_flag_default(PACKED_FACE_RANGE_CULL_ENV, DEFAULT_PACKED_FACE_RANGE_CULL);
             let face_range_min_quads = env_usize(
@@ -1703,7 +1716,7 @@ fn log_profile_metrics(
                 DEFAULT_PACKED_FACE_RANGE_MIN_QUADS,
             );
             log_str.push_str(&format!(
-                " packed_batches={} packed_visible_batches={} packed_quads={} packed_visible_quads={} packed_uploaded_quads={} packed_dropped_quads={} packed_uploaded_bytes={} packed_buffer_capacity={} packed_vertex_count={} packed_visible_vertex_count={} packed_chunks_loaded={} packed_chunks_active={} packed_chunk_ranges={} packed_resident_ranges={} packed_tombstone_ranges={} packed_resident_capacity_quads={} packed_tombstone_capacity_quads={} packed_dirty_ranges={} packed_dirty_range_quads={} pending_builds={} pending_region_rebuilds={} packed_prepare_us={} packed_view_prepare_us={} packed_stream_us={} packed_stream_spawned_builds={} packed_stream_rebuild_regions={} packed_build_task_us={} built_this_frame={} packed_compaction_us={} packed_compacted_regions={} uploaded_this_frame={} arena_capacity_quads={} arena_used_quads={} arena_slot_quads={} arena_uploaded_bytes={} arena_reallocations={} arena_compactions={} packed_cpu_reserved_bytes={} packed_min_ram_bytes={} packed_gpu_reserved_bytes={} packed_min_vram_bytes={} packed_draw_mode={} packed_face_range_cull={} packed_face_range_min_quads={} packed_indirect_draw_commands={} packed_render_node_us={} packed_render_draw_calls={} packed_render_items_considered={} packed_render_gpu_pass_us={} packed_gpu_timestamps_requested={} packed_gpu_timestamps_supported={} packed_gpu_cull_enabled={} packed_gpu_cull_input_commands={} packed_gpu_cull_est_visible_commands={} packed_gpu_cull_est_visible_quads={} packed_gpu_cull_node_us={} packed_gpu_cull_count_supported={} packed_gpu_cull_compact_enabled={} packed_cpu_visible_compact_enabled={} packed_cpu_visible_commands={} packed_material_entities={} packed_material_sync_us={}",
+                " packed_batches={} packed_visible_batches={} packed_quads={} packed_visible_quads={} packed_uploaded_quads={} packed_dropped_quads={} packed_uploaded_bytes={} packed_buffer_capacity={} packed_vertex_count={} packed_visible_vertex_count={} packed_chunks_loaded={} packed_chunks_active={} packed_chunk_ranges={} packed_resident_ranges={} packed_tombstone_ranges={} packed_resident_capacity_quads={} packed_tombstone_capacity_quads={} packed_dirty_ranges={} packed_dirty_range_quads={} pending_builds={} pending_region_rebuilds={} packed_prepare_us={} packed_view_prepare_us={} packed_stream_us={} packed_stream_spawned_builds={} packed_stream_rebuild_regions={} packed_build_task_us={} built_this_frame={} packed_compaction_us={} packed_compacted_regions={} uploaded_this_frame={} arena_capacity_quads={} arena_used_quads={} arena_slot_quads={} arena_uploaded_bytes={} arena_reallocations={} arena_compactions={} packed_cpu_reserved_bytes={} packed_min_ram_bytes={} packed_gpu_reserved_bytes={} packed_min_vram_bytes={} packed_draw_mode={} packed_generated_regions_loaded={} packed_generated_regions_active={} packed_generated_regions_visible={} packed_generated_update_us={} packed_generated_update_skipped={} packed_generated_cache_hits={} packed_generated_cache_misses={} packed_generated_cache_invalidated={} packed_generated_cache_evicted={} packed_generated_cache_prefetched={} packed_generated_prepare_skipped={} packed_generated_cull_metadata_uploaded={} packed_generated_cull_config_uploaded={} packed_generated_cull_dispatch_skipped={} packed_face_range_cull={} packed_face_range_min_quads={} packed_indirect_draw_commands={} packed_render_node_us={} packed_render_draw_calls={} packed_render_items_considered={} packed_render_gpu_pass_us={} packed_gpu_timestamps_requested={} packed_gpu_timestamps_supported={} packed_gpu_cull_enabled={} packed_gpu_cull_input_commands={} packed_gpu_cull_est_visible_commands={} packed_gpu_cull_est_visible_quads={} packed_gpu_cull_node_us={} packed_gpu_cull_count_supported={} packed_gpu_cull_compact_enabled={} packed_cpu_visible_compact_enabled={} packed_cpu_visible_commands={} packed_material_entities={} packed_material_sync_us={}",
                 stats.batches,
                 stats.visible_batches,
                 stats.quads,
@@ -1746,6 +1759,20 @@ fn log_profile_metrics(
                 stats.gpu_reserved_bytes,
                 stats.min_vram_bytes,
                 mode_str,
+                stats.generated_regions_loaded,
+                stats.generated_regions_active,
+                stats.generated_regions_visible,
+                stats.generated_update_us,
+                stats.generated_update_skipped,
+                stats.generated_cache_hits,
+                stats.generated_cache_misses,
+                stats.generated_cache_invalidated,
+                stats.generated_cache_evicted,
+                stats.generated_cache_prefetched,
+                stats.generated_prepare_skipped,
+                stats.generated_cull_metadata_uploaded,
+                stats.generated_cull_config_uploaded,
+                stats.generated_cull_dispatch_skipped,
                 face_range_cull,
                 face_range_min_quads,
                 stats.indirect_draw_commands,
@@ -1862,8 +1889,10 @@ fn log_profile_metrics(
         let measured_packed_bandwidth_mb_s =
             measured_packed_upload_mb / (measured_duration_s as f64);
 
+        let max_render_prepare_windows_us = max_render_prepare_windows_us();
+
         println!(
-            "profile end samples={} duration={:.1}s measured_duration={:.1}s ready_status={} ready_t={:.2} measured_frames={} frames_ge_16ms={} frames_ge_25ms={} frames_ge_33ms={} min_fps={:.1} min_raw_fps={:.1} avg_raw_fps={:.1} worst_frame_ms={:.2} worst_frame_fps={:.1} worst_frame_t={:.2} worst_frame_wall_us={} worst_frame_main_us={} worst_frame_tail_us={} worst_render_schedule_us={} worst_render_camera_driver_us={} worst_render_gpu_camera_driver_us={} worst_render_graph_tail_us={} worst_render_core3d_us={}{} measured_surface_upload_mb={:.2} measured_packed_upload_mb={:.2} measured_surface_bandwidth_mb_s={:.2} measured_packed_bandwidth_mb_s={:.2}",
+            "profile end samples={} duration={:.1}s measured_duration={:.1}s ready_status={} ready_t={:.2} measured_frames={} frames_ge_16ms={} frames_ge_25ms={} frames_ge_33ms={} min_fps={:.1} min_raw_fps={:.1} avg_raw_fps={:.1} worst_frame_ms={:.2} worst_frame_fps={:.1} worst_frame_t={:.2} worst_frame_wall_us={} worst_frame_main_us={} worst_frame_tail_us={} worst_render_schedule_us={} worst_render_camera_driver_us={} worst_render_gpu_camera_driver_us={} worst_render_graph_tail_us={} worst_render_core3d_us={}{} max_render_prepare_windows_us={} measured_surface_upload_mb={:.2} measured_packed_upload_mb={:.2} measured_surface_bandwidth_mb_s={:.2} measured_packed_bandwidth_mb_s={:.2}",
             profiling.sample_count,
             profiling.elapsed_seconds,
             profiling.measurement_elapsed_seconds(),
@@ -1888,16 +1917,34 @@ fn log_profile_metrics(
             render_graph_tail_us(profiling.worst_phase_stats),
             profiling.worst_phase_stats.render_core3d_us,
             render_phase_detail_fields("worst_", profiling.worst_phase_stats),
+            max_render_prepare_windows_us,
             measured_surface_upload_mb,
             measured_packed_upload_mb,
             measured_surface_bandwidth_mb_s,
             measured_packed_bandwidth_mb_s
         );
+        reset_max_render_prepare_windows_us();
         if let Some(stats) = profiling.worst_packed_stats {
             println!(
-                "profile worst_packed visible_quads={} uploaded_quads={} pending_builds={} pending_region_rebuilds={} prepare_us={} view_prepare_us={} stream_us={} stream_spawned_builds={} stream_rebuild_regions={} build_task_us={} built_this_frame={} compaction_us={} compacted_regions={} uploaded_this_frame={} arena_compactions={} render_node_us={} packed_render_gpu_pass_us={} gpu_cull_node_us={} cpu_visible_commands={} material_entities={} material_sync_us={}",
+                "profile worst_packed draw_mode={} generated_regions_loaded={} generated_regions_active={} generated_regions_visible={} generated_update_us={} generated_update_skipped={} generated_cache_hits={} generated_cache_misses={} generated_cache_invalidated={} generated_cache_evicted={} generated_cache_prefetched={} generated_prepare_skipped={} generated_cull_metadata_uploaded={} generated_cull_config_uploaded={} generated_cull_dispatch_skipped={} visible_quads={} uploaded_quads={} indirect_draw_commands={} pending_builds={} pending_region_rebuilds={} prepare_us={} view_prepare_us={} stream_us={} stream_spawned_builds={} stream_rebuild_regions={} build_task_us={} built_this_frame={} compaction_us={} compacted_regions={} uploaded_this_frame={} arena_compactions={} render_node_us={} packed_render_draw_calls={} packed_render_items_considered={} packed_render_gpu_pass_us={} gpu_cull_enabled={} gpu_cull_input_commands={} gpu_cull_est_visible_commands={} gpu_cull_est_visible_quads={} gpu_cull_node_us={} gpu_cull_count_supported={} gpu_cull_compact_enabled={} cpu_visible_compact_enabled={} cpu_visible_commands={} material_entities={} material_sync_us={}",
+                packed_draw_mode_label(stats.draw_mode),
+                stats.generated_regions_loaded,
+                stats.generated_regions_active,
+                stats.generated_regions_visible,
+                stats.generated_update_us,
+                stats.generated_update_skipped,
+                stats.generated_cache_hits,
+                stats.generated_cache_misses,
+                stats.generated_cache_invalidated,
+                stats.generated_cache_evicted,
+                stats.generated_cache_prefetched,
+                stats.generated_prepare_skipped,
+                stats.generated_cull_metadata_uploaded,
+                stats.generated_cull_config_uploaded,
+                stats.generated_cull_dispatch_skipped,
                 stats.visible_quads,
                 stats.uploaded_quads,
+                stats.indirect_draw_commands,
                 stats.pending_builds,
                 stats.pending_region_rebuilds,
                 stats.prepare_system_us,
@@ -1912,8 +1959,17 @@ fn log_profile_metrics(
                 stats.uploaded_this_frame,
                 stats.arena_compactions,
                 stats.render_node_us,
+                stats.render_draw_calls,
+                stats.render_items_considered,
                 stats.render_gpu_pass_us,
+                stats.gpu_cull_enabled,
+                stats.gpu_cull_input_commands,
+                stats.gpu_cull_est_visible_commands,
+                stats.gpu_cull_est_visible_quads,
                 stats.gpu_cull_node_us,
+                stats.gpu_cull_count_supported,
+                stats.gpu_cull_compact_enabled,
+                stats.cpu_visible_compact_enabled,
                 stats.cpu_visible_commands,
                 stats.material_entities,
                 stats.material_sync_us
@@ -1922,6 +1978,16 @@ fn log_profile_metrics(
         app_exit.write(AppExit::Success);
         let _ = std::io::stdout().flush();
         std::process::exit(0);
+    }
+}
+
+fn packed_draw_mode_label(draw_mode: usize) -> &'static str {
+    match draw_mode {
+        rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_GPU_GENERATED => "gpu-generated",
+        rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_MATERIAL => "material",
+        rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_MULTI_INDIRECT => "multi-indirect",
+        rumpel_render::packed_quad_pipeline::PACKED_DRAW_MODE_INDIRECT => "indirect",
+        _ => "direct",
     }
 }
 
@@ -2159,8 +2225,6 @@ fn non_empty_env(name: &str) -> Option<String> {
 fn render_target_label() -> &'static str {
     if env_flag(HEADLESS_RENDER_ENV) {
         "headless"
-    } else if rumpel_render::split_display::split_display_enabled_from_env() {
-        "split_display"
     } else {
         "window"
     }

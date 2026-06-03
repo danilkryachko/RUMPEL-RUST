@@ -53,6 +53,12 @@ dev-surface-gui:
 dev-packed-gui:
     RUMPEL_RENDER_MODE=packed RUMPEL_CAMERA_LOCK=1 ./scripts/run_client_macos_gui.sh packed
 
+dev-packed-gpu-generated:
+    RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_GPU_GENERATION=1 RUMPEL_PACKED_GPU_CULL=1 RUMPEL_CAMERA_LOCK=0 ./scripts/run_client_macos_gui.sh packed
+
+dev-packed-gpu-generated-gui:
+    RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_GPU_GENERATION=1 RUMPEL_PACKED_GPU_CULL=1 RUMPEL_CAMERA_LOCK=1 ./scripts/run_client_macos_gui.sh packed
+
 dev-packed-material-gui:
     RUMPEL_RENDER_MODE=packed_material RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_CAMERA_LOCK=1 RUMPEL_CAMERA_CLEARANCE=56 RUMPEL_CAMERA_PITCH_RADIANS=-0.36 RUMPEL_CAMERA_YAW_RADIANS=0 ./scripts/run_client_macos_gui.sh packed_material
 
@@ -106,10 +112,22 @@ profile-packed-frame-gpu-timestamps:
     RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_RENDER_GPU_FRAME_TIMESTAMPS=1 RUMPEL_PROFILE_SECONDS=12 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=1 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh packed
 
 profile-packed-split-display:
-    RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=packed RUMPEL_SPLIT_DISPLAY=1 RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PROFILE_SECONDS=10 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=1 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh packed
+    @echo "split/custom present experiments removed; use profile-packed (window baseline)"
 
 compare-split-display:
-    ./scripts/compare_split_display_profile.sh
+    @echo "split/custom present experiments removed; use profile-packed (window baseline)"
+
+profile-packed-custom-present:
+    @echo "split/custom present experiments removed; use profile-packed (window baseline)"
+
+compare-present-methods:
+    @echo "split/custom present experiments removed; use profile-packed (window baseline)"
+
+compare-present-methods-median:
+    @echo "split/custom present experiments removed; use profile-packed (window baseline)"
+
+compare-present-methods-legacy:
+    @echo "split/custom present experiments removed; use profile-packed (window baseline)"
 
 profile-packed-headless:
     ./scripts/profile_packed_headless.sh
@@ -131,6 +149,9 @@ profile-packed-gpu-cull:
 
 profile-packed-gpu-cull-stationary:
     RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PACKED_GPU_CULL=1 RUMPEL_PROFILE_SECONDS=10 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=0 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=1 RUMPEL_CAMERA_CLEARANCE=56 RUMPEL_CAMERA_PITCH_RADIANS=-0.36 RUMPEL_CAMERA_YAW_RADIANS=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh packed
+
+profile-packed-gpu-generated:
+    RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_PACKED_GPU_GENERATION=1 RUMPEL_PACKED_GPU_CULL=1 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PROFILE_SECONDS=12 RUMPEL_PROFILE_WARMUP_SECONDS=6 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=1 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh packed
 
 profile-packed-face-cull:
     RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PACKED_FACE_RANGE_CULL=1 RUMPEL_PACKED_FACE_RANGE_MIN_QUADS=4096 RUMPEL_PROFILE_SECONDS=10 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=1 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh packed
