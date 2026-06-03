@@ -75,10 +75,33 @@ Settings: `profile_seconds=5`, `warmup_seconds=2`, `capture_delay=8`, `view_radi
 
 ## Known caveats
 
-1. **797 `draw_indirect`/frame on Metal** — required for correct per-chunk `draw_params`; no `multi_draw_indirect` until Metal instance_index parity is proven.
-2. **Tail spikes** — moving-camera autopilot still hits 40–175 ms frames from region rebuild / `manage_views` / `prepare_windows`; not parity with CPU streaming FPS.
+1. **~189 `draw_indirect`/frame on Metal** — down from 797 via CPU-matched visible index loop; still per-chunk (not single MDI) because macOS Metal lacks `MULTI_DRAW_INDIRECT_COUNT` and `multi_draw_indirect` breaks `first_instance`.
+2. **Tail spikes** — region-window shifts still hit ~50–55 ms GUI worst frames (`generated_update_us` ~54 ms on worst_packed); chunk-mask-only moves now skip full rebuild.
 3. **Headless vs GUI region window** — headless compare fixes `region_radius=1` (9 active regions); GUI autopilot loads wider window (62–81 regions).
 4. **Metrics timing** — worst_packed snapshot is taken after main-world update, before render; reconciliation + bridge carry-forward keep acceptance fields positive (fixed false `generated_regions_visible=0` failure).
+
+## Perf pass (20260603 post-acceptance, commit `78d0b29`)
+
+| Change | File(s) | Effect |
+|--------|---------|--------|
+| Visible-only generated draw loop | `packed_quad_renderer.rs` | Metal draws only frustum-visible chunk commands (~189 vs 797); preserves per-chunk `first_instance` |
+| `multi_draw_indirect_count` when compact | `packed_quad_renderer.rs` | Single indirect call on backends with `MULTI_DRAW_INDIRECT_COUNT` (not macOS Metal) |
+| Chunk-active-only fast path | `packed_quad_pipeline.rs`, `packed_quad_gpu_generation.rs` | `matches_region_window_layout` skips full region rebuild when only circular chunk masks change |
+
+### Before / after (same recipes)
+
+| Profile | Metric | Before | After |
+|---------|--------|--------|-------|
+| GUI `just profile-packed-gpu-generated` | `avg_raw_fps` | 77.3 | **134.1** |
+| GUI | `worst_frame_ms` | 57.24 | **55.08** |
+| GUI | `ge25` | 26/465 | **22/807** |
+| GUI | `packed_render_draw_calls` | 797 | **189** |
+| GUI | `gpu_cull in/visible` | 797/186 | **797/189** |
+| Headless compare generated | `avg_raw_fps` | 374.7 | **896.8** |
+| Headless generated | `worst_frame_ms` | 175.17 | **49.81** |
+| Headless generated | `ge25` | 9 | **4** |
+
+Logs: GUI `.ai_tasks/rumpel_client_packed_20260603_211341.stdout.log`, headless `.ai_tasks/generated_headless_compare_20260603_211402/`.
 
 ## References
 
