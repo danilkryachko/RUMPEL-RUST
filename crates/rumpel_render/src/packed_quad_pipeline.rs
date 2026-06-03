@@ -3469,6 +3469,7 @@ pub struct PackedQuadStreamingState {
     pub chunks_to_despawn: Vec<u64>,
     pub building_to_despawn: Vec<(u64, Entity)>,
     pub render_chunks: Vec<PendingChunk>,
+    pub region_rebuild_chunk_keys: Vec<u64>,
 }
 
 pub struct LoadedPackedQuadChunk {
@@ -4193,11 +4194,13 @@ fn rebuild_region_batch(
     state: &mut PackedQuadStreamingState,
     region_key: u64,
 ) {
-    let mut chunk_keys = state
-        .loaded
-        .iter()
-        .filter_map(|(&chunk_key, loaded)| (loaded.region_key == region_key).then_some(chunk_key))
-        .collect::<Vec<_>>();
+    let mut chunk_keys = std::mem::take(&mut state.region_rebuild_chunk_keys);
+    chunk_keys.clear();
+    chunk_keys.extend(
+        state.loaded.iter().filter_map(|(&chunk_key, loaded)| {
+            (loaded.region_key == region_key).then_some(chunk_key)
+        }),
+    );
     chunk_keys.sort_unstable();
 
     batches.batches.retain(|batch| batch.key != region_key);
@@ -4207,6 +4210,7 @@ fn rebuild_region_batch(
         state
             .pending_compaction_regions
             .retain(|pending_key| *pending_key != region_key);
+        state.region_rebuild_chunk_keys = chunk_keys;
         return;
     }
 
@@ -4217,7 +4221,7 @@ fn rebuild_region_batch(
     let mut region_quads =
         Vec::with_capacity(packed_cpu_region_prealloc_quads_from_env().max(total_quads));
     let mut chunk_ranges = Vec::with_capacity(chunk_keys.len());
-    for chunk_key in chunk_keys {
+    for &chunk_key in &chunk_keys {
         let start_quads = region_quads.len();
         let loaded_quads = &state.loaded[&chunk_key].quads;
         region_quads.extend_from_slice(loaded_quads);
@@ -4249,6 +4253,7 @@ fn rebuild_region_batch(
     if defer_compaction {
         mark_region_for_deferred_compaction(state, region_key);
     }
+    state.region_rebuild_chunk_keys = chunk_keys;
 }
 
 fn compact_deferred_packed_region_batch(
