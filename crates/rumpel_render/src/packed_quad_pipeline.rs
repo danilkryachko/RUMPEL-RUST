@@ -141,7 +141,6 @@ impl ExtractResource for PackedQuadBatches {
 pub struct PackedGpuGenerationRegionScratch {
     loaded_region_keys: Vec<u64>,
     active_regions: Vec<(i32, i32, u64)>,
-    target_keys: HashSet<u64>,
     generated_batches: Vec<PackedGpuGenerationBatch>,
 }
 
@@ -3049,6 +3048,18 @@ fn reuse_generated_region_cache_entry(
     Some(existing.to_batch())
 }
 
+fn retain_generated_region_cache_entries_for_loaded_keys(
+    region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
+    loaded_region_keys: &mut [u64],
+) -> usize {
+    loaded_region_keys.sort_unstable();
+    let cache_entries_before_retain = region_cache.entries.len();
+    region_cache
+        .entries
+        .retain(|k, _| loaded_region_keys.binary_search(k).is_ok());
+    cache_entries_before_retain.saturating_sub(region_cache.entries.len())
+}
+
 pub fn update_packed_gpu_generation_regions(
     registry: Res<BlockRegistry>,
     edit_store: Res<WorldEditStore>,
@@ -3161,15 +3172,6 @@ pub fn update_packed_gpu_generation_regions(
     let mut cache_hits = 0usize;
     let mut cache_misses = 0usize;
     let mut cache_invalidated = 0usize;
-    scratch.target_keys.clear();
-    if scratch.target_keys.capacity() < loaded_regions {
-        scratch
-            .target_keys
-            .reserve(loaded_regions - scratch.target_keys.capacity());
-    }
-    for region_key in &scratch.loaded_region_keys {
-        scratch.target_keys.insert(*region_key);
-    }
     let source_chunk_count = {
         let side = region_size.max(0) as usize;
         side.saturating_mul(side)
@@ -3279,11 +3281,10 @@ pub fn update_packed_gpu_generation_regions(
     scratch.generated_batches.sort_by_key(|batch| batch.key);
     let generated_batch_count = scratch.generated_batches.len();
 
-    let cache_entries_before_retain = region_cache.entries.len();
-    region_cache
-        .entries
-        .retain(|k, _| scratch.target_keys.contains(k));
-    let cache_evicted = cache_entries_before_retain.saturating_sub(region_cache.entries.len());
+    let cache_evicted = retain_generated_region_cache_entries_for_loaded_keys(
+        &mut region_cache,
+        scratch.loaded_region_keys.as_mut_slice(),
+    );
 
     cpu_batches.batches.clear();
     record_packed_gpu_generation_region_mask(loaded_regions, generated_batch_count);
@@ -4528,6 +4529,49 @@ mod tests {
             .expect("stale entry remains available for rebuild logging");
         assert_eq!(stale_entry.contract, contract);
         assert_eq!(stale_entry.generation, contract.generation());
+    }
+
+    #[test]
+    fn test_generated_region_cache_retain_uses_unsorted_loaded_keys() {
+        let contract = PackedGpuGenerationCacheContract::new(4, 2, [0, 1, 2, 3], 4, 10, 20);
+        let loaded_a = pack_chunk_key(-4, 0);
+        let loaded_b = pack_chunk_key(8, 4);
+        let evicted = pack_chunk_key(32, 32);
+        let mut cache = crate::packed_quad_gpu_generation::GeneratedRegionCache::default();
+
+        for key in [evicted, loaded_b, loaded_a] {
+            cache.entries.insert(
+                key,
+                crate::packed_quad_gpu_generation::GeneratedRegionCacheEntry {
+                    key,
+                    columns: Arc::new(Vec::new()),
+                    params: PackedGpuGenerationParams::new(0, 0, 0, 0, 1, 2, 3),
+                    source_chunk_count: 0,
+                    max_output_quads: 0,
+                    translation: Vec4::ZERO,
+                    bounds_min: Vec3::ZERO,
+                    bounds_max: Vec3::ZERO,
+                    generation: contract.generation(),
+                    contract,
+                    edit_store_generation: 0,
+                    last_seen_frame: 1,
+                },
+            );
+        }
+
+        let mut loaded_region_keys = vec![loaded_b, loaded_a];
+        let mut expected_loaded_region_keys = loaded_region_keys.clone();
+        expected_loaded_region_keys.sort_unstable();
+        let evicted_count = retain_generated_region_cache_entries_for_loaded_keys(
+            &mut cache,
+            loaded_region_keys.as_mut_slice(),
+        );
+
+        assert_eq!(evicted_count, 1);
+        assert!(cache.entries.contains_key(&loaded_a));
+        assert!(cache.entries.contains_key(&loaded_b));
+        assert!(!cache.entries.contains_key(&evicted));
+        assert_eq!(loaded_region_keys, expected_loaded_region_keys);
     }
 
     #[test]
