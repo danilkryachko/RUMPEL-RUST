@@ -1,10 +1,14 @@
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResource;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::voxel_packed_quads::{PackedVoxelFace, PackedVoxelQuad};
 
 pub const PACKED_GPU_GENERATION_ENV: &str = "RUMPEL_PACKED_GPU_GENERATION";
+pub const PACKED_GPU_GENERATION_PREFETCH_ENV: &str =
+    "RUMPEL_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME";
+const DEFAULT_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME: usize = 2;
 pub const PACKED_GPU_GENERATION_WORKGROUP_SIZE: usize = 64;
 pub const PACKED_GPU_GENERATION_MAX_SIDE_SEGMENTS_PER_FACE: usize = 3;
 pub const PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN: usize =
@@ -33,18 +37,32 @@ impl PackedGpuGenerationBatches {
     ) -> PackedGpuGenerationBatchSummary {
         let mut summary = PackedGpuGenerationBatchSummary::default();
         for batch in batches {
-            let column_count = batch.columns.len();
-            if column_count == 0 || batch.max_output_quads == 0 {
+            let region_column_count = batch.columns.len();
+            if region_column_count == 0
+                || batch.max_output_quads == 0
+                || batch.chunk_ranges.is_empty()
+            {
                 summary.invalid_batch_count = summary.invalid_batch_count.saturating_add(1);
             }
-            summary.total_column_count = summary.total_column_count.saturating_add(column_count);
-            summary.total_max_output_quads = summary
-                .total_max_output_quads
-                .saturating_add(batch.max_output_quads.max(1));
-            summary.max_column_count = summary.max_column_count.max(column_count);
             summary.source_chunk_count = summary
                 .source_chunk_count
                 .saturating_add(batch.source_chunk_count);
+
+            for range in batch.chunk_ranges.iter() {
+                if !range.active || range.column_len == 0 {
+                    continue;
+                }
+                summary.active_chunk_job_count = summary.active_chunk_job_count.saturating_add(1);
+                summary.total_column_count =
+                    summary.total_column_count.saturating_add(range.column_len);
+                let chunk_max_output_quads = range
+                    .column_len
+                    .saturating_mul(PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN);
+                summary.total_max_output_quads = summary
+                    .total_max_output_quads
+                    .saturating_add(chunk_max_output_quads.max(1));
+                summary.max_column_count = summary.max_column_count.max(range.column_len);
+            }
         }
         summary
     }
@@ -75,8 +93,23 @@ impl PackedGpuGenerationBatches {
             for value in batch.bounds_max.to_array() {
                 hash = fnv64(hash, u64::from(value.to_bits()));
             }
+            for range in batch.chunk_ranges.iter() {
+                hash = fnv64(hash, range.chunk_key);
+                hash = fnv64(hash, range.column_start as u64);
+                hash = fnv64(hash, range.column_len as u64);
+                hash = fnv64(hash, u64::from(range.active));
+            }
         }
         hash.max(1)
+    }
+
+    #[must_use]
+    pub fn active_chunk_job_count(batches: &[PackedGpuGenerationBatch]) -> usize {
+        batches
+            .iter()
+            .flat_map(|batch| batch.chunk_ranges.iter())
+            .filter(|range| range.active && range.column_len > 0)
+            .count()
     }
 }
 
@@ -87,19 +120,29 @@ pub struct PackedGpuGenerationBatchSummary {
     pub total_max_output_quads: usize,
     pub max_column_count: usize,
     pub source_chunk_count: usize,
+    pub active_chunk_job_count: usize,
 }
 
 impl PackedGpuGenerationBatchSummary {
     #[must_use]
     pub fn is_renderable(self, batch_count: usize) -> bool {
-        batch_count > 0 && self.invalid_batch_count == 0
+        batch_count > 0 && self.invalid_batch_count == 0 && self.active_chunk_job_count > 0
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedGpuChunkRange {
+    pub chunk_key: u64,
+    pub column_start: usize,
+    pub column_len: usize,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct PackedGpuGenerationBatch {
     pub key: u64,
     pub columns: Arc<Vec<PackedGpuSurfaceColumn>>,
+    pub chunk_ranges: Arc<Vec<PackedGpuChunkRange>>,
     pub params: PackedGpuGenerationParams,
     pub source_chunk_count: usize,
     pub max_output_quads: usize,
@@ -122,6 +165,8 @@ pub struct PackedGpuGenerationTarget {
     pub edit_store_generation: u64,
     pub active_region_count: usize,
     pub active_region_hash: u64,
+    pub active_chunk_count: usize,
+    pub active_chunk_hash: u64,
 }
 
 impl PackedGpuGenerationTarget {
@@ -139,6 +184,8 @@ impl PackedGpuGenerationTarget {
         edit_store_generation: u64,
         active_region_count: usize,
         active_region_hash: u64,
+        active_chunk_count: usize,
+        active_chunk_hash: u64,
     ) -> Self {
         Self {
             camera_chunk_x,
@@ -152,6 +199,8 @@ impl PackedGpuGenerationTarget {
             edit_store_generation,
             active_region_count,
             active_region_hash,
+            active_chunk_count,
+            active_chunk_hash,
         }
     }
 
@@ -180,7 +229,21 @@ impl PackedGpuGenerationTarget {
     }
 
     #[must_use]
-    pub fn matches_active_region_window(self, other: Self) -> bool {
+    pub fn active_chunk_signature<I>(active_chunk_keys: I) -> (usize, u64)
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut count = 0usize;
+        let mut hash = FNV64_OFFSET;
+        for key in active_chunk_keys {
+            count = count.saturating_add(1);
+            hash = fnv64(hash, key);
+        }
+        (count, hash)
+    }
+
+    #[must_use]
+    pub fn matches_region_window_layout(self, other: Self) -> bool {
         self.center_origin_x == other.center_origin_x
             && self.center_origin_z == other.center_origin_z
             && self.region_size == other.region_size
@@ -190,6 +253,23 @@ impl PackedGpuGenerationTarget {
             && self.edit_store_generation == other.edit_store_generation
             && self.active_region_count == other.active_region_count
             && self.active_region_hash == other.active_region_hash
+    }
+
+    /// Same loaded-window dimensions and source contract, but center/active set may differ.
+    #[must_use]
+    pub fn matches_sliding_window_contract(self, other: Self) -> bool {
+        self.region_size == other.region_size
+            && self.region_radius == other.region_radius
+            && self.view_radius == other.view_radius
+            && self.contract_generation == other.contract_generation
+            && self.edit_store_generation == other.edit_store_generation
+    }
+
+    #[must_use]
+    pub fn matches_active_region_window(self, other: Self) -> bool {
+        self.matches_region_window_layout(other)
+            && self.active_chunk_count == other.active_chunk_count
+            && self.active_chunk_hash == other.active_chunk_hash
     }
 }
 
@@ -246,6 +326,7 @@ impl PackedGpuGenerationCacheContract {
 pub struct GeneratedRegionCacheEntry {
     pub key: u64,
     pub columns: Arc<Vec<PackedGpuSurfaceColumn>>,
+    pub chunk_ranges: Arc<Vec<PackedGpuChunkRange>>,
     pub params: PackedGpuGenerationParams,
     pub source_chunk_count: usize,
     pub max_output_quads: usize,
@@ -264,6 +345,7 @@ impl GeneratedRegionCacheEntry {
         PackedGpuGenerationBatch {
             key: self.key,
             columns: Arc::clone(&self.columns),
+            chunk_ranges: Arc::clone(&self.chunk_ranges),
             params: self.params,
             source_chunk_count: self.source_chunk_count,
             max_output_quads: self.max_output_quads,
@@ -287,6 +369,60 @@ impl GeneratedRegionCache {
         self.frame = self.frame.saturating_add(1).max(1);
         self.frame
     }
+}
+
+/// Chunk keys inside the circular view radius (same coverage as CPU streaming).
+#[must_use]
+pub fn active_gpu_generation_chunk_keys(view_center: IVec2, view_radius: i32) -> HashSet<u64> {
+    let radius = view_radius.max(0);
+    let radius_sq = radius * radius;
+    let mut keys = HashSet::new();
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx * dx + dz * dz > radius_sq {
+                continue;
+            }
+            keys.insert(gpu_pack_chunk_key(view_center.x + dx, view_center.y + dz));
+        }
+    }
+    keys
+}
+
+/// Returns true when at least one chunk in the region grid is in `active_chunk_keys`.
+#[must_use]
+pub fn region_has_active_chunks_in_set(
+    region_origin_x: i32,
+    region_origin_z: i32,
+    region_size: i32,
+    active_chunk_keys: &HashSet<u64>,
+) -> bool {
+    let region_size = region_size.max(1);
+    for chunk_z in region_origin_z..region_origin_z + region_size {
+        for chunk_x in region_origin_x..region_origin_x + region_size {
+            if active_chunk_keys.contains(&gpu_pack_chunk_key(chunk_x, chunk_z)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Sync cached per-chunk active flags without rebuilding region columns.
+pub fn sync_gpu_chunk_range_active_flags(
+    batch: &mut PackedGpuGenerationBatch,
+    active_chunk_keys: &HashSet<u64>,
+) {
+    let ranges = Arc::make_mut(&mut batch.chunk_ranges);
+    for range in ranges.iter_mut() {
+        range.active = active_chunk_keys.contains(&range.chunk_key);
+    }
+}
+
+#[inline]
+fn gpu_pack_chunk_key(x: i32, z: i32) -> u64 {
+    let ux = x as u32 as u64;
+    let uz = z as u32 as u64;
+    (ux << 32) | uz
 }
 
 /// Returns true when at least one chunk inside the packed region intersects the circular view radius.
@@ -524,6 +660,31 @@ pub fn packed_gpu_generation_enabled_from_env() -> bool {
 }
 
 #[must_use]
+pub fn packed_gpu_generation_prefetch_budget_from_env() -> usize {
+    std::env::var(PACKED_GPU_GENERATION_PREFETCH_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME)
+}
+
+/// Sort loaded region origins nearest-first for moving-camera cache warmup.
+pub fn order_loaded_regions_for_prefetch(
+    regions: &mut [(i32, i32, u64)],
+    camera_chunk_x: i32,
+    camera_chunk_z: i32,
+    region_size: i32,
+) {
+    let center_offset = region_size.max(1) / 2;
+    regions.sort_by_key(|(origin_x, origin_z, _)| {
+        let center_x = origin_x.saturating_add(center_offset);
+        let center_z = origin_z.saturating_add(center_offset);
+        let dx = center_x - camera_chunk_x;
+        let dz = center_z - camera_chunk_z;
+        dx * dx + dz * dz
+    });
+}
+
+#[must_use]
 pub fn normalize_surface_cell_size(requested_cell_size: usize) -> usize {
     requested_cell_size.clamp(1, rumpel_world::chunk::CHUNK_SIZE)
 }
@@ -647,7 +808,7 @@ mod tests {
 
     #[test]
     fn packed_gpu_generation_batch_summary_tracks_renderable_totals() {
-        let make_batch = |key, column_count, max_output_quads, source_chunk_count| {
+        let make_batch = |key, column_count, max_output_quads, source_chunk_count, active| {
             let columns = (0..column_count)
                 .map(|column| {
                     PackedGpuSurfaceColumn::from_parts([column, column, 1, 1], [4, 4, 4, 4, 4], 2)
@@ -656,6 +817,12 @@ mod tests {
             PackedGpuGenerationBatch {
                 key,
                 columns: Arc::new(columns),
+                chunk_ranges: Arc::new(vec![PackedGpuChunkRange {
+                    chunk_key: key,
+                    column_start: 0,
+                    column_len: column_count,
+                    active,
+                }]),
                 params: PackedGpuGenerationParams::new(
                     column_count,
                     max_output_quads,
@@ -674,15 +841,21 @@ mod tests {
             }
         };
 
-        let batches = [make_batch(1, 3, 21, 2), make_batch(2, 0, 0, 4)];
+        let batches = [make_batch(1, 3, 21, 2, true), make_batch(2, 0, 0, 4, false)];
         let summary = PackedGpuGenerationBatches::summarize_batches(&batches);
 
         assert_eq!(summary.invalid_batch_count, 1);
         assert_eq!(summary.total_column_count, 3);
-        assert_eq!(summary.total_max_output_quads, 22);
+        assert_eq!(
+            summary.total_max_output_quads,
+            3 * PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN
+        );
         assert_eq!(summary.max_column_count, 3);
         assert_eq!(summary.source_chunk_count, 6);
+        assert_eq!(summary.active_chunk_job_count, 1);
         assert!(!summary.is_renderable(batches.len()));
+        let active_only = [make_batch(1, 3, 21, 2, true)];
+        assert!(PackedGpuGenerationBatches::summarize_batches(&active_only).is_renderable(1));
         assert!(!PackedGpuGenerationBatchSummary::default().is_renderable(0));
     }
 
@@ -773,8 +946,12 @@ mod tests {
     fn packed_gpu_generation_target_tracks_stable_window_signature() {
         let (active_region_count, active_region_hash) =
             PackedGpuGenerationTarget::active_region_signature([1, 2, 3]);
+        let (active_chunk_count, active_chunk_hash) =
+            PackedGpuGenerationTarget::active_chunk_signature([10, 11, 12]);
         let (_, changed_active_region_hash) =
             PackedGpuGenerationTarget::active_region_signature([1, 2, 4]);
+        let (_, changed_active_chunk_hash) =
+            PackedGpuGenerationTarget::active_chunk_signature([10, 11, 13]);
         let base = PackedGpuGenerationTarget::new(
             1,
             2,
@@ -787,6 +964,8 @@ mod tests {
             20,
             active_region_count,
             active_region_hash,
+            active_chunk_count,
+            active_chunk_hash,
         );
         let same = PackedGpuGenerationTarget::new(
             1,
@@ -800,6 +979,8 @@ mod tests {
             20,
             active_region_count,
             active_region_hash,
+            active_chunk_count,
+            active_chunk_hash,
         );
         let moved = PackedGpuGenerationTarget::new(
             2,
@@ -813,6 +994,8 @@ mod tests {
             20,
             active_region_count,
             active_region_hash,
+            active_chunk_count,
+            active_chunk_hash,
         );
         let edited = PackedGpuGenerationTarget::new(
             1,
@@ -826,8 +1009,10 @@ mod tests {
             21,
             active_region_count,
             active_region_hash,
+            active_chunk_count,
+            active_chunk_hash,
         );
-        let changed_active = PackedGpuGenerationTarget::new(
+        let changed_active_region = PackedGpuGenerationTarget::new(
             1,
             2,
             0,
@@ -839,14 +1024,37 @@ mod tests {
             20,
             active_region_count,
             changed_active_region_hash,
+            active_chunk_count,
+            active_chunk_hash,
+        );
+        let changed_active_chunk = PackedGpuGenerationTarget::new(
+            1,
+            2,
+            0,
+            0,
+            4,
+            1,
+            16,
+            10,
+            20,
+            active_region_count,
+            active_region_hash,
+            active_chunk_count,
+            changed_active_chunk_hash,
         );
 
         assert_eq!(base, same);
         assert_ne!(base, moved);
         assert_ne!(base, edited);
+        assert!(base.matches_region_window_layout(moved));
         assert!(base.matches_active_region_window(moved));
         assert!(!base.matches_active_region_window(edited));
-        assert!(!base.matches_active_region_window(changed_active));
+        assert!(!base.matches_active_region_window(changed_active_region));
+        assert!(!base.matches_active_region_window(changed_active_chunk));
+        assert!(base.matches_region_window_layout(changed_active_chunk));
+        assert!(base.matches_sliding_window_contract(moved));
+        assert!(base.matches_sliding_window_contract(changed_active_region));
+        assert!(!base.matches_sliding_window_contract(edited));
         assert_eq!(base.loaded_regions(), 9);
         assert_eq!(
             PackedGpuGenerationTarget::new(
@@ -860,11 +1068,101 @@ mod tests {
                 10,
                 20,
                 active_region_count,
-                active_region_hash
+                active_region_hash,
+                active_chunk_count,
+                active_chunk_hash
             )
             .loaded_regions(),
             1
         );
+    }
+
+    #[test]
+    fn active_gpu_generation_chunk_keys_match_circular_view_radius() {
+        let keys = active_gpu_generation_chunk_keys(IVec2::new(0, 0), 1);
+        assert_eq!(keys.len(), 5);
+        assert!(keys.contains(&gpu_pack_chunk_key(0, 0)));
+        assert!(keys.contains(&gpu_pack_chunk_key(1, 0)));
+        assert!(!keys.contains(&gpu_pack_chunk_key(2, 0)));
+    }
+
+    #[test]
+    fn region_has_active_chunks_in_set_detects_partial_region_overlap() {
+        let mut keys = HashSet::new();
+        keys.insert(gpu_pack_chunk_key(7, 0));
+        assert!(region_has_active_chunks_in_set(4, 0, 4, &keys));
+        assert!(!region_has_active_chunks_in_set(12, 0, 4, &keys));
+    }
+
+    #[test]
+    fn sync_gpu_chunk_range_active_flags_updates_without_column_rebuild() {
+        let mut batch = PackedGpuGenerationBatch {
+            key: 1,
+            columns: Arc::new(Vec::new()),
+            chunk_ranges: Arc::new(vec![
+                PackedGpuChunkRange {
+                    chunk_key: 10,
+                    column_start: 0,
+                    column_len: 4,
+                    active: false,
+                },
+                PackedGpuChunkRange {
+                    chunk_key: 11,
+                    column_start: 4,
+                    column_len: 4,
+                    active: false,
+                },
+            ]),
+            params: PackedGpuGenerationParams::new(8, 8, 0, 0, 1, 2, 3),
+            source_chunk_count: 2,
+            max_output_quads: 8,
+            translation: Vec4::ZERO,
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::ONE,
+            generation: 1,
+        };
+        let mut active_keys = HashSet::new();
+        active_keys.insert(11);
+        sync_gpu_chunk_range_active_flags(&mut batch, &active_keys);
+        assert!(!batch.chunk_ranges[0].active);
+        assert!(batch.chunk_ranges[1].active);
+
+        let signature_before =
+            PackedGpuGenerationBatches::calculate_batch_signature(std::slice::from_ref(&batch));
+        active_keys.insert(10);
+        sync_gpu_chunk_range_active_flags(&mut batch, &active_keys);
+        let signature_after =
+            PackedGpuGenerationBatches::calculate_batch_signature(std::slice::from_ref(&batch));
+        assert_ne!(signature_before, signature_after);
+    }
+
+    #[test]
+    fn packed_gpu_generation_batch_signature_tracks_chunk_active_masks() {
+        let make_batch = |active: bool| PackedGpuGenerationBatch {
+            key: 1,
+            columns: Arc::new(vec![PackedGpuSurfaceColumn::from_parts(
+                [0, 0, 1, 1],
+                [4, 4, 4, 4, 4],
+                2,
+            )]),
+            chunk_ranges: Arc::new(vec![PackedGpuChunkRange {
+                chunk_key: 42,
+                column_start: 0,
+                column_len: 1,
+                active,
+            }]),
+            params: PackedGpuGenerationParams::new(1, 7, 0, 0, 1, 2, 3),
+            source_chunk_count: 1,
+            max_output_quads: 7,
+            translation: Vec4::ZERO,
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::ONE,
+            generation: 1,
+        };
+        let active_sig = PackedGpuGenerationBatches::calculate_batch_signature(&[make_batch(true)]);
+        let inactive_sig =
+            PackedGpuGenerationBatches::calculate_batch_signature(&[make_batch(false)]);
+        assert_ne!(active_sig, inactive_sig);
     }
 
     #[test]
@@ -886,6 +1184,15 @@ mod tests {
         let center = IVec2::new(9, -3);
         assert!(region_has_active_chunks(8, -4, 4, center, 0));
         assert!(!region_has_active_chunks(12, -4, 4, center, 0));
+    }
+
+    #[test]
+    fn order_loaded_regions_for_prefetch_prefers_nearest_center() {
+        let mut regions = [(8, 0, 1_u64), (0, 0, 2_u64), (16, 0, 3_u64)];
+        order_loaded_regions_for_prefetch(&mut regions, 9, 0, 4);
+        assert_eq!(regions[0].2, 1);
+        assert_eq!(regions[1].2, 2);
+        assert_eq!(regions[2].2, 3);
     }
 
     #[test]
