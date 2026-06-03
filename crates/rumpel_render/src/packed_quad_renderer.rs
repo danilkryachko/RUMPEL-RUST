@@ -124,7 +124,7 @@ pub struct PreparedPackedGpuGeneratedDraw {
     dispatched: AtomicBool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct PreparedPackedGpuGeneratedRegion {
     pub key: u64,
     pub generation: u64,
@@ -1015,7 +1015,7 @@ fn prepare_packed_gpu_generated_draw(
     let mut column_offset = 0usize;
 
     for region_index in 0..buffers.planned_regions.len() {
-        let region = buffers.planned_regions[region_index].clone();
+        let region = buffers.planned_regions[region_index];
         let draw_index = region.draw_command_index;
         let batch = &ordered_batches[draw_index];
         let mut params = batch.params;
