@@ -802,6 +802,42 @@ fn packed_confirm_fnv64(hash: u64, value: u64) -> u64 {
     (hash ^ value).wrapping_mul(PACKED_CONFIRM_FNV64_PRIME)
 }
 
+const PACKED_GPU_CULL_SIGNATURE_OFFSET: u64 = 14_695_981_039_346_656_037;
+const PACKED_GPU_CULL_SIGNATURE_PRIME: u64 = 1_099_511_628_211;
+
+fn packed_gpu_cull_signature_step(signature: u64, value: u64) -> u64 {
+    (signature ^ value).wrapping_mul(PACKED_GPU_CULL_SIGNATURE_PRIME)
+}
+
+fn packed_gpu_cull_metadata_signature(metadata: &[PackedQuadIndirectCommandMetadata]) -> u64 {
+    let mut signature = PACKED_GPU_CULL_SIGNATURE_OFFSET;
+    signature = packed_gpu_cull_signature_step(signature, metadata.len() as u64);
+    for (index, command) in metadata.iter().enumerate() {
+        signature = packed_gpu_cull_signature_step(signature, index as u64);
+        signature = packed_gpu_cull_signature_step(signature, command.batch_key);
+        signature =
+            packed_gpu_cull_signature_step(signature, command.face.map_or(u64::MAX, u64::from));
+        signature = packed_gpu_cull_signature_step(signature, command.len_quads as u64);
+        for value in command.bounds_min.to_array() {
+            signature = packed_gpu_cull_signature_step(signature, u64::from(value.to_bits()));
+        }
+        for value in command.bounds_max.to_array() {
+            signature = packed_gpu_cull_signature_step(signature, u64::from(value.to_bits()));
+        }
+    }
+    signature.max(1)
+}
+
+fn packed_gpu_cull_config_signature(
+    config: crate::packed_quad_buffer::PackedQuadCullConfig,
+) -> u64 {
+    let mut signature = PACKED_GPU_CULL_SIGNATURE_OFFSET;
+    signature = packed_gpu_cull_signature_step(signature, u64::from(config.command_count));
+    signature = packed_gpu_cull_signature_step(signature, u64::from(config.face_range_cull));
+    signature = packed_gpu_cull_signature_step(signature, u64::from(config.compact_output));
+    signature.max(1)
+}
+
 /// Pure helper function to determine the next buffer capacity when growing is required.
 pub fn next_packed_quad_capacity(current_capacity: usize, requested_capacity: usize) -> usize {
     if current_capacity >= requested_capacity {
@@ -2276,10 +2312,11 @@ pub fn prepare_packed_quad_buffers(
             gpu_cull.capacity_commands
         };
 
-        if next_capacity != gpu_cull.capacity_commands
+        let cull_buffers_recreated = next_capacity != gpu_cull.capacity_commands
             || gpu_cull.metadata_buffer.is_none()
-            || gpu_cull.output_indirect_buffer.is_none()
-        {
+            || gpu_cull.output_indirect_buffer.is_none();
+
+        if cull_buffers_recreated {
             let metadata_size_bytes = next_capacity as u64
                 * std::mem::size_of::<crate::packed_quad_buffer::PackedQuadCullCommandMetadata>()
                     as u64;
@@ -2302,7 +2339,8 @@ pub fn prepare_packed_quad_buffers(
             gpu_cull.capacity_commands = next_capacity;
         }
 
-        if gpu_cull.config_buffer.is_none() {
+        let config_buffer_recreated = gpu_cull.config_buffer.is_none();
+        if config_buffer_recreated {
             gpu_cull.config_buffer = Some(render_device.create_buffer(&BufferDescriptor {
                 label: Some("packed_quad_gpu_cull_config_buffer"),
                 size: std::mem::size_of::<crate::packed_quad_buffer::PackedQuadCullConfig>() as u64,
@@ -2319,35 +2357,42 @@ pub fn prepare_packed_quad_buffers(
             }));
         }
 
-        gpu_cull.metadata_scratch.clear();
-        let metadata_capacity = gpu_cull.metadata_scratch.capacity();
-        if metadata_capacity < command_count {
-            gpu_cull
-                .metadata_scratch
-                .reserve(command_count - metadata_capacity);
-        }
-        gpu_cull.metadata_scratch.extend(
-            indirect_draw
-                .command_metadata
-                .iter()
-                .copied()
-                .map(packed_gpu_cull_metadata_from_command),
-        );
         let cull_config = crate::packed_quad_buffer::PackedQuadCullConfig {
             command_count: command_count.min(u32::MAX as usize) as u32,
             face_range_cull: u32::from(face_range_cull_enabled),
             compact_output: u32::from(gpu_cull_compact_enabled),
             _padding: 0,
         };
-
-        if let Some(metadata_buffer) = &gpu_cull.metadata_buffer {
-            render_queue.write_buffer(
-                metadata_buffer,
-                0,
-                bytemuck::cast_slice(&gpu_cull.metadata_scratch),
+        let command_metadata = &indirect_draw.command_metadata[..command_count];
+        let metadata_signature = packed_gpu_cull_metadata_signature(command_metadata);
+        let config_signature = packed_gpu_cull_config_signature(cull_config);
+        let metadata_upload_needed =
+            cull_buffers_recreated || gpu_cull.metadata_signature != metadata_signature;
+        if metadata_upload_needed {
+            gpu_cull.metadata_scratch.clear();
+            let metadata_capacity = gpu_cull.metadata_scratch.capacity();
+            if metadata_capacity < command_count {
+                gpu_cull
+                    .metadata_scratch
+                    .reserve(command_count - metadata_capacity);
+            }
+            gpu_cull.metadata_scratch.extend(
+                command_metadata
+                    .iter()
+                    .copied()
+                    .map(packed_gpu_cull_metadata_from_command),
             );
+            if let Some(metadata_buffer) = &gpu_cull.metadata_buffer {
+                render_queue.write_buffer(
+                    metadata_buffer,
+                    0,
+                    bytemuck::cast_slice(&gpu_cull.metadata_scratch),
+                );
+            }
         }
-        if let Some(config_buffer) = &gpu_cull.config_buffer {
+        let config_upload_needed =
+            config_buffer_recreated || gpu_cull.config_signature != config_signature;
+        if config_upload_needed && let Some(config_buffer) = &gpu_cull.config_buffer {
             render_queue.write_buffer(config_buffer, 0, bytemuck::bytes_of(&cull_config));
         }
 
@@ -2357,8 +2402,8 @@ pub fn prepare_packed_quad_buffers(
         gpu_cull.command_count = command_count;
         gpu_cull.bind_group = None;
         gpu_cull.source_signature = 0;
-        gpu_cull.metadata_signature = 0;
-        gpu_cull.config_signature = 0;
+        gpu_cull.metadata_signature = metadata_signature;
+        gpu_cull.config_signature = config_signature;
         gpu_cull.reset_dispatched();
     } else {
         gpu_cull.disable();
@@ -6475,6 +6520,49 @@ mod tests {
                     resident: true,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn test_packed_gpu_cull_metadata_signature_tracks_command_metadata() {
+        let base = PackedQuadIndirectCommandMetadata {
+            batch_key: 1,
+            face: None,
+            len_quads: 64,
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::ONE,
+        };
+        let base_signature = packed_gpu_cull_metadata_signature(&[base]);
+
+        let mut changed_face = base;
+        changed_face.face = Some(PackedVoxelFace::PlusY as u8);
+        assert_ne!(
+            base_signature,
+            packed_gpu_cull_metadata_signature(&[changed_face])
+        );
+
+        let mut changed_bounds = base;
+        changed_bounds.bounds_max = Vec3::splat(2.0);
+        assert_ne!(
+            base_signature,
+            packed_gpu_cull_metadata_signature(&[changed_bounds])
+        );
+    }
+
+    #[test]
+    fn test_packed_gpu_cull_config_signature_tracks_cull_config() {
+        let base = crate::packed_quad_buffer::PackedQuadCullConfig {
+            command_count: 8,
+            face_range_cull: 1,
+            compact_output: 0,
+            _padding: 0,
+        };
+        let mut changed = base;
+        changed.compact_output = 1;
+
+        assert_ne!(
+            packed_gpu_cull_config_signature(base),
+            packed_gpu_cull_config_signature(changed)
         );
     }
 
