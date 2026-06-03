@@ -1527,7 +1527,6 @@ pub fn prepare_packed_quad_buffers(
     // region grows, so unchanged regions keep their GPU data and bind group.
     let default_batch_capacity_quads =
         estimated_packed_region_capacity_quads(packed_region_size_from_env());
-    let previous_allocations = arena.allocations.clone();
     let (mut new_allocations, mut dirty_batch_keys, mut total_required_quads, mut next_free_quads) =
         plan_stable_arena_allocations(
             &arena.allocations,
@@ -1620,7 +1619,7 @@ pub fn prepare_packed_quad_buffers(
                 continue;
             }
 
-            let Some(previous_allocation) = previous_allocations.get(&batch.key) else {
+            let Some(previous_allocation) = arena.allocations.get(&batch.key) else {
                 continue;
             };
             if previous_allocation.generation == batch.generation
