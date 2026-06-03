@@ -1,0 +1,15 @@
+gpu_generated_pacing_dir=/Users/daniil/RUMPELRUST/.ai_tasks/gpu_generated_pacing_20260604_012227
+recipe=packed gpu-generated settle=2s warmup=6s measured=6s ready_gate=1
+present_modes=immediate auto-no-vsync fifo-relaxed
+frame_latencies=1
+
+present         latency    avg_raw_fps  ge25     worst_ms   prep_win_us  log
+immediate       1          132.8        2/798    25.79      7912         rumpel_client_packed_20260604_012227.stdout.log
+auto-no-vsync   1          136.8        2/823    26.31      4139         rumpel_client_packed_20260604_012246.stdout.log
+fifo-relaxed    1          59.5         7/359    35.60      12758        rumpel_client_packed_20260604_012304.stdout.log
+
+Winner for GUI avg_raw_fps: auto-no-vsync + frame_latency=1 (ADR-003 window baseline, no custom present).
+fifo-relaxed caps at display refresh (~60 FPS measured) — reject for gpu-generated profile.
+
+Final recipe proof after justfile change: rumpel_client_packed_20260604_012808.stdout.log
+  present_mode=auto-no-vsync frame_latency=1 avg_raw_fps=133.5 ge25=3/802 worst_frame_ms=26.76

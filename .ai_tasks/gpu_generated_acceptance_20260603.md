@@ -278,6 +278,26 @@ Headless compare after fix: `.ai_tasks/generated_headless_compare_20260604_01171
 
 Static proof: `just verify`, unit test `structure_stable_gpu_allocations_satisfied_requires_active_slots`.
 
+## Bevy window present pacing (20260604)
+
+**Диагноз:** узкое место GUI — хвост `render_manage_views_us` / `render_prepare_windows_us` (~23–27ms) на кадрах сдвига region window при уже пропущенном `generated_prepare` (`011654`). ADR-003: только window baseline, без Method A/C.
+
+**A/B present/latency** (`scripts/profile_gpu_generated_pacing.sh`, `.ai_tasks/gpu_generated_pacing_20260604_012227/`):
+
+| present | latency | avg_raw_fps | ge25 | worst_ms | prep_win_us (worst) |
+|---------|---------|-------------|------|----------|---------------------|
+| immediate | 1 | 132.8 | 2/798 | 25.79 | 7912 |
+| **auto-no-vsync** | **1** | **136.8** | **2/823** | 26.31 | 4139 |
+| fifo-relaxed | 1 | 59.5 | 7/359 | 35.60 | 12758 |
+
+**Победитель для рецепта:** `RUMPEL_PRESENT_MODE=auto-no-vsync` + `RUMPEL_FRAME_LATENCY=1` (явно в `just profile-packed-gpu-generated`). `fifo-relaxed` отклонён — vsync ~60 FPS в measured window.
+
+**Финальный прогон рецепта:** `.ai_tasks/rumpel_client_packed_20260604_012808.stdout.log` — `avg_raw_fps=133.5`, `ge25=3/802`, `present_mode=auto-no-vsync`, terrain `gpu-generated`, `packed_uploaded_quads=0`.
+
+**Headless после смены present (только GUI recipe):** `.ai_tasks/generated_headless_compare_20260604_012734/` — generated `ge25=0`, `avg_raw_fps=1060.4` (**PASS**, ≤4).
+
+**Статус vs цели:** `ge25` в норме (≤10/1000); `avg_raw_fps` ~134–137, цель ≥150 не достигнута — дальше только engine-side снижение GPU→swapchain backpressure (не custom present).
+
 ## References
 
 - Prior partial profile: `.ai_tasks/gpu_generated_profile_20260603_190618.md`
