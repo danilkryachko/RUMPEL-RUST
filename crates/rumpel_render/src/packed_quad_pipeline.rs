@@ -4339,6 +4339,7 @@ fn record_packed_cpu_reserved_metrics(batches: &PackedQuadBatches) {
 #[derive(Resource, Default)]
 pub struct PackedMaterialEntities {
     pub entities: HashMap<u64, (Entity, u64)>,
+    pub active_keys: HashSet<u64>,
 }
 
 pub fn sync_packed_material_entities(
@@ -4350,8 +4351,13 @@ pub fn sync_packed_material_entities(
     atlas: Res<PackedQuadBlockAtlas>,
 ) {
     let system_started_at = Instant::now();
-    let active_keys: std::collections::HashSet<u64> =
-        batches.batches.iter().map(|b| b.key).collect();
+    let mut active_keys = std::mem::take(&mut entity_map.active_keys);
+    active_keys.clear();
+    let active_key_capacity = active_keys.capacity();
+    if active_key_capacity < batches.batches.len() {
+        active_keys.reserve(batches.batches.len() - active_key_capacity);
+    }
+    active_keys.extend(batches.batches.iter().map(|batch| batch.key));
 
     entity_map.entities.retain(|key, (entity, _)| {
         if !active_keys.contains(key) {
@@ -4363,6 +4369,7 @@ pub fn sync_packed_material_entities(
             true
         }
     });
+    entity_map.active_keys = active_keys;
 
     for batch in &batches.batches {
         let current_gen = batch.generation;
