@@ -227,7 +227,8 @@ close_terminal_by_title() {
         RUMPEL_PROFILE_READY_STABLE_FRAMES \
         RUMPEL_PROFILE_READY_FRAME_MS \
         RUMPEL_PROFILE_READY_MAX_EXTRA_SECONDS \
-        RUMPEL_PROFILE_AUTOPILOT_PREROLL_SECONDS; do
+        RUMPEL_PROFILE_AUTOPILOT_PREROLL_SECONDS \
+        RUMPEL_PROFILE_SETTLE_SECONDS; do
         if [[ -n "${!name+x}" ]]; then
             echo "export $name=$(quote "${!name}")"
         else

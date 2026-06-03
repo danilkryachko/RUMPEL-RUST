@@ -47,6 +47,7 @@ const PROFILE_READY_STABLE_FRAMES_ENV: &str = "RUMPEL_PROFILE_READY_STABLE_FRAME
 const PROFILE_READY_FRAME_MS_ENV: &str = "RUMPEL_PROFILE_READY_FRAME_MS";
 const PROFILE_READY_MAX_EXTRA_SECONDS_ENV: &str = "RUMPEL_PROFILE_READY_MAX_EXTRA_SECONDS";
 const PROFILE_AUTOPILOT_PREROLL_SECONDS_ENV: &str = "RUMPEL_PROFILE_AUTOPILOT_PREROLL_SECONDS";
+const PROFILE_SETTLE_SECONDS_ENV: &str = "RUMPEL_PROFILE_SETTLE_SECONDS";
 const CAMERA_LOCK_ENV: &str = "RUMPEL_CAMERA_LOCK";
 const PACKED_CAMERA_LOCK_ENV: &str = "RUMPEL_PACKED_CAMERA_LOCK";
 const PACKED_FACE_RANGE_CULL_ENV: &str = "RUMPEL_PACKED_FACE_RANGE_CULL";
@@ -71,6 +72,7 @@ const DEFAULT_PROFILE_READY_STABLE_FRAMES: u32 = 30;
 const DEFAULT_PROFILE_READY_FRAME_MS: f32 = 25.0;
 const DEFAULT_PROFILE_READY_MAX_EXTRA_SECONDS: f32 = 8.0;
 const DEFAULT_PROFILE_AUTOPILOT_PREROLL_SECONDS: f32 = 2.0;
+const DEFAULT_PROFILE_SETTLE_SECONDS: f32 = 0.0;
 const DEFAULT_PACKED_FACE_RANGE_CULL: bool = true;
 const DEFAULT_PACKED_FACE_RANGE_MIN_QUADS: usize = 4096;
 const FRAME_BUDGET_60HZ_MS: f32 = 16.666_668;
@@ -770,6 +772,8 @@ struct ProfilingRun {
     autopilot_preroll_started: bool,
     autopilot_preroll_start_seconds: f32,
     autopilot_preroll_seconds: f32,
+    settle_seconds: f32,
+    counting_started_logged: bool,
     measurement_started: bool,
     measurement_start_seconds: f32,
     measurement_target_seconds: f32,
@@ -846,7 +850,13 @@ impl Default for ProfilingRun {
             .and_then(|value| value.parse::<f32>().ok())
             .unwrap_or(DEFAULT_PROFILE_AUTOPILOT_PREROLL_SECONDS)
             .max(0.0);
-        let measurement_target_seconds = (duration_seconds - warmup_seconds).max(0.0);
+        let settle_seconds = std::env::var(PROFILE_SETTLE_SECONDS_ENV)
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .unwrap_or(DEFAULT_PROFILE_SETTLE_SECONDS)
+            .max(0.0);
+        let measurement_target_seconds =
+            (duration_seconds - warmup_seconds - settle_seconds).max(0.0);
         let camera_lock = camera_lock_enabled();
 
         Self {
@@ -866,6 +876,8 @@ impl Default for ProfilingRun {
             autopilot_preroll_started: false,
             autopilot_preroll_start_seconds: 0.0,
             autopilot_preroll_seconds,
+            settle_seconds,
+            counting_started_logged: false,
             measurement_started: false,
             measurement_start_seconds: 0.0,
             measurement_target_seconds,
@@ -925,10 +937,23 @@ impl ProfilingRun {
         }
     }
 
+    fn counting_elapsed_seconds(&self) -> f32 {
+        if self.measurement_started {
+            (self.measurement_elapsed_seconds() - self.settle_seconds).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    fn counting_active(&self) -> bool {
+        self.measurement_active() && self.measurement_elapsed_seconds() >= self.settle_seconds
+    }
+
     fn should_finish(&self) -> bool {
         if self.ready_gate {
             self.measurement_started
-                && self.measurement_elapsed_seconds() >= self.measurement_target_seconds
+                && self.measurement_elapsed_seconds()
+                    >= self.settle_seconds + self.measurement_target_seconds
         } else {
             self.elapsed_seconds >= self.duration_seconds
         }
@@ -1430,9 +1455,10 @@ fn announce_profiling_run(
     };
 
     println!(
-        "profile start duration={:.1}s warmup={:.1}s measured_target={:.1}s ready_gate={} ready_stable_frames={} ready_frame_ms={:.1} ready_max_extra={:.1}s autopilot={} autopilot_preroll={:.1}s interval={:.1}s slow_frame_ms={:.1} render_mode={} render_target={} headless_wait_ms={} gpu_frame_timestamps={} present_mode={} frame_latency={} window_size={} shadows={} debug_hud={}",
+        "profile start duration={:.1}s warmup={:.1}s settle={:.1}s measured_target={:.1}s ready_gate={} ready_stable_frames={} ready_frame_ms={:.1} ready_max_extra={:.1}s autopilot={} autopilot_preroll={:.1}s interval={:.1}s slow_frame_ms={:.1} render_mode={} render_target={} headless_wait_ms={} gpu_frame_timestamps={} present_mode={} frame_latency={} window_size={} shadows={} debug_hud={}",
         profiling.duration_seconds,
         profiling.warmup_seconds,
+        profiling.settle_seconds,
         profiling.measurement_target_seconds,
         profiling.ready_gate,
         profiling.ready_stable_frames_required,
@@ -1536,8 +1562,19 @@ fn log_profile_metrics(
 
     profiling.update_measurement_gate(frame_ms, packed_stats_snapshot);
     let measure_frame = profiling.measurement_active();
+    let count_frame = profiling.counting_active();
 
-    if measure_frame {
+    if measure_frame && !profiling.counting_started_logged && count_frame {
+        profiling.counting_started_logged = true;
+        println!(
+            "profile counting t={:.2}s settle={:.1}s measured_target={:.1}s",
+            profiling.elapsed_seconds,
+            profiling.settle_seconds,
+            profiling.measurement_target_seconds
+        );
+    }
+
+    if count_frame {
         let frame_surface_bytes = (surface.completed_vertices_last_frame * 52
             + surface.completed_indices_last_frame * 4) as u64;
         profiling.total_surface_uploaded_bytes += frame_surface_bytes;
@@ -1547,14 +1584,14 @@ fn log_profile_metrics(
         }
     }
 
-    if fps > 0.0 && measure_frame {
+    if fps > 0.0 && count_frame {
         profiling.min_fps = profiling.min_fps.min(fps);
     }
-    if raw_fps > 0.0 && measure_frame {
+    if raw_fps > 0.0 && count_frame {
         profiling.min_raw_fps = profiling.min_raw_fps.min(raw_fps);
     }
 
-    if frame_ms > 0.0 && measure_frame {
+    if frame_ms > 0.0 && count_frame {
         profiling.measured_frame_count += 1;
         profiling.measured_frame_ms_sum += f64::from(frame_ms);
 
@@ -1872,7 +1909,7 @@ fn log_profile_metrics(
             0.0
         };
 
-        let measured_duration = profiling.measurement_elapsed_seconds();
+        let measured_duration = profiling.counting_elapsed_seconds();
         let measured_duration_s = if measured_duration > 0.0 {
             measured_duration
         } else {
@@ -1892,10 +1929,12 @@ fn log_profile_metrics(
         let max_render_prepare_windows_us = max_render_prepare_windows_us();
 
         println!(
-            "profile end samples={} duration={:.1}s measured_duration={:.1}s ready_status={} ready_t={:.2} measured_frames={} frames_ge_16ms={} frames_ge_25ms={} frames_ge_33ms={} min_fps={:.1} min_raw_fps={:.1} avg_raw_fps={:.1} worst_frame_ms={:.2} worst_frame_fps={:.1} worst_frame_t={:.2} worst_frame_wall_us={} worst_frame_main_us={} worst_frame_tail_us={} worst_render_schedule_us={} worst_render_camera_driver_us={} worst_render_gpu_camera_driver_us={} worst_render_graph_tail_us={} worst_render_core3d_us={}{} max_render_prepare_windows_us={} measured_surface_upload_mb={:.2} measured_packed_upload_mb={:.2} measured_surface_bandwidth_mb_s={:.2} measured_packed_bandwidth_mb_s={:.2}",
+            "profile end samples={} duration={:.1}s measured_duration={:.1}s counting_duration={:.1}s settle={:.1}s ready_status={} ready_t={:.2} measured_frames={} frames_ge_16ms={} frames_ge_25ms={} frames_ge_33ms={} min_fps={:.1} min_raw_fps={:.1} avg_raw_fps={:.1} worst_frame_ms={:.2} worst_frame_fps={:.1} worst_frame_t={:.2} worst_frame_wall_us={} worst_frame_main_us={} worst_frame_tail_us={} worst_render_schedule_us={} worst_render_camera_driver_us={} worst_render_gpu_camera_driver_us={} worst_render_graph_tail_us={} worst_render_core3d_us={}{} max_render_prepare_windows_us={} measured_surface_upload_mb={:.2} measured_packed_upload_mb={:.2} measured_surface_bandwidth_mb_s={:.2} measured_packed_bandwidth_mb_s={:.2}",
             profiling.sample_count,
             profiling.elapsed_seconds,
             profiling.measurement_elapsed_seconds(),
+            profiling.counting_elapsed_seconds(),
+            profiling.settle_seconds,
             profiling.ready_status.as_str(),
             profiling.ready_seconds,
             profiling.measured_frame_count,
@@ -2368,5 +2407,37 @@ mod tests {
         profiling.elapsed_seconds = 3.0;
         profiling.update_measurement_gate(10.0, Some(PackedQuadPipelineStats::default()));
         assert!(profiling.measurement_started);
+    }
+
+    #[test]
+    fn settle_period_excludes_initial_measurement_frames_from_counting() {
+        let mut profiling = ProfilingRun {
+            enabled: true,
+            ready_gate: false,
+            warmup_seconds: 0.0,
+            settle_seconds: 1.0,
+            measurement_target_seconds: 2.0,
+            duration_seconds: 3.0,
+            ..ProfilingRun::default()
+        };
+
+        profiling.elapsed_seconds = 0.0;
+        profiling.update_measurement_gate(30.0, None);
+        assert!(profiling.measurement_started);
+        assert!(!profiling.counting_active());
+
+        profiling.elapsed_seconds = 0.5;
+        assert!(!profiling.counting_active());
+
+        profiling.elapsed_seconds = 1.0;
+        assert!(profiling.counting_active());
+        assert!((profiling.counting_elapsed_seconds() - 0.0).abs() < f32::EPSILON);
+
+        profiling.elapsed_seconds = 2.0;
+        assert!((profiling.counting_elapsed_seconds() - 1.0).abs() < f32::EPSILON);
+        assert!(!profiling.should_finish());
+
+        profiling.elapsed_seconds = 3.0;
+        assert!(profiling.should_finish());
     }
 }

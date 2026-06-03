@@ -145,7 +145,8 @@ append_open_env_line() {
         RUMPEL_PROFILE_READY_STABLE_FRAMES \
         RUMPEL_PROFILE_READY_FRAME_MS \
         RUMPEL_PROFILE_READY_MAX_EXTRA_SECONDS \
-        RUMPEL_PROFILE_AUTOPILOT_PREROLL_SECONDS; do
+        RUMPEL_PROFILE_AUTOPILOT_PREROLL_SECONDS \
+        RUMPEL_PROFILE_SETTLE_SECONDS; do
         if [[ -n "${!name+x}" ]]; then
             append_open_env_line "$name" "${!name}"
         fi

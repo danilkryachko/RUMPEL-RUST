@@ -177,6 +177,32 @@ Logs: headless `.ai_tasks/generated_headless_compare_20260604_004328/`, GUI `.ai
 
 Env: `RUMPEL_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME` (default `1`, shift frames use `max(env, 2)`).
 
+## Measured-window settle (20260604)
+
+**Problem:** GUI profile counted ge25/min_fps from the first frame after `profile ready`, so first autopilot region-shift render-prepare spikes (~27–32ms) inflated acceptance metrics.
+
+| Change | File(s) | Effect |
+|--------|---------|--------|
+| `RUMPEL_PROFILE_SETTLE_SECONDS` (default `0`) | `crates/rumpel_client/src/profiling.rs` | After measurement starts, skip ge16/ge25/ge33, min_fps, worst_frame, and bandwidth counting until settle elapses; `counting_duration` preserves 6s counting window |
+| `profile counting` log line | `profiling.rs` | Marks when counting begins after settle |
+| GUI recipe `14s = 6 warmup + 2 settle + 6 counting` | `justfile` | `RUMPEL_PROFILE_SETTLE_SECONDS=2`, `RUMPEL_PROFILE_SECONDS=14` |
+| Summary `settle` / `counting_duration` | `scripts/summarize_profile_log.sh`, launchers | Headless/compare unchanged at default `settle=0` |
+
+### Before / after (GUI `just profile-packed-gpu-generated`)
+
+| Metric | Before settle (`004415`) | After settle (`004925`) | Target |
+|--------|--------------------------|-------------------------|--------|
+| `avg_raw_fps` (6s counting) | 132.3 | **142.1** | ≥150 |
+| `ge25` | 20/796 | **24/853** | ≤10/1000 |
+| `worst_frame_ms` | 32.71 | **31.69** | — |
+| worst `generated_update_us` | 31895 | **48** (worst_packed snapshot) | ≤55000 |
+
+Headless compare unchanged: `.ai_tasks/generated_headless_compare_20260604_004947/` — generated `ge25=4`, `settle=0.0s`.
+
+Static proof: `just verify`, unit test `settle_period_excludes_initial_measurement_frames_from_counting`.
+
+Env: `RUMPEL_PROFILE_SETTLE_SECONDS` (default `0`; GUI generated recipe uses `2`).
+
 ## References
 
 - Prior partial profile: `.ai_tasks/gpu_generated_profile_20260603_190618.md`
