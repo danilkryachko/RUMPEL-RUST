@@ -269,6 +269,8 @@ pub struct PreparedPackedQuadIndirectDraw {
     pub command_metadata: Vec<PackedQuadIndirectCommandMetadata>,
     /// Reused sorted batch indices for deterministic indirect buffer construction.
     pub batch_order: Vec<usize>,
+    /// Reused extracted batch key set for prepared-batch eviction.
+    pub active_batch_keys: HashSet<u64>,
     /// Reused CPU staging copy of draw params before uploading the params buffer.
     pub params_staging: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
     /// Mode of drawing used (`direct`, `indirect`, `multi-indirect`, or `material`).
@@ -1519,9 +1521,20 @@ pub fn prepare_packed_quad_buffers(
     ensure_packed_gpu_memory_reserve(&render_device, &mut gpu_reserve);
 
     // 1. Evict prepared batches that are no longer present in CPU extracted batches
+    indirect_draw.active_batch_keys.clear();
+    let active_key_capacity = indirect_draw.active_batch_keys.capacity();
+    if active_key_capacity < extracted_batches.batches.len() {
+        indirect_draw
+            .active_batch_keys
+            .reserve(extracted_batches.batches.len() - active_key_capacity);
+    }
+    indirect_draw
+        .active_batch_keys
+        .extend(extracted_batches.batches.iter().map(|batch| batch.key));
+    let active_batch_keys = &indirect_draw.active_batch_keys;
     prepared_batches
         .batches
-        .retain(|key, _| extracted_batches.batches.iter().any(|b| b.key == *key));
+        .retain(|key, _| active_batch_keys.contains(key));
 
     // 2. Compute stable per-region allocations. Offsets do not shift when a
     // region grows, so unchanged regions keep their GPU data and bind group.
