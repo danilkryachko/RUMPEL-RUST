@@ -244,6 +244,7 @@ impl ExtractResource for PackedQuadBlockAtlas {
 pub struct PreparedPackedQuadBlockTexturePalette {
     pub buffer: Option<Buffer>,
     pub tiles: Vec<[u32; 4]>,
+    pub generation: u64,
 }
 
 /// Resource in the Render World storing the shared GPU indirect draw command buffer.
@@ -267,6 +268,7 @@ impl FromWorld for PackedQuadIndirectBuffer {
 pub struct PackedQuadParamsBuffer {
     pub buffer: Option<Buffer>,
     pub capacity_params: usize,
+    pub generation: u64,
 }
 
 impl FromWorld for PackedQuadParamsBuffer {
@@ -274,8 +276,16 @@ impl FromWorld for PackedQuadParamsBuffer {
         Self {
             buffer: None,
             capacity_params: 0,
+            generation: 0,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedQuadIndirectBindGroupKey {
+    pub arena_generation: u64,
+    pub params_generation: u64,
+    pub palette_generation: u64,
 }
 
 /// Combined metadata and resources for unified indirect rendering.
@@ -283,6 +293,8 @@ impl FromWorld for PackedQuadParamsBuffer {
 pub struct PreparedPackedQuadIndirectDraw {
     /// Cached single global bind group.
     pub bind_group: Option<BindGroup>,
+    /// Resource generations used to validate the cached global bind group.
+    pub bind_group_key: Option<PackedQuadIndirectBindGroupKey>,
     /// Buffer holding indirect draw commands.
     pub indirect_buffer: Option<Buffer>,
     /// Number of active draw commands in the buffer.
@@ -1701,6 +1713,7 @@ pub fn prepare_packed_quad_buffers(
         });
         render_queue.write_buffer(&buffer, 0, bytemuck::cast_slice(extracted_palette_tiles));
         prepared_palette.buffer = Some(buffer);
+        prepared_palette.generation = prepared_palette.generation.saturating_add(1);
         prepared_palette.tiles.clear();
         prepared_palette
             .tiles
@@ -2206,6 +2219,7 @@ pub fn prepare_packed_quad_buffers(
 
             params_buf.buffer = Some(new_buffer);
             params_buf.capacity_params = next_capacity;
+            params_buf.generation = params_buf.generation.saturating_add(1);
         }
 
         // Upload to command buffers
@@ -2217,25 +2231,37 @@ pub fn prepare_packed_quad_buffers(
         }
     }
 
-    // 9. Build the single unified global BindGroup for the drawing pass
-    let mut global_bind_group = None;
+    // 9. Build or reuse the single unified global BindGroup for the drawing pass.
     if let Some(pipeline) = pipeline_res
         && command_count > 0
         && let (Some(arena_buffer), Some(params_buffer)) = (&arena.buffer, &params_buf.buffer)
     {
-        let bind_group_label = "packed_quad_indirect_global_bind_group";
-        let bg = render_device.create_bind_group(
-            Some(bind_group_label),
-            &pipeline.quad_bind_group_layout,
-            &BindGroupEntries::sequential((
-                arena_buffer.as_entire_buffer_binding(),
-                params_buffer.as_entire_buffer_binding(),
-                texture_palette_buffer.as_entire_buffer_binding(),
-                BindingResource::TextureView(&gpu_atlas.texture_view),
-                BindingResource::Sampler(&gpu_atlas.sampler),
-            )),
-        );
-        global_bind_group = Some(bg);
+        let bind_group_key = PackedQuadIndirectBindGroupKey {
+            arena_generation: arena.generation,
+            params_generation: params_buf.generation,
+            palette_generation: prepared_palette.generation,
+        };
+        if indirect_draw.bind_group.is_none()
+            || indirect_draw.bind_group_key != Some(bind_group_key)
+        {
+            let bind_group_label = "packed_quad_indirect_global_bind_group";
+            let bg = render_device.create_bind_group(
+                Some(bind_group_label),
+                &pipeline.quad_bind_group_layout,
+                &BindGroupEntries::sequential((
+                    arena_buffer.as_entire_buffer_binding(),
+                    params_buffer.as_entire_buffer_binding(),
+                    texture_palette_buffer.as_entire_buffer_binding(),
+                    BindingResource::TextureView(&gpu_atlas.texture_view),
+                    BindingResource::Sampler(&gpu_atlas.sampler),
+                )),
+            );
+            indirect_draw.bind_group = Some(bg);
+            indirect_draw.bind_group_key = Some(bind_group_key);
+        }
+    } else {
+        indirect_draw.bind_group = None;
+        indirect_draw.bind_group_key = None;
     }
 
     // Prefer the validated loop-indirect packed path when first_instance is
@@ -2416,7 +2442,6 @@ pub fn prepare_packed_quad_buffers(
     );
     record_packed_quad_cpu_visible_indirect(false, 0);
 
-    indirect_draw.bind_group = global_bind_group;
     indirect_draw.indirect_buffer = indirect_buf.buffer.clone();
     indirect_draw.command_count = command_count;
     indirect_draw.draw_mode = draw_mode;
@@ -6314,6 +6339,31 @@ mod tests {
                 len_quads: 1,
                 generation: 5,
             }]
+        );
+    }
+
+    #[test]
+    fn test_packed_indirect_bind_group_key_tracks_resource_generations() {
+        let base = PackedQuadIndirectBindGroupKey {
+            arena_generation: 1,
+            params_generation: 2,
+            palette_generation: 3,
+        };
+
+        assert_eq!(base, base);
+        assert_ne!(
+            base,
+            PackedQuadIndirectBindGroupKey {
+                palette_generation: 4,
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            PackedQuadIndirectBindGroupKey {
+                params_generation: 5,
+                ..base
+            }
         );
     }
 

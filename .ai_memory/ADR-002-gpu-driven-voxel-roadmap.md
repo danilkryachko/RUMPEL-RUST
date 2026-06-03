@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-03: CPU-packed indirect prepare now caches the global draw bind group with an arena/params/palette generation key, avoiding per-frame bind-group creation on stable frames while preserving invalidation on buffer recreation. Verified with focused render checks and clean temp `just verify`.
 - 2026-06-03: CPU-packed GPU cull prepare now signature-gates metadata/config uploads, mirroring the generated cull path's stable-frame behavior without reusing CPU-path dispatch results. Verified with focused render checks and clean temp `just verify`.
 - 2026-06-03: Packed indirect draw-mode selection now stores a static string in render state, removing a small per-frame allocation. Also restored the profiling draw-mode label helper to module scope after clean temp verification exposed it was nested inside `env_flag`. Verified with clean temp `just verify`.
 - 2026-06-03: GPU-generated active chunk target hashes now use a deterministic circular view-radius scan helper instead of HashSet iteration, preserving count/hash semantics while avoiding order-dependent cache signatures. Verified on a clean remote+patch temp checkout with render check, focused signature test, render clippy, plus workspace `just verify` in the active worktree.
