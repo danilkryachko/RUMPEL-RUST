@@ -23,7 +23,7 @@
 - [ ] Настройка пайплайна Большой Студии (CI/CD, GitHub, RAG update)
 
 ## 🔍 In Review (На проверке)
-- [ ] **PR: GPU-generated packed path** — branch `ai/director-проанализируйте-опти` → `master`; acceptance `.ai_tasks/gpu_generated_acceptance_20260603.md`. Plateau: GUI ~130–137 FPS (Metal, ~185 draw_indirect, swapchain tail on region shift); headless ge25≤4, GUI ge25≤10/1000. Следующий трек после merge: `MULTI_DRAW_INDIRECT_COUNT` на non-Metal или gameplay.
+- [ ] **PR: GPU-generated packed path** — branch `ai/gpu-generated-acceptance-20260604` → `master`; acceptance `.ai_tasks/gpu_generated_acceptance_20260603.md`. Plateau: GUI ~130–137 FPS (Metal, ~185 draw_indirect, swapchain tail on region shift); headless ge25≤4, GUI ge25≤10/1000. Следующий трек после merge: `MULTI_DRAW_INDIRECT_COUNT` на non-Metal или gameplay.
 - [ ] Проверка FPS при быстром полете после async mesh streaming
 
 ## ✅ Done (Готово)
