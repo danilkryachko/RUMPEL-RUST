@@ -10,6 +10,7 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures::check_ready};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::sync::{
     Arc, LazyLock, Mutex,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -273,6 +274,15 @@ pub struct PreparedPackedQuadIndirectDraw {
     pub active_batch_keys: HashSet<u64>,
     /// Reused dirty batch key set for upload decisions.
     pub dirty_batch_key_set: HashSet<u64>,
+    /// Reused stable arena allocation plan built during render prepare.
+    pub allocation_plan: HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+    /// Reused dirty batch key list returned by allocation planning.
+    pub dirty_batch_keys: Vec<u64>,
+    /// Reused compacted allocation plan scratch for deferred arena compaction.
+    pub compacted_allocation_plan:
+        HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+    /// Reused compacted dirty key list scratch for deferred arena compaction.
+    pub compacted_dirty_batch_keys: Vec<u64>,
     /// Reused CPU staging copy of draw params before uploading the params buffer.
     pub params_staging: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
     /// Mode of drawing used (`direct`, `indirect`, `multi-indirect`, or `material`).
@@ -1396,6 +1406,20 @@ fn sort_packed_batch_order(batch_order: &mut Vec<usize>, batches: &[PackedQuadBa
     batch_order.sort_by_key(|batch_index| batches[*batch_index].key);
 }
 
+fn reserve_vec_capacity<T>(items: &mut Vec<T>, capacity: usize) {
+    let current_capacity = items.capacity();
+    if current_capacity < capacity {
+        items.reserve(capacity - current_capacity);
+    }
+}
+
+fn reserve_hash_map_capacity<K: Eq + Hash, V>(items: &mut HashMap<K, V>, capacity: usize) {
+    let current_capacity = items.capacity();
+    if current_capacity < capacity {
+        items.reserve(capacity - current_capacity);
+    }
+}
+
 pub fn plan_stable_arena_allocations(
     existing_allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
     batches: &[PackedQuadBatch],
@@ -1409,29 +1433,39 @@ pub fn plan_stable_arena_allocations(
 ) {
     let mut batch_order = Vec::new();
     sort_packed_batch_order(&mut batch_order, batches);
-    plan_stable_arena_allocations_for_order(
+    let mut new_allocations = HashMap::with_capacity(batch_order.len());
+    let mut dirty_keys = Vec::with_capacity(batch_order.len());
+    let (total_required_quads, next_free_quads) = plan_stable_arena_allocations_for_order_into(
         existing_allocations,
         batches,
         &batch_order,
         next_free_quads,
         default_batch_capacity_quads,
+        &mut new_allocations,
+        &mut dirty_keys,
+    );
+    (
+        new_allocations,
+        dirty_keys,
+        total_required_quads,
+        next_free_quads,
     )
 }
 
-fn plan_stable_arena_allocations_for_order(
+fn plan_stable_arena_allocations_for_order_into(
     existing_allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
     batches: &[PackedQuadBatch],
     batch_order: &[usize],
     next_free_quads: usize,
     default_batch_capacity_quads: usize,
-) -> (
-    HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
-    Vec<u64>,
-    usize,
-    usize,
-) {
-    let mut new_allocations = HashMap::with_capacity(batch_order.len());
-    let mut dirty_keys = Vec::new();
+    new_allocations: &mut HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+    dirty_keys: &mut Vec<u64>,
+) -> (usize, usize) {
+    new_allocations.clear();
+    reserve_hash_map_capacity(new_allocations, batch_order.len());
+    dirty_keys.clear();
+    reserve_vec_capacity(dirty_keys, batch_order.len());
+
     let mut next_free = next_free_quads.max(
         existing_allocations
             .values()
@@ -1482,7 +1516,7 @@ fn plan_stable_arena_allocations_for_order(
         new_allocations.insert(batch.key, allocation);
     }
 
-    (new_allocations, dirty_keys, total_required_quads, next_free)
+    (total_required_quads, next_free)
 }
 
 fn should_compact_packed_arena_slots(
@@ -1492,6 +1526,7 @@ fn should_compact_packed_arena_slots(
     current_capacity_quads > 0 && planned_next_free > current_capacity_quads
 }
 
+#[cfg(test)]
 fn compacted_packed_arena_allocation_plan(
     batches: &[PackedQuadBatch],
     default_batch_capacity_quads: usize,
@@ -1575,27 +1610,53 @@ pub fn prepare_packed_quad_buffers(
     // region grows, so unchanged regions keep their GPU data and bind group.
     let default_batch_capacity_quads =
         estimated_packed_region_capacity_quads(packed_region_size_from_env());
-    let (mut new_allocations, mut dirty_batch_keys, mut total_required_quads, mut next_free_quads) =
-        plan_stable_arena_allocations_for_order(
+    let (mut total_required_quads, mut next_free_quads) = {
+        let PreparedPackedQuadIndirectDraw {
+            batch_order,
+            allocation_plan,
+            dirty_batch_keys,
+            ..
+        } = &mut *indirect_draw;
+        plan_stable_arena_allocations_for_order_into(
             &arena.allocations,
             &extracted_batches.batches,
-            &indirect_draw.batch_order,
+            batch_order,
             arena.next_free_quads,
             default_batch_capacity_quads,
-        );
+            allocation_plan,
+            dirty_batch_keys,
+        )
+    };
     if should_compact_packed_arena_slots(arena.capacity_quads, next_free_quads) {
-        let (
-            compacted_allocations,
-            compacted_dirty_batch_keys,
-            compacted_total_required_quads,
-            compacted_next_free_quads,
-        ) = compacted_packed_arena_allocation_plan(
-            &extracted_batches.batches,
-            default_batch_capacity_quads,
-        );
+        let empty_allocations: HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation> =
+            HashMap::new();
+        let (compacted_total_required_quads, compacted_next_free_quads) = {
+            let PreparedPackedQuadIndirectDraw {
+                batch_order,
+                compacted_allocation_plan,
+                compacted_dirty_batch_keys,
+                ..
+            } = &mut *indirect_draw;
+            plan_stable_arena_allocations_for_order_into(
+                &empty_allocations,
+                &extracted_batches.batches,
+                batch_order,
+                0,
+                default_batch_capacity_quads,
+                compacted_allocation_plan,
+                compacted_dirty_batch_keys,
+            )
+        };
         if compacted_next_free_quads <= arena.capacity_quads {
-            new_allocations = compacted_allocations;
-            dirty_batch_keys = compacted_dirty_batch_keys;
+            let PreparedPackedQuadIndirectDraw {
+                allocation_plan,
+                compacted_allocation_plan,
+                dirty_batch_keys,
+                compacted_dirty_batch_keys,
+                ..
+            } = &mut *indirect_draw;
+            std::mem::swap(allocation_plan, compacted_allocation_plan);
+            std::mem::swap(dirty_batch_keys, compacted_dirty_batch_keys);
             total_required_quads = compacted_total_required_quads;
             next_free_quads = compacted_next_free_quads;
             arena.stats.compactions += 1;
@@ -1635,22 +1696,29 @@ pub fn prepare_packed_quad_buffers(
     }
 
     if arena_reallocated {
-        dirty_batch_keys.clear();
-        let dirty_key_capacity = dirty_batch_keys.capacity();
-        if dirty_key_capacity < extracted_batches.batches.len() {
-            dirty_batch_keys.reserve(extracted_batches.batches.len() - dirty_key_capacity);
-        }
-        dirty_batch_keys.extend(extracted_batches.batches.iter().map(|batch| batch.key));
+        indirect_draw.dirty_batch_keys.clear();
+        reserve_vec_capacity(
+            &mut indirect_draw.dirty_batch_keys,
+            extracted_batches.batches.len(),
+        );
+        indirect_draw
+            .dirty_batch_keys
+            .extend(extracted_batches.batches.iter().map(|batch| batch.key));
     }
 
-    indirect_draw.dirty_batch_key_set.clear();
-    let dirty_key_capacity = indirect_draw.dirty_batch_key_set.capacity();
-    if dirty_key_capacity < dirty_batch_keys.len() {
-        indirect_draw
-            .dirty_batch_key_set
-            .reserve(dirty_batch_keys.len() - dirty_key_capacity);
+    {
+        let PreparedPackedQuadIndirectDraw {
+            dirty_batch_keys,
+            dirty_batch_key_set,
+            ..
+        } = &mut *indirect_draw;
+        dirty_batch_key_set.clear();
+        let dirty_key_capacity = dirty_batch_key_set.capacity();
+        if dirty_key_capacity < dirty_batch_keys.len() {
+            dirty_batch_key_set.reserve(dirty_batch_keys.len() - dirty_key_capacity);
+        }
+        dirty_batch_key_set.extend(dirty_batch_keys.iter().copied());
     }
-    indirect_draw.dirty_batch_key_set.extend(dirty_batch_keys);
     let dirty_batch_key_set = &indirect_draw.dirty_batch_key_set;
     let mut uploaded_batches = 0;
 
@@ -1662,7 +1730,7 @@ pub fn prepare_packed_quad_buffers(
             if batch.quads.is_empty() {
                 continue;
             }
-            let Some(allocation) = new_allocations.get(&batch.key) else {
+            let Some(allocation) = indirect_draw.allocation_plan.get(&batch.key).copied() else {
                 continue;
             };
             if is_full_dirty {
@@ -1713,7 +1781,7 @@ pub fn prepare_packed_quad_buffers(
             uploaded_batches += usize::from(uploaded_subranges_for_batch);
         }
     }
-    record_confirmed_packed_batch_generations(&new_allocations);
+    record_confirmed_packed_batch_generations(&indirect_draw.allocation_plan);
     arena.next_free_quads = next_free_quads;
     arena.stats.used_quads = total_required_quads;
     arena.stats.allocated_slot_quads = next_free_quads;
@@ -1765,6 +1833,7 @@ pub fn prepare_packed_quad_buffers(
     {
         let PreparedPackedQuadIndirectDraw {
             batch_order,
+            allocation_plan,
             commands: commands_staging,
             params_staging,
             command_metadata,
@@ -1772,7 +1841,7 @@ pub fn prepare_packed_quad_buffers(
         } = &mut *indirect_draw;
         for batch_index in batch_order.iter().copied() {
             let batch = &extracted_batches.batches[batch_index];
-            let allocation = new_allocations.get(&batch.key).copied().unwrap_or(
+            let allocation = allocation_plan.get(&batch.key).copied().unwrap_or(
                 crate::packed_quad_buffer::PackedQuadArenaAllocation {
                     key: batch.key,
                     offset_quads: 0,
@@ -2212,7 +2281,7 @@ pub fn prepare_packed_quad_buffers(
     indirect_draw.command_count = command_count;
     indirect_draw.draw_mode = draw_mode;
     indirect_draw.is_indirect_enabled = use_indirect && command_count > 0;
-    arena.allocations = new_allocations;
+    std::mem::swap(&mut arena.allocations, &mut indirect_draw.allocation_plan);
 
     let mut chunk_ranges = 0;
     let mut resident_chunk_ranges = 0;
@@ -4982,6 +5051,88 @@ mod tests {
         assert_eq!(allocs2[&10].offset_quads, 0);
         assert_eq!(allocs2[&20].offset_quads, 16);
         assert_eq!(next_free2, 32);
+    }
+
+    #[test]
+    fn test_plan_stable_arena_allocations_for_order_reuses_scratch() {
+        let quad = PackedVoxelQuad::new([1, 1, 1], [1, 1], 1, 0, 0, 0);
+        let batches = vec![
+            PackedQuadBatch {
+                key: 20,
+                quads: test_quads(vec![quad; 8]),
+                chunk_ranges: Arc::new(Vec::new()),
+                dirty_ranges: Arc::new(Vec::new()),
+                generation: 1,
+                needs_compaction: false,
+            },
+            PackedQuadBatch {
+                key: 10,
+                quads: test_quads(vec![quad; 4]),
+                chunk_ranges: Arc::new(Vec::new()),
+                dirty_ranges: Arc::new(Vec::new()),
+                generation: 1,
+                needs_compaction: false,
+            },
+        ];
+        let mut batch_order = Vec::with_capacity(8);
+        sort_packed_batch_order(&mut batch_order, &batches);
+        let mut allocation_scratch = HashMap::with_capacity(8);
+        let mut dirty_key_scratch = Vec::with_capacity(8);
+        let allocation_capacity = allocation_scratch.capacity();
+        let dirty_key_capacity = dirty_key_scratch.capacity();
+
+        let (total_quads, next_free) = plan_stable_arena_allocations_for_order_into(
+            &HashMap::new(),
+            &batches,
+            &batch_order,
+            0,
+            16,
+            &mut allocation_scratch,
+            &mut dirty_key_scratch,
+        );
+        assert_eq!(total_quads, 12);
+        assert_eq!(next_free, 32);
+        assert_eq!(dirty_key_scratch, vec![10, 20]);
+        assert_eq!(allocation_scratch.capacity(), allocation_capacity);
+        assert_eq!(dirty_key_scratch.capacity(), dirty_key_capacity);
+
+        let existing_allocations = allocation_scratch.clone();
+        let updated = vec![
+            PackedQuadBatch {
+                key: 20,
+                quads: test_quads(vec![quad; 8]),
+                chunk_ranges: Arc::new(Vec::new()),
+                dirty_ranges: Arc::new(Vec::new()),
+                generation: 1,
+                needs_compaction: false,
+            },
+            PackedQuadBatch {
+                key: 10,
+                quads: test_quads(vec![quad; 6]),
+                chunk_ranges: Arc::new(Vec::new()),
+                dirty_ranges: Arc::new(Vec::new()),
+                generation: 2,
+                needs_compaction: false,
+            },
+        ];
+        sort_packed_batch_order(&mut batch_order, &updated);
+        let (updated_total_quads, updated_next_free) = plan_stable_arena_allocations_for_order_into(
+            &existing_allocations,
+            &updated,
+            &batch_order,
+            next_free,
+            16,
+            &mut allocation_scratch,
+            &mut dirty_key_scratch,
+        );
+
+        assert_eq!(updated_total_quads, 14);
+        assert_eq!(updated_next_free, 32);
+        assert_eq!(dirty_key_scratch, vec![10]);
+        assert_eq!(allocation_scratch[&10].offset_quads, 0);
+        assert_eq!(allocation_scratch[&20].offset_quads, 16);
+        assert_eq!(allocation_scratch.capacity(), allocation_capacity);
+        assert_eq!(dirty_key_scratch.capacity(), dirty_key_capacity);
     }
 
     #[test]
