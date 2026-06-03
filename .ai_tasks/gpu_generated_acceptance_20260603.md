@@ -300,13 +300,28 @@ Static proof: `just verify`, unit test `structure_stable_gpu_allocations_satisfi
 
 ## Merge director micro-perf (20260604)
 
-**Commit:** `1f91fca` — merge `origin/ai/director-проанализируйте-опти` (88 коммитов) в `ai/gpu-generated-acceptance-20260604`.
+**Commit:** `1f91fca` — merge `origin/ai/director-проанализируйте-опти` (88 коммитов, fork `402f705`) в `ai/gpu-generated-acceptance-20260604` (PR #1).
 
-**Сохранено с acceptance-ветки:** Metal per-chunk draw, sliding-window, deferred edge builds, active-edge prefetch, settle, pacing, acceptance scripts.
+**Конфликты (9 файлов):** `packed_quad_pipeline.rs`, `packed_quad_renderer.rs`, `packed_quad_gpu_generation.rs`, `packed_quad_buffer.rs`, `profiling.rs`, `BOARD.md`, `ADR-002`, `compare_generated_visual_profile.sh`, `run_client_macos_gui.sh`.
 
-**Интегрировано с director:** upload signatures (skip unchanged buffer uploads), cull metadata/config gating, global indirect bind group cache, `retain_nearest_loaded_regions_for_prefetch`, scratch reuse (streaming/compaction/prepare), deterministic chunk signatures.
+**Сохранено с acceptance-ветки (HEAD):** Metal per-chunk `draw_indirect`, visible-only draw loop, sliding-window reuse, deferred edge builds, active-edge prefetch priority, pending queue, partial GPU dispatch, structure-stable prepare, metrics reconciliation, settle profiling, auto-no-vsync recipe, `generated_cache_prefetched` telemetry, `PREFETCH_PER_FRAME` env forwarding, `gpu_generated_allocation_maps_equivalent`, `batch_structure_signature`.
 
-**Конфликты:** 9 файлов; auto-merge render core + ручная склейка docs/scripts. `just verify` PASS после merge.
+**Интегрировано с director (additive):** `packed_gpu_buffer_upload_signature` + skip unchanged indirect/params uploads; CPU cull metadata/config signature gating; `PackedQuadIndirectBindGroupKey` global bind-group cache; `retain_nearest_loaded_regions_for_prefetch`; `confirmed_generation_signature`; scratch reuse / deterministic signatures (documented in ADR-002 / BOARD Done).
+
+**Пропущено с director (конфликт с acceptance path):**
+- `draw_mode: &'static str` вместо `String` — оставлен `String` (profiling contract).
+- Sliding-window jobs path (`d789fa7`) vs measured acceptance defer/partial-dispatch — **наш path**.
+- Full remote `packed_quad_renderer.rs` rewrite — **ours** (Metal draw fix, structure-stable prepare, partial chunk dispatch).
+
+### Post-merge verify (20260604)
+
+| Check | Result |
+|-------|--------|
+| `just verify` | **PASS** |
+| Headless `./scripts/compare_generated_headless_profile.sh` | **PASS** — `.ai_tasks/generated_headless_compare_20260604_014048/` generated `ge25=4`, `avg_raw_fps=865.6`, worst **36.05ms** |
+| GUI `just profile-packed-gpu-generated` | status **0** — `.ai_tasks/rumpel_client_packed_20260604_014144.stdout.log` `avg_raw_fps=97.1`, `ge25=6/656`, `draw_mode=gpu-generated`, `packed_uploaded_quads=0`, `generated_regions_loaded/active/visible=81/65/188`, `packed_render_draw_calls=188`; worst frame t=12.42 `prepare_windows≈1s` (macOS swapchain outlier) |
+
+Terrain рендерится (`gpu-generated`, `uploaded_quads=0`, positive regions visible). GUI avg ниже plateau (~134) из‑за outlier-кадра; headless **ge25≤4** выполнен.
 
 ## References
 
