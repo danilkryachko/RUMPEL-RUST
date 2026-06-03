@@ -605,6 +605,33 @@ fn estimate_visible_indirect_commands(
     }
 }
 
+fn collect_visible_generated_draw_indices(
+    regions: &[PreparedPackedGpuGeneratedRegion],
+    command_count: usize,
+    view_position: Vec3,
+    clip_from_world: Mat4,
+) -> Vec<usize> {
+    let mut indices = Vec::with_capacity(command_count.min(regions.len()));
+
+    for region in regions.iter().take(command_count) {
+        if region.max_output_quads == 0 {
+            continue;
+        }
+
+        let view_inside_region =
+            point_inside_bounds(view_position, region.bounds_min, region.bounds_max);
+        if !view_inside_region
+            && !bounds_are_visible(region.bounds_min, region.bounds_max, clip_from_world)
+        {
+            continue;
+        }
+
+        indices.push(region.draw_command_index);
+    }
+
+    indices
+}
+
 fn estimate_visible_generated_regions(
     regions: &[PreparedPackedGpuGeneratedRegion],
     command_count: usize,
@@ -2074,20 +2101,42 @@ impl render_graph::Node for PackedQuadRenderNode {
                         crate::packed_quad_buffer::PackedQuadDrawCommand,
                     >() as u64;
                     // Per-command draw_indirect preserves each command's first_instance
-                    // (draw_params index). multi_draw_indirect* collapses instance_index on
-                    // some Metal paths and every chunk reads draw_params[0].
-                    let draw_count = if cull.compact_enabled {
-                        cull.last_visible_commands()
-                    } else {
-                        gpu_generated.command_count
-                    };
-                    for draw_index in 0..draw_count {
-                        let draw_offset = draw_index.saturating_mul(draw_command_stride as usize);
-                        render_pass.draw_indirect(draw_indirect_buffer, draw_offset as u64);
+                    // (draw_params index). multi_draw_indirect without count collapses
+                    // instance_index on some Metal paths and every chunk reads draw_params[0].
+                    if cull.compact_enabled
+                        && cull.count_supported
+                        && let Some(count_buffer) = cull.count_buffer.as_ref()
+                    {
+                        render_pass.multi_draw_indirect_count(
+                            draw_indirect_buffer,
+                            0,
+                            count_buffer,
+                            0,
+                            gpu_generated.command_count as u32,
+                        );
+                        render_draw_calls = 1;
                     }
-                    render_draw_calls = draw_count;
+                    if render_draw_calls == 0 {
+                        let visible_draw_indices = if cull.compact_enabled {
+                            let visible_commands = cull.last_visible_commands();
+                            (0..visible_commands).collect::<Vec<_>>()
+                        } else {
+                            collect_visible_generated_draw_indices(
+                                &gpu_generated.regions,
+                                gpu_generated.command_count,
+                                view_position,
+                                clip_from_world,
+                            )
+                        };
+                        for draw_index in visible_draw_indices {
+                            let draw_offset =
+                                draw_index.saturating_mul(draw_command_stride as usize);
+                            render_pass.draw_indirect(draw_indirect_buffer, draw_offset as u64);
+                            render_draw_calls = render_draw_calls.saturating_add(1);
+                        }
+                    }
                     crate::packed_quad_pipeline::record_packed_gpu_generation_visible_draws(
-                        draw_count,
+                        cull.last_visible_commands(),
                         cull.last_visible_quads(),
                     );
                     crate::packed_quad_pipeline::record_packed_quad_cpu_visible_indirect(false, 0);

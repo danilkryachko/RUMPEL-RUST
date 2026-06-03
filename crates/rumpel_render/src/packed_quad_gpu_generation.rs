@@ -243,7 +243,7 @@ impl PackedGpuGenerationTarget {
     }
 
     #[must_use]
-    pub fn matches_active_region_window(self, other: Self) -> bool {
+    pub fn matches_region_window_layout(self, other: Self) -> bool {
         self.center_origin_x == other.center_origin_x
             && self.center_origin_z == other.center_origin_z
             && self.region_size == other.region_size
@@ -253,6 +253,11 @@ impl PackedGpuGenerationTarget {
             && self.edit_store_generation == other.edit_store_generation
             && self.active_region_count == other.active_region_count
             && self.active_region_hash == other.active_region_hash
+    }
+
+    #[must_use]
+    pub fn matches_active_region_window(self, other: Self) -> bool {
+        self.matches_region_window_layout(other)
             && self.active_chunk_count == other.active_chunk_count
             && self.active_chunk_hash == other.active_chunk_hash
     }
@@ -1031,10 +1036,12 @@ mod tests {
         assert_eq!(base, same);
         assert_ne!(base, moved);
         assert_ne!(base, edited);
+        assert!(base.matches_region_window_layout(moved));
         assert!(base.matches_active_region_window(moved));
         assert!(!base.matches_active_region_window(edited));
         assert!(!base.matches_active_region_window(changed_active_region));
         assert!(!base.matches_active_region_window(changed_active_chunk));
+        assert!(base.matches_region_window_layout(changed_active_chunk));
         assert_eq!(base.loaded_regions(), 9);
         assert_eq!(
             PackedGpuGenerationTarget::new(

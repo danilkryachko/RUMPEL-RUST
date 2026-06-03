@@ -3389,6 +3389,35 @@ pub fn update_packed_gpu_generation_regions(
         return;
     }
 
+    if gpu_batches
+        .target
+        .is_some_and(|previous| previous.matches_region_window_layout(target))
+        && !gpu_batches.batches.is_empty()
+    {
+        for batch in &mut gpu_batches.batches {
+            sync_gpu_chunk_range_active_flags(batch, &active_chunk_keys);
+        }
+        let batch_signature =
+            PackedGpuGenerationBatches::calculate_batch_signature(&gpu_batches.batches);
+        let batch_summary = PackedGpuGenerationBatches::summarize_batches(&gpu_batches.batches);
+        if gpu_batches.batch_signature != batch_signature {
+            gpu_batches.batch_signature = batch_signature;
+            gpu_batches.summary = batch_summary;
+        }
+        let prefetched = prefetch_loaded_generated_regions(
+            scratch,
+            &mut region_cache,
+            camera_chunk_x,
+            camera_chunk_z,
+            &cache_build,
+        );
+        record_packed_gpu_generation_region_mask(loaded_regions, active_region_count);
+        record_packed_gpu_generation_cache_lifecycle(0, 0, 0, 0, prefetched);
+        record_packed_gpu_generation_update(elapsed_us(update_started), true);
+        gpu_batches.target = Some(target);
+        return;
+    }
+
     scratch.generated_batches.clear();
     let mut cache_hits = 0usize;
     let mut cache_misses = 0usize;
