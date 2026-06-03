@@ -3464,6 +3464,7 @@ pub struct PackedQuadStreamingState {
     pub pending_rebuild_regions: Vec<u64>,
     pub pending_compaction_regions: Vec<u64>,
     pub regions_to_sync: HashSet<u64>,
+    pub membership_changes: Vec<u64>,
 }
 
 pub struct LoadedPackedQuadChunk {
@@ -3746,11 +3747,14 @@ pub fn stream_packed_quad_chunks(
             commands.entity(entity).despawn();
         }
 
-        let membership_changes = previous_active_render_chunks
-            .symmetric_difference(&state.active_render_chunks)
-            .copied()
-            .collect::<Vec<_>>();
-        for key in membership_changes {
+        let mut membership_changes = std::mem::take(&mut state.membership_changes);
+        membership_changes.clear();
+        membership_changes.extend(
+            previous_active_render_chunks
+                .symmetric_difference(&state.active_render_chunks)
+                .copied(),
+        );
+        for &key in &membership_changes {
             let Some((region_key, entity)) = state
                 .loaded
                 .get(&key)
@@ -3770,6 +3774,7 @@ pub fn stream_packed_quad_chunks(
                     .remove::<RenderedChunkCount>();
             }
         }
+        state.membership_changes = membership_changes;
 
         let mut pending = Vec::new();
         for chunk in render_chunks {
