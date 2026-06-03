@@ -1386,6 +1386,16 @@ fn batch_has_dirty_ranges_since(batch: &PackedQuadBatch, generation: u64) -> boo
         .any(|range| range.generation > generation && range.len_quads > 0)
 }
 
+fn sort_packed_batch_order(batch_order: &mut Vec<usize>, batches: &[PackedQuadBatch]) {
+    batch_order.clear();
+    let batch_order_capacity = batch_order.capacity();
+    if batch_order_capacity < batches.len() {
+        batch_order.reserve(batches.len() - batch_order_capacity);
+    }
+    batch_order.extend(0..batches.len());
+    batch_order.sort_by_key(|batch_index| batches[*batch_index].key);
+}
+
 pub fn plan_stable_arena_allocations(
     existing_allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
     batches: &[PackedQuadBatch],
@@ -1397,10 +1407,30 @@ pub fn plan_stable_arena_allocations(
     usize,
     usize,
 ) {
-    let mut sorted_batches = batches.iter().collect::<Vec<_>>();
-    sorted_batches.sort_by_key(|batch| batch.key);
+    let mut batch_order = Vec::new();
+    sort_packed_batch_order(&mut batch_order, batches);
+    plan_stable_arena_allocations_for_order(
+        existing_allocations,
+        batches,
+        &batch_order,
+        next_free_quads,
+        default_batch_capacity_quads,
+    )
+}
 
-    let mut new_allocations = HashMap::with_capacity(sorted_batches.len());
+fn plan_stable_arena_allocations_for_order(
+    existing_allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+    batches: &[PackedQuadBatch],
+    batch_order: &[usize],
+    next_free_quads: usize,
+    default_batch_capacity_quads: usize,
+) -> (
+    HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+    Vec<u64>,
+    usize,
+    usize,
+) {
+    let mut new_allocations = HashMap::with_capacity(batch_order.len());
     let mut dirty_keys = Vec::new();
     let mut next_free = next_free_quads.max(
         existing_allocations
@@ -1411,7 +1441,8 @@ pub fn plan_stable_arena_allocations(
     );
     let mut total_required_quads = 0;
 
-    for batch in sorted_batches {
+    for batch_index in batch_order.iter().copied() {
+        let batch = &batches[batch_index];
         let len = batch.quads.len();
         total_required_quads += len;
 
@@ -1538,14 +1569,17 @@ pub fn prepare_packed_quad_buffers(
         .batches
         .retain(|key, _| active_batch_keys.contains(key));
 
+    sort_packed_batch_order(&mut indirect_draw.batch_order, &extracted_batches.batches);
+
     // 2. Compute stable per-region allocations. Offsets do not shift when a
     // region grows, so unchanged regions keep their GPU data and bind group.
     let default_batch_capacity_quads =
         estimated_packed_region_capacity_quads(packed_region_size_from_env());
     let (mut new_allocations, mut dirty_batch_keys, mut total_required_quads, mut next_free_quads) =
-        plan_stable_arena_allocations(
+        plan_stable_arena_allocations_for_order(
             &arena.allocations,
             &extracted_batches.batches,
+            &indirect_draw.batch_order,
             arena.next_free_quads,
             default_batch_capacity_quads,
         );
@@ -1685,21 +1719,7 @@ pub fn prepare_packed_quad_buffers(
     arena.stats.free_quads = arena.capacity_quads.saturating_sub(total_required_quads);
     arena.stats.uploaded_bytes = uploaded_bytes;
 
-    // 6. Sort extracted batches by key to match allocations order deterministically
-    indirect_draw.batch_order.clear();
-    let batch_order_capacity = indirect_draw.batch_order.capacity();
-    if batch_order_capacity < extracted_batches.batches.len() {
-        indirect_draw
-            .batch_order
-            .reserve(extracted_batches.batches.len() - batch_order_capacity);
-    }
-    indirect_draw
-        .batch_order
-        .extend(0..extracted_batches.batches.len());
-    indirect_draw
-        .batch_order
-        .sort_by_key(|batch_index| extracted_batches.batches[*batch_index].key);
-
+    // 6. Use the sorted batch order from allocation planning to build indirect commands.
     let face_range_cull_enabled =
         env_flag_default(PACKED_FACE_RANGE_CULL_ENV, DEFAULT_PACKED_FACE_RANGE_CULL);
     let face_range_min_quads = packed_face_range_min_quads_from_env();
