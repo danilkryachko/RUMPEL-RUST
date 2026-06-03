@@ -3269,6 +3269,42 @@ fn build_generated_region_cache_entry(
 const SLIDING_WINDOW_PREFETCH_BUDGET_CAP: usize = 32;
 const STEADY_LOADED_REGION_PREFETCH_BUDGET: usize = 1;
 
+fn loaded_region_cache_is_warm(
+    loaded_regions: &[(i32, i32, u64)],
+    pending: &[(i32, i32, u64)],
+    region_cache: &crate::packed_quad_gpu_generation::GeneratedRegionCache,
+) -> bool {
+    pending.is_empty()
+        && loaded_regions
+            .iter()
+            .all(|(_, _, key)| region_cache.entries.contains_key(key))
+}
+
+fn maybe_process_steady_loaded_region_prefetch(
+    scratch: &mut PackedGpuGenerationRegionScratch,
+    region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
+    camera_chunk_x: i32,
+    camera_chunk_z: i32,
+    region_size: i32,
+    build: &GeneratedRegionCacheBuildContext<'_>,
+) -> usize {
+    if loaded_region_cache_is_warm(
+        scratch.loaded_regions.as_slice(),
+        scratch.pending_loaded_region_builds.as_slice(),
+        region_cache,
+    ) {
+        return 0;
+    }
+    process_steady_loaded_region_prefetch(
+        scratch,
+        region_cache,
+        camera_chunk_x,
+        camera_chunk_z,
+        region_size,
+        build,
+    )
+}
+
 fn prune_stale_pending_loaded_region_builds(
     pending: &mut Vec<(i32, i32, u64)>,
     loaded_region_keys: &[u64],
@@ -3896,7 +3932,7 @@ pub fn update_packed_gpu_generation_regions(
         .is_some_and(|previous| previous.matches_active_region_window(target))
         && !gpu_batches.batches.is_empty()
     {
-        let prefetched = process_steady_loaded_region_prefetch(
+        let prefetched = maybe_process_steady_loaded_region_prefetch(
             scratch,
             &mut region_cache,
             camera_chunk_x,
@@ -3932,7 +3968,7 @@ pub fn update_packed_gpu_generation_regions(
             gpu_batches.batch_structure_signature = batch_structure_signature;
             gpu_batches.summary = batch_summary;
         }
-        let prefetched = process_steady_loaded_region_prefetch(
+        let prefetched = maybe_process_steady_loaded_region_prefetch(
             scratch,
             &mut region_cache,
             camera_chunk_x,

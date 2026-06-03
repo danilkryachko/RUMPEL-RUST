@@ -228,6 +228,29 @@ Headless compare after fix: `.ai_tasks/generated_headless_compare_20260604_01031
 
 Static proof: `just verify`, `packed_gpu_generation_prepared_matches_structure_for_active_mask_refresh`.
 
+## Partial per-chunk generation dispatch (20260604)
+
+**Profile diagnosis (`010242`):** steady autopilot frames spent ~7–15ms in render tail (`render_manage_views_us` / `render_prepare_windows_us`) while `packed_generated_update_us` was ~23µs; `can_refresh_active_dispatch` still marked every active-mask rotation frame pending and ran full generate/finalize for all ~185 active chunks.
+
+| Change | File(s) | Effect |
+|--------|---------|--------|
+| Per-chunk `chunk_dispatched_generation` map | `packed_quad_renderer.rs` | Tracks last GPU-generated batch generation per chunk key |
+| Dirty-job subset + `generation_dispatch_count` | `packed_quad_renderer.rs` | Generate/finalize dispatches only chunks whose batch generation changed; skips `mark_pending` when dirty set empty |
+| Warm loaded-region prefetch fast path | `packed_quad_pipeline.rs` | Skips pending-queue drain when all loaded regions are cached |
+
+### Before / after (GUI `just profile-packed-gpu-generated`, settle=2s)
+
+| Metric | Before (`010242`) | After (`011102`) | Target |
+|--------|-------------------|------------------|--------|
+| `avg_raw_fps` | 129.4 | **131.0** | ≥150 |
+| `ge25` | 0/778 | **0/787** | ≤10/1000 |
+| `worst_frame_ms` | 24.83 | **24.04** | — |
+| worst `generated_update_us` | 24008 | **23001** | ≤55000 |
+
+Headless compare after fix: `.ai_tasks/generated_headless_compare_20260604_011145/` — generated `ge25=4`, `avg_raw_fps=1013.7`, worst **34.54ms**.
+
+Static proof: `just verify`, unit test `chunk_needs_gpu_generation_tracks_per_chunk_batch_generation`.
+
 ## References
 
 - Prior partial profile: `.ai_tasks/gpu_generated_profile_20260603_190618.md`
