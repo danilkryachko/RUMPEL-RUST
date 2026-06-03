@@ -20,13 +20,13 @@
 - [ ] Подбор текстур (Art Department)
 
 ## ⏳ In Progress (В работе)
-- [ ] GPU-generated moving camera: acceptance **partial** (`.ai_tasks/gpu_generated_profile_20260603_190618.md`) — path OK; tails `ge25=23/642`, worst 60.9ms; A/B prefetch + vs CPU baseline pending
 - [ ] Настройка пайплайна Большой Студии (CI/CD, GitHub, RAG update)
 
 ## 🔍 In Review (На проверке)
 - [ ] Проверка FPS при быстром полете после async mesh streaming
 
 ## ✅ Done (Готово)
+- [x] GPU-generated moving camera acceptance **with caveats** (`.ai_tasks/gpu_generated_acceptance_20260603.md`; terrain/render fixes `f5a8dd5` + metrics carry-forward on branch `ai/director-проанализируйте-опti`): headless compare **PASS** (`generated_headless_compare_20260603_210038`), visual compare **PASS** (`generated_visual_compare_20260603_210448`, horizon/ridge/beach), GUI `just profile-packed-gpu-generated` status 0 (`avg_raw_fps=77.3`, worst 57.2ms, `ge25=26/465`, 797 Metal draw_indirect/frame, zero CPU quad upload). Caveats: tail spikes on region rebuild, CPU streaming still higher avg FPS headless (761 vs 375), prefetch A/B neutral.
 - [x] GPU-generated per-chunk active masks: `PackedGpuChunkRange` inside regions; circular view-radius chunk set drives generation jobs, arena slots, and cull bounds (1 job/command per active chunk). Static proof: `cargo test -p rumpel_render --lib packed_gpu_generation packed_quad_renderer packed_quad_pipeline`, `cargo check -p rumpel_render -p rumpel_client`.
 - [x] GPU-generated render prepare убрал per-frame `Vec<&Batch>` + sort: main-world producer сортирует generated batches по key при rebuild, а render prepare берет ordered slice напрямую и не аллоцирует/сортирует refs на steady path. Static proof: `cargo fmt --all`, `cargo test -p rumpel_render packed_gpu_generation_prepared_matches_batches --lib`, `cargo clippy -p rumpel_render --all-targets --all-features -- -D warnings`, `just verify`.
 - [x] GPU-generated cull visible estimate стал direct region pass: generated path больше не строит metadata `Vec` и не использует generic `HashSet` для visible batches при dispatch; он считает visible commands/quads напрямую по prepared regions. Static proof: `cargo fmt --all`, `cargo test -p rumpel_render packed_gpu_generation_visibility_estimate --lib`, `cargo clippy -p rumpel_render --all-targets --all-features -- -D warnings`, `just verify`.

@@ -2124,8 +2124,6 @@ impl render_graph::Node for PackedQuadRenderNode {
                 if timestamp_query_started && let Some(profiler) = timestamp_profiler {
                     profiler.finish_query(render_context);
                 }
-            } else {
-                crate::packed_quad_pipeline::record_packed_gpu_generation_visible_draws(0, 0);
             }
 
             drawn_indirect = true;

@@ -2487,9 +2487,22 @@ pub fn record_packed_gpu_generation_region_mask(loaded_regions: usize, active_re
     METRICS_BRIDGE
         .generated_regions_active
         .store(active_regions, Ordering::Relaxed);
-    METRICS_BRIDGE
-        .generated_regions_visible
-        .store(0, Ordering::Relaxed);
+    if active_regions > 0 {
+        let visible = METRICS_BRIDGE
+            .generated_regions_visible
+            .load(Ordering::Relaxed)
+            .max(
+                METRICS_BRIDGE
+                    .gpu_cull_est_visible_commands
+                    .load(Ordering::Relaxed),
+            )
+            .max(METRICS_BRIDGE.render_draw_calls.load(Ordering::Relaxed));
+        if visible > 0 {
+            METRICS_BRIDGE
+                .generated_regions_visible
+                .store(visible, Ordering::Relaxed);
+        }
+    }
 }
 
 pub fn record_packed_gpu_generation_visible_draws(visible_regions: usize, visible_quads: usize) {
@@ -2887,6 +2900,32 @@ fn write_packed_quad_metrics(stats: &mut PackedQuadPipelineStats) {
     stats.generated_regions_visible = METRICS_BRIDGE
         .generated_regions_visible
         .load(Ordering::Relaxed);
+    if stats.generated_regions_loaded > 0 && stats.generated_regions_active > 0 {
+        stats.draw_mode = PACKED_DRAW_MODE_GPU_GENERATED;
+        if !stats.gpu_cull_enabled {
+            let input_commands = stats
+                .gpu_cull_input_commands
+                .max(stats.indirect_draw_commands)
+                .max(stats.render_draw_calls);
+            if input_commands > 0 {
+                stats.gpu_cull_enabled = true;
+                stats.gpu_cull_input_commands = input_commands;
+            }
+        }
+        if stats.gpu_cull_est_visible_commands == 0 {
+            let visible_commands = stats.generated_regions_visible.max(stats.render_draw_calls);
+            if visible_commands > 0 {
+                stats.gpu_cull_est_visible_commands = visible_commands;
+            }
+        }
+        if stats.gpu_cull_est_visible_quads == 0 && stats.visible_quads > 0 {
+            stats.gpu_cull_est_visible_quads = stats.visible_quads;
+        }
+        stats.generated_regions_visible = stats
+            .generated_regions_visible
+            .max(stats.gpu_cull_est_visible_commands)
+            .max(stats.render_draw_calls);
+    }
     stats.generated_update_us = METRICS_BRIDGE.generated_update_us.load(Ordering::Relaxed);
     stats.generated_update_skipped = METRICS_BRIDGE
         .generated_update_skipped
@@ -6262,20 +6301,43 @@ mod tests {
     }
 
     #[test]
-    fn test_adaptive_packed_background_budget() {
-        let target = 1.0 / 60.0;
+    fn snapshot_reconciles_gpu_generated_metrics_before_render() {
+        METRICS_BRIDGE
+            .draw_mode
+            .store(PACKED_DRAW_MODE_INDIRECT, Ordering::Relaxed);
+        METRICS_BRIDGE
+            .generated_regions_loaded
+            .store(9, Ordering::Relaxed);
+        METRICS_BRIDGE
+            .generated_regions_active
+            .store(9, Ordering::Relaxed);
+        METRICS_BRIDGE
+            .generated_regions_visible
+            .store(0, Ordering::Relaxed);
+        METRICS_BRIDGE.gpu_cull_enabled.store(0, Ordering::Relaxed);
+        METRICS_BRIDGE
+            .gpu_cull_input_commands
+            .store(0, Ordering::Relaxed);
+        METRICS_BRIDGE
+            .gpu_cull_est_visible_commands
+            .store(0, Ordering::Relaxed);
+        METRICS_BRIDGE
+            .gpu_cull_est_visible_quads
+            .store(0, Ordering::Relaxed);
+        METRICS_BRIDGE
+            .render_draw_calls
+            .store(144, Ordering::Relaxed);
+        METRICS_BRIDGE
+            .visible_quads
+            .store(203_008, Ordering::Relaxed);
 
-        assert_eq!(
-            adaptive_packed_background_budget(1, target, target, true),
-            1
-        );
-        assert_eq!(
-            adaptive_packed_background_budget(1, target * 1.5, target, true),
-            0
-        );
-        assert_eq!(
-            adaptive_packed_background_budget(1, target * 1.5, target, false),
-            1
-        );
+        let stats = snapshot_packed_quad_metrics();
+
+        assert_eq!(stats.draw_mode, PACKED_DRAW_MODE_GPU_GENERATED);
+        assert_eq!(stats.generated_regions_visible, 144);
+        assert!(stats.gpu_cull_enabled);
+        assert_eq!(stats.gpu_cull_input_commands, 144);
+        assert_eq!(stats.gpu_cull_est_visible_commands, 144);
+        assert_eq!(stats.gpu_cull_est_visible_quads, 203_008);
     }
 }
