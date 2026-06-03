@@ -3459,6 +3459,7 @@ pub struct PackedQuadStreamingState {
     pub building: HashMap<u64, Entity>,
     pub pending: Vec<PendingChunk>,
     pub active_render_chunks: HashSet<u64>,
+    pub previous_active_render_chunks: HashSet<u64>,
     pub last_center: Option<IVec2>,
     pub region_generations: HashMap<u64, u64>,
     pub pending_rebuild_regions: Vec<u64>,
@@ -3727,12 +3728,24 @@ pub fn stream_packed_quad_chunks(
     if state.last_center != Some(center) {
         let mut render_chunks = std::mem::take(&mut state.render_chunks);
         fill_packed_render_chunks_for_center(&mut render_chunks, center, view_radius);
-        let next_active_render_chunks = render_chunks
-            .iter()
-            .map(|chunk| pack_chunk_key(chunk.x, chunk.z))
-            .collect::<HashSet<_>>();
-        let previous_active_render_chunks =
-            std::mem::replace(&mut state.active_render_chunks, next_active_render_chunks);
+        let mut previous_active_render_chunks =
+            std::mem::take(&mut state.previous_active_render_chunks);
+        std::mem::swap(
+            &mut previous_active_render_chunks,
+            &mut state.active_render_chunks,
+        );
+        state.active_render_chunks.clear();
+        let active_render_capacity = state.active_render_chunks.capacity();
+        if active_render_capacity < render_chunks.len() {
+            state
+                .active_render_chunks
+                .reserve(render_chunks.len() - active_render_capacity);
+        }
+        state.active_render_chunks.extend(
+            render_chunks
+                .iter()
+                .map(|chunk| pack_chunk_key(chunk.x, chunk.z)),
+        );
         let despawn_radius_sq = despawn_radius * despawn_radius;
         let mut chunks_to_despawn = std::mem::take(&mut state.chunks_to_despawn);
         chunks_to_despawn.clear();
@@ -3796,6 +3809,7 @@ pub fn stream_packed_quad_chunks(
             }
         }
         state.membership_changes = membership_changes;
+        state.previous_active_render_chunks = previous_active_render_chunks;
 
         let mut pending = std::mem::take(&mut state.pending);
         pending.clear();
