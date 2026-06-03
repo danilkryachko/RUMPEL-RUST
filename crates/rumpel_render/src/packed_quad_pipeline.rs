@@ -3782,7 +3782,8 @@ pub fn stream_packed_quad_chunks(
         }
         state.membership_changes = membership_changes;
 
-        let mut pending = Vec::new();
+        let mut pending = std::mem::take(&mut state.pending);
+        pending.clear();
         for chunk in render_chunks {
             let key = pack_chunk_key(chunk.x, chunk.z);
             if !state.loaded.contains_key(&key) && !state.building.contains_key(&key) {
