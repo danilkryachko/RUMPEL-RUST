@@ -766,7 +766,7 @@ fn prepare_packed_gpu_generated_draw(
         return;
     };
 
-    let ordered_batches = extracted_batches.batches.as_slice();
+    let ordered_batches = extracted_batches.batches();
     let active_chunk_job_count =
         PackedGpuGenerationBatches::active_chunk_job_count(ordered_batches);
     let batch_signature = if extracted_batches.batch_signature == 0 {

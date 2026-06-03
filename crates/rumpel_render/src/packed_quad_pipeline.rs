@@ -3405,7 +3405,9 @@ fn finalize_generated_batch_update(
     if changed || gpu_batches.batches.is_empty() {
         gpu_batches.batch_signature = batch_signature;
         gpu_batches.summary = batch_summary;
-        std::mem::swap(&mut gpu_batches.batches, &mut scratch.generated_batches);
+        let mut generated_batches = Vec::new();
+        std::mem::swap(&mut generated_batches, &mut scratch.generated_batches);
+        gpu_batches.replace_batches(generated_batches);
 
         if context.log_update && changed {
             info!(
@@ -3614,12 +3616,16 @@ pub fn update_packed_gpu_generation_regions(
         .is_some_and(|previous| previous.matches_region_window_layout(target))
         && !gpu_batches.batches.is_empty()
     {
-        for batch in &mut gpu_batches.batches {
-            sync_gpu_chunk_range_active_flags(batch, &scratch.active_chunk_keys);
-        }
-        let batch_signature =
-            PackedGpuGenerationBatches::calculate_batch_signature(&gpu_batches.batches);
-        let batch_summary = PackedGpuGenerationBatches::summarize_batches(&gpu_batches.batches);
+        let (batch_signature, batch_summary) = {
+            let batches = gpu_batches.batches_mut();
+            for batch in batches.iter_mut() {
+                sync_gpu_chunk_range_active_flags(batch, &scratch.active_chunk_keys);
+            }
+            (
+                PackedGpuGenerationBatches::calculate_batch_signature(batches),
+                PackedGpuGenerationBatches::summarize_batches(batches),
+            )
+        };
         if gpu_batches.batch_signature != batch_signature {
             gpu_batches.batch_signature = batch_signature;
             gpu_batches.summary = batch_summary;
@@ -3651,8 +3657,8 @@ pub fn update_packed_gpu_generation_regions(
         scratch.carried_batches.clear();
         scratch.carried_batches.extend(
             gpu_batches
-                .batches
-                .drain(..)
+                .take_batches()
+                .into_iter()
                 .map(|batch| (batch.key, batch)),
         );
 

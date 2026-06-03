@@ -16,7 +16,7 @@ pub const PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN: usize =
 
 #[derive(Resource, Default, Clone)]
 pub struct PackedGpuGenerationBatches {
-    pub batches: Vec<PackedGpuGenerationBatch>,
+    pub batches: Arc<Vec<PackedGpuGenerationBatch>>,
     pub target: Option<PackedGpuGenerationTarget>,
     pub batch_signature: u64,
     pub summary: PackedGpuGenerationBatchSummary,
@@ -31,6 +31,26 @@ impl ExtractResource for PackedGpuGenerationBatches {
 }
 
 impl PackedGpuGenerationBatches {
+    #[must_use]
+    pub fn batches(&self) -> &[PackedGpuGenerationBatch] {
+        self.batches.as_slice()
+    }
+
+    pub fn batches_mut(&mut self) -> &mut Vec<PackedGpuGenerationBatch> {
+        Arc::make_mut(&mut self.batches)
+    }
+
+    pub fn replace_batches(&mut self, batches: Vec<PackedGpuGenerationBatch>) {
+        self.batches = Arc::new(batches);
+    }
+
+    pub fn take_batches(&mut self) -> Vec<PackedGpuGenerationBatch> {
+        match Arc::try_unwrap(std::mem::replace(&mut self.batches, Arc::new(Vec::new()))) {
+            Ok(batches) => batches,
+            Err(shared_batches) => shared_batches.as_ref().clone(),
+        }
+    }
+
     #[must_use]
     pub fn summarize_batches(
         batches: &[PackedGpuGenerationBatch],
@@ -770,6 +790,14 @@ mod tests {
         assert_eq!(std::mem::align_of::<PackedGpuSurfaceColumn>(), 4);
         assert_eq!(std::mem::size_of::<PackedGpuGenerationCounter>(), 16);
         assert_eq!(std::mem::align_of::<PackedGpuGenerationCounter>(), 4);
+    }
+
+    #[test]
+    fn packed_gpu_generation_extract_shares_batch_storage() {
+        let source = PackedGpuGenerationBatches::default();
+        let extracted = <PackedGpuGenerationBatches as ExtractResource>::extract_resource(&source);
+
+        assert!(Arc::ptr_eq(&source.batches, &extracted.batches));
     }
 
     #[test]
