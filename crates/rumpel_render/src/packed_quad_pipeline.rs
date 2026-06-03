@@ -845,16 +845,33 @@ fn fill_active_gpu_generation_chunk_keys(
 pub fn packed_region_count_for_radius(view_radius: i32, region_size: i32) -> usize {
     let radius = view_radius.max(0);
     let size = region_size.max(1);
-    let radius_sq = radius * radius;
-    let mut regions = HashSet::new();
-    for dz in -radius..=radius {
-        for dx in -radius..=radius {
-            if dx * dx + dz * dz <= radius_sq {
-                regions.insert(packed_region_origin_for_chunk(dx, dz, size));
+    let radius_sq = i64::from(radius) * i64::from(radius);
+    let (min_region_x, min_region_z) = packed_region_origin_for_chunk(-radius, -radius, size);
+    let (max_region_x, max_region_z) = packed_region_origin_for_chunk(radius, radius, size);
+
+    let mut count = 0usize;
+    for region_z in (min_region_z..=max_region_z).step_by(size as usize) {
+        let region_end_z = region_z + size - 1;
+        let closest_z = closest_distance_to_zero(region_z, region_end_z);
+        for region_x in (min_region_x..=max_region_x).step_by(size as usize) {
+            let region_end_x = region_x + size - 1;
+            let closest_x = closest_distance_to_zero(region_x, region_end_x);
+            if closest_x * closest_x + closest_z * closest_z <= radius_sq {
+                count = count.saturating_add(1);
             }
         }
     }
-    regions.len()
+    count
+}
+
+fn closest_distance_to_zero(range_start: i32, range_end: i32) -> i64 {
+    if range_start > 0 {
+        i64::from(range_start)
+    } else if range_end < 0 {
+        i64::from(-range_end)
+    } else {
+        0
+    }
 }
 
 pub fn estimated_packed_region_capacity_quads(region_size: i32) -> usize {
@@ -5512,6 +5529,34 @@ mod tests {
             2273280
         );
         assert_eq!(next_packed_quad_capacity(0, 2273280), 4194304);
+    }
+
+    #[test]
+    fn test_packed_region_count_matches_bruteforce() {
+        fn brute_force_count(view_radius: i32, region_size: i32) -> usize {
+            let radius = view_radius.max(0);
+            let size = region_size.max(1);
+            let radius_sq = radius * radius;
+            let mut regions = HashSet::new();
+            for dz in -radius..=radius {
+                for dx in -radius..=radius {
+                    if dx * dx + dz * dz <= radius_sq {
+                        regions.insert(packed_region_origin_for_chunk(dx, dz, size));
+                    }
+                }
+            }
+            regions.len()
+        }
+
+        for region_size in 1..=8 {
+            for radius in 0..=33 {
+                assert_eq!(
+                    packed_region_count_for_radius(radius, region_size),
+                    brute_force_count(radius, region_size),
+                    "region_size={region_size}, radius={radius}"
+                );
+            }
+        }
     }
 
     #[test]
