@@ -153,6 +153,13 @@ pub struct PackedGpuGenerationAllocationRequest {
     pub generation: u64,
 }
 
+/// Reusable scratch storage for GPU-generated arena allocation planning.
+#[derive(Debug, Default)]
+pub struct PackedGpuGenerationArenaAllocationPlanScratch {
+    pub remaining_existing: HashMap<u64, PackedQuadArenaAllocation>,
+    pub free_slots: Vec<PackedQuadArenaFreeSlot>,
+}
+
 /// Plans stable GPU-generated region slots with free-list reuse.
 ///
 /// Evicted regions and undersized slots are returned to a free list. New regions
@@ -181,34 +188,72 @@ pub fn plan_gpu_generated_arena_allocations_sorted(
     sorted_requests: &[PackedGpuGenerationAllocationRequest],
     slot_capacity: impl Fn(usize) -> usize,
 ) -> (HashMap<u64, PackedQuadArenaAllocation>, usize) {
+    let mut new_allocations = HashMap::with_capacity(sorted_requests.len());
+    let mut scratch = PackedGpuGenerationArenaAllocationPlanScratch::default();
+    let allocated_slot_quads = plan_gpu_generated_arena_allocations_sorted_into(
+        existing_allocations,
+        sorted_requests,
+        slot_capacity,
+        &mut new_allocations,
+        &mut scratch,
+    );
+    (new_allocations, allocated_slot_quads)
+}
+
+/// Plans stable GPU-generated region slots into reused output and scratch storage.
+///
+/// This is intended for render-prepare hot paths where sorted requests and
+/// persistent scratch buffers are available.
+pub fn plan_gpu_generated_arena_allocations_sorted_into(
+    existing_allocations: &HashMap<u64, PackedQuadArenaAllocation>,
+    sorted_requests: &[PackedGpuGenerationAllocationRequest],
+    slot_capacity: impl Fn(usize) -> usize,
+    new_allocations: &mut HashMap<u64, PackedQuadArenaAllocation>,
+    scratch: &mut PackedGpuGenerationArenaAllocationPlanScratch,
+) -> usize {
     debug_assert!(
         sorted_requests
             .windows(2)
             .all(|window| window[0].key <= window[1].key)
     );
-    let mut remaining_existing =
-        HashMap::with_capacity(existing_allocations.len().min(sorted_requests.len()));
-    let mut free_slots = Vec::new();
+    new_allocations.clear();
+    if new_allocations.capacity() < sorted_requests.len() {
+        new_allocations.reserve(sorted_requests.len() - new_allocations.capacity());
+    }
+
+    scratch.remaining_existing.clear();
+    let remaining_capacity = existing_allocations.len().min(sorted_requests.len());
+    if scratch.remaining_existing.capacity() < remaining_capacity {
+        scratch
+            .remaining_existing
+            .reserve(remaining_capacity - scratch.remaining_existing.capacity());
+    }
+
+    scratch.free_slots.clear();
+    if scratch.free_slots.capacity() < existing_allocations.len() {
+        scratch
+            .free_slots
+            .reserve(existing_allocations.len() - scratch.free_slots.capacity());
+    }
+
     for (key, allocation) in existing_allocations {
         if sorted_requests
             .binary_search_by_key(key, |request| request.key)
             .is_ok()
         {
-            remaining_existing.insert(*key, *allocation);
+            scratch.remaining_existing.insert(*key, *allocation);
         } else {
-            free_slots.push(PackedQuadArenaFreeSlot {
+            scratch.free_slots.push(PackedQuadArenaFreeSlot {
                 offset_quads: allocation.offset_quads,
                 capacity_quads: allocation.capacity_quads,
             });
         }
     }
 
-    let mut new_allocations = HashMap::with_capacity(sorted_requests.len());
-
     for request in sorted_requests.iter().copied() {
         let requested_quads = request.requested_quads.max(1);
 
-        if let Some(existing) = remaining_existing.remove(&request.key) {
+        if let Some(existing) = scratch.remaining_existing.remove(&request.key) {
             if requested_quads <= existing.capacity_quads {
                 new_allocations.insert(
                     request.key,
@@ -222,7 +267,7 @@ pub fn plan_gpu_generated_arena_allocations_sorted(
                 );
                 continue;
             }
-            free_slots.push(PackedQuadArenaFreeSlot {
+            scratch.free_slots.push(PackedQuadArenaFreeSlot {
                 offset_quads: existing.offset_quads,
                 capacity_quads: existing.capacity_quads,
             });
@@ -230,12 +275,12 @@ pub fn plan_gpu_generated_arena_allocations_sorted(
 
         let requested_capacity_quads = slot_capacity(requested_quads);
         let (offset_quads, capacity_quads) = if let Some(reused_slot) =
-            take_best_fit_arena_free_slot(&mut free_slots, requested_capacity_quads)
+            take_best_fit_arena_free_slot(&mut scratch.free_slots, requested_capacity_quads)
         {
             (reused_slot.offset_quads, reused_slot.capacity_quads)
         } else {
             (
-                arena_slot_high_water_mark(&new_allocations, &free_slots),
+                arena_slot_high_water_mark(new_allocations, &scratch.free_slots),
                 requested_capacity_quads,
             )
         };
@@ -252,8 +297,7 @@ pub fn plan_gpu_generated_arena_allocations_sorted(
         );
     }
 
-    let allocated_slot_quads = active_arena_slot_high_water_mark(&new_allocations);
-    (new_allocations, allocated_slot_quads)
+    active_arena_slot_high_water_mark(new_allocations)
 }
 
 fn take_best_fit_arena_free_slot(
@@ -574,8 +618,18 @@ mod tests {
             plan_gpu_generated_arena_allocations(&existing, &requests, slot_capacity);
         let sorted_plan =
             plan_gpu_generated_arena_allocations_sorted(&existing, &sorted_requests, slot_capacity);
+        let mut into_allocations = HashMap::with_capacity(8);
+        let mut into_scratch = PackedGpuGenerationArenaAllocationPlanScratch::default();
+        let into_high_water = plan_gpu_generated_arena_allocations_sorted_into(
+            &existing,
+            &sorted_requests,
+            slot_capacity,
+            &mut into_allocations,
+            &mut into_scratch,
+        );
 
         assert_eq!(sorted_plan, unsorted_plan);
+        assert_eq!((into_allocations, into_high_water), unsorted_plan);
     }
 
     #[test]

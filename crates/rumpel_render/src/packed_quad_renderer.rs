@@ -18,6 +18,7 @@ use bevy::{
 };
 use bevy_asset::{embedded_asset, load_embedded_asset};
 use std::{
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -217,6 +218,9 @@ struct PackedGpuGenerationBuffers {
     indirect_buffer: Option<Buffer>,
     indirect_capacity_commands: usize,
     allocation_requests: Vec<crate::packed_quad_buffer::PackedGpuGenerationAllocationRequest>,
+    allocation_plan: HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+    allocation_plan_scratch:
+        crate::packed_quad_buffer::PackedGpuGenerationArenaAllocationPlanScratch,
     planned_regions: Vec<PreparedPackedGpuGeneratedRegion>,
     jobs: Vec<PackedGpuGenerationJob>,
     columns: Vec<PackedGpuSurfaceColumn>,
@@ -826,12 +830,21 @@ fn prepare_packed_gpu_generated_draw(
                 generation: batch.generation,
             }
         }));
-    let (new_allocations, next_free_quads) =
-        crate::packed_quad_buffer::plan_gpu_generated_arena_allocations_sorted(
+    let next_free_quads = {
+        let PackedGpuGenerationBuffers {
+            allocation_requests,
+            allocation_plan,
+            allocation_plan_scratch,
+            ..
+        } = &mut *buffers;
+        crate::packed_quad_buffer::plan_gpu_generated_arena_allocations_sorted_into(
             &arena.allocations,
-            &buffers.allocation_requests,
+            allocation_requests,
             next_packed_gpu_generation_slot_capacity,
-        );
+            allocation_plan,
+            allocation_plan_scratch,
+        )
+    };
 
     buffers.planned_regions.clear();
     let planned_regions_capacity = buffers.planned_regions.capacity();
@@ -842,7 +855,7 @@ fn prepare_packed_gpu_generated_draw(
     }
     for (draw_command_index, batch) in ordered_batches.iter().enumerate() {
         let requested_quads = batch.max_output_quads.max(1);
-        let Some(allocation) = new_allocations.get(&batch.key) else {
+        let Some(allocation) = buffers.allocation_plan.get(&batch.key).copied() else {
             continue;
         };
 
@@ -877,7 +890,7 @@ fn prepare_packed_gpu_generated_draw(
         arena.generation = arena.generation.saturating_add(1);
     }
 
-    arena.allocations = new_allocations;
+    std::mem::swap(&mut arena.allocations, &mut buffers.allocation_plan);
     arena.next_free_quads = next_free_quads;
     arena.stats.used_quads = batch_summary.total_max_output_quads;
     arena.stats.allocated_slot_quads = next_free_quads;
