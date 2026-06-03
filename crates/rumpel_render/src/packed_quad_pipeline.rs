@@ -3467,6 +3467,7 @@ pub struct PackedQuadStreamingState {
     pub membership_changes: Vec<u64>,
     pub chunks_to_despawn: Vec<u64>,
     pub building_to_despawn: Vec<(u64, Entity)>,
+    pub render_chunks: Vec<PendingChunk>,
 }
 
 pub struct LoadedPackedQuadChunk {
@@ -3545,10 +3546,25 @@ fn packed_seam_safe_lod_step(pending: PendingChunk, min_cell_size: usize) -> usi
     own_step
 }
 
+#[cfg(test)]
 fn packed_render_chunks_for_center(center: IVec2, view_radius: i32) -> Vec<PendingChunk> {
+    let mut chunks = Vec::new();
+    fill_packed_render_chunks_for_center(&mut chunks, center, view_radius);
+    chunks
+}
+
+fn fill_packed_render_chunks_for_center(
+    chunks: &mut Vec<PendingChunk>,
+    center: IVec2,
+    view_radius: i32,
+) {
     let radius = view_radius.max(0);
     let radius_sq = radius * radius;
-    let mut chunks = Vec::with_capacity(packed_chunk_count_for_radius(radius));
+    chunks.clear();
+    let required_capacity = packed_chunk_count_for_radius(radius);
+    if chunks.capacity() < required_capacity {
+        chunks.reserve(required_capacity - chunks.capacity());
+    }
 
     for dz in -radius..=radius {
         for dx in -radius..=radius {
@@ -3565,8 +3581,6 @@ fn packed_render_chunks_for_center(center: IVec2, view_radius: i32) -> Vec<Pendi
             });
         }
     }
-
-    chunks
 }
 
 fn active_loaded_chunk_count(state: &PackedQuadStreamingState) -> usize {
@@ -3711,7 +3725,8 @@ pub fn stream_packed_quad_chunks(
     state.regions_to_sync.clear();
 
     if state.last_center != Some(center) {
-        let render_chunks = packed_render_chunks_for_center(center, view_radius);
+        let mut render_chunks = std::mem::take(&mut state.render_chunks);
+        fill_packed_render_chunks_for_center(&mut render_chunks, center, view_radius);
         let next_active_render_chunks = render_chunks
             .iter()
             .map(|chunk| pack_chunk_key(chunk.x, chunk.z))
@@ -3784,7 +3799,7 @@ pub fn stream_packed_quad_chunks(
 
         let mut pending = std::mem::take(&mut state.pending);
         pending.clear();
-        for chunk in render_chunks {
+        for chunk in render_chunks.iter().copied() {
             let key = pack_chunk_key(chunk.x, chunk.z);
             if !state.loaded.contains_key(&key) && !state.building.contains_key(&key) {
                 pending.push(chunk);
@@ -3794,6 +3809,7 @@ pub fn stream_packed_quad_chunks(
         // Sort pending chunks: prioritize closest chunks first (closer distance_sq means pop last)
         pending.sort_by_key(|chunk| std::cmp::Reverse(chunk.distance_sq));
         state.pending = pending;
+        state.render_chunks = render_chunks;
         state.last_center = Some(center);
     }
 
