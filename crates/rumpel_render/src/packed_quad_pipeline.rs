@@ -188,14 +188,21 @@ pub struct PreparedPackedQuadBatches {
 /// CPU-side block texture tile palette used by the packed renderer.
 #[derive(Resource, Clone)]
 pub struct PackedQuadBlockTexturePalette {
-    pub tiles: Vec<[u32; 4]>,
+    pub tiles: Arc<Vec<[u32; 4]>>,
 }
 
 impl Default for PackedQuadBlockTexturePalette {
     fn default() -> Self {
         Self {
-            tiles: vec![[3, 3, 3, 0]; PACKED_BLOCK_PALETTE_LEN],
+            tiles: Arc::new(vec![[3, 3, 3, 0]; PACKED_BLOCK_PALETTE_LEN]),
         }
+    }
+}
+
+impl PackedQuadBlockTexturePalette {
+    #[must_use]
+    pub fn tiles(&self) -> &[[u32; 4]] {
+        self.tiles.as_slice()
     }
 }
 
@@ -1608,17 +1615,23 @@ pub fn prepare_packed_quad_buffers(
         return;
     };
 
-    if prepared_palette.buffer.is_none() || prepared_palette.tiles != extracted_palette.tiles {
-        let size_bytes = (extracted_palette.tiles.len() * std::mem::size_of::<[u32; 4]>()) as u64;
+    let extracted_palette_tiles = extracted_palette.tiles();
+    if prepared_palette.buffer.is_none()
+        || prepared_palette.tiles.as_slice() != extracted_palette_tiles
+    {
+        let size_bytes = std::mem::size_of_val(extracted_palette_tiles) as u64;
         let buffer = render_device.create_buffer(&BufferDescriptor {
             label: Some("packed_quad_block_texture_palette_buffer"),
             size: size_bytes,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        render_queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&extracted_palette.tiles));
+        render_queue.write_buffer(&buffer, 0, bytemuck::cast_slice(extracted_palette_tiles));
         prepared_palette.buffer = Some(buffer);
-        prepared_palette.tiles = extracted_palette.tiles.clone();
+        prepared_palette.tiles.clear();
+        prepared_palette
+            .tiles
+            .extend_from_slice(extracted_palette_tiles);
     }
 
     let Some(texture_palette_buffer) = prepared_palette.buffer.as_ref() else {
@@ -3016,8 +3029,8 @@ pub fn sync_packed_quad_block_texture_palette(
         }
     }
 
-    if palette.tiles != tiles {
-        palette.tiles = tiles;
+    if palette.tiles.as_slice() != tiles.as_slice() {
+        palette.tiles = Arc::new(tiles);
     }
 }
 
@@ -4939,6 +4952,15 @@ mod tests {
         registry.register_block(test_block("stone", true));
         registry.register_block(test_block("sand", true));
         registry
+    }
+
+    #[test]
+    fn packed_quad_block_texture_palette_extract_shares_tiles() {
+        let source = PackedQuadBlockTexturePalette::default();
+        let extracted =
+            <PackedQuadBlockTexturePalette as ExtractResource>::extract_resource(&source);
+
+        assert!(Arc::ptr_eq(&source.tiles, &extracted.tiles));
     }
 
     #[test]
