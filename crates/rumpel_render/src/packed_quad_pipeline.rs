@@ -25,7 +25,7 @@ use rumpel_world::world_gen::{WorldGenerationContext, terrain_surface_contract_v
 use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuChunkRange, PackedGpuGenerationBatch,
     PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationParams,
-    PackedGpuGenerationTarget, active_gpu_generation_chunk_keys, order_loaded_regions_for_prefetch,
+    PackedGpuGenerationTarget, order_loaded_regions_for_prefetch,
     packed_gpu_generation_columns_per_chunk, packed_gpu_generation_lod_for_cell_size,
     packed_gpu_generation_prefetch_budget_from_env, region_has_active_chunks_in_set,
     sync_gpu_chunk_range_active_flags,
@@ -145,7 +145,9 @@ pub struct PackedGpuGenerationRegionScratch {
     loaded_regions: Vec<(i32, i32, u64)>,
     active_regions: Vec<(i32, i32, u64)>,
     prefetch_candidates: Vec<(i32, i32, u64)>,
+    active_chunk_keys: HashSet<u64>,
     generated_batches: Vec<PackedGpuGenerationBatch>,
+    carried_batches: HashMap<u64, PackedGpuGenerationBatch>,
 }
 
 /// Represents a prepared batch of packed voxel quads in the Render World.
@@ -811,6 +813,28 @@ pub fn packed_chunk_count_for_radius(view_radius: i32) -> usize {
     count
 }
 
+fn fill_active_gpu_generation_chunk_keys(
+    keys: &mut HashSet<u64>,
+    view_center: IVec2,
+    view_radius: i32,
+) {
+    keys.clear();
+    let radius = view_radius.max(0);
+    let diameter = (radius as usize).saturating_mul(2).saturating_add(1);
+    let max_candidates = diameter.saturating_mul(diameter);
+    reserve_hash_set_capacity(keys, max_candidates);
+
+    let radius_sq = radius * radius;
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx * dx + dz * dz > radius_sq {
+                continue;
+            }
+            keys.insert(pack_chunk_key(view_center.x + dx, view_center.y + dz));
+        }
+    }
+}
+
 pub fn packed_region_count_for_radius(view_radius: i32, region_size: i32) -> usize {
     let radius = view_radius.max(0);
     let size = region_size.max(1);
@@ -1421,6 +1445,13 @@ fn reserve_vec_capacity<T>(items: &mut Vec<T>, capacity: usize) {
 }
 
 fn reserve_hash_map_capacity<K: Eq + Hash, V>(items: &mut HashMap<K, V>, capacity: usize) {
+    let current_capacity = items.capacity();
+    if current_capacity < capacity {
+        items.reserve(capacity - current_capacity);
+    }
+}
+
+fn reserve_hash_set_capacity<T: Eq + Hash>(items: &mut HashSet<T>, capacity: usize) {
     let current_capacity = items.capacity();
     if current_capacity < capacity {
         items.reserve(capacity - current_capacity);
@@ -3166,7 +3197,44 @@ fn prefetch_loaded_generated_regions(
     camera_chunk_z: i32,
     build: &GeneratedRegionCacheBuildContext<'_>,
 ) -> usize {
-    let budget = packed_gpu_generation_prefetch_budget_from_env();
+    prefetch_loaded_generated_regions_with_budget(
+        scratch,
+        region_cache,
+        camera_chunk_x,
+        camera_chunk_z,
+        build,
+        packed_gpu_generation_prefetch_budget_from_env(),
+    )
+}
+
+const SLIDING_WINDOW_PREFETCH_BUDGET_CAP: usize = 32;
+
+fn sliding_window_prefetch_budget(
+    scratch: &PackedGpuGenerationRegionScratch,
+    region_cache: &crate::packed_quad_gpu_generation::GeneratedRegionCache,
+) -> usize {
+    let normal = packed_gpu_generation_prefetch_budget_from_env();
+    let missing_loaded = scratch
+        .loaded_regions
+        .iter()
+        .filter(|(_, _, key)| !region_cache.entries.contains_key(key))
+        .count();
+    if missing_loaded == 0 {
+        return normal;
+    }
+    normal
+        .max(missing_loaded)
+        .min(SLIDING_WINDOW_PREFETCH_BUDGET_CAP)
+}
+
+fn prefetch_loaded_generated_regions_with_budget(
+    scratch: &mut PackedGpuGenerationRegionScratch,
+    region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
+    camera_chunk_x: i32,
+    camera_chunk_z: i32,
+    build: &GeneratedRegionCacheBuildContext<'_>,
+    budget: usize,
+) -> usize {
     if budget == 0 {
         return 0;
     }
@@ -3209,6 +3277,157 @@ fn prefetch_loaded_generated_regions(
     }
 
     prefetched
+}
+
+struct GeneratedBatchAssemblyStats {
+    cache_hits: usize,
+    cache_misses: usize,
+    cache_invalidated: usize,
+    batch_reuse: usize,
+}
+
+struct GeneratedBatchUpdateContext {
+    target: PackedGpuGenerationTarget,
+    loaded_regions: usize,
+    generated_batch_count: usize,
+    cache_evicted: usize,
+    prefetched: usize,
+    log_update: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_generated_batches_for_active_regions(
+    scratch: &mut PackedGpuGenerationRegionScratch,
+    region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
+    contract: PackedGpuGenerationCacheContract,
+    contract_generation: u64,
+    region_size: i32,
+    edit_store: &WorldEditStore,
+    cache_frame: u64,
+    cache_build: &GeneratedRegionCacheBuildContext<'_>,
+) -> GeneratedBatchAssemblyStats {
+    scratch.generated_batches.clear();
+    let mut stats = GeneratedBatchAssemblyStats {
+        cache_hits: 0,
+        cache_misses: 0,
+        cache_invalidated: 0,
+        batch_reuse: 0,
+    };
+
+    for (region_origin_x, region_origin_z, region_key) in scratch.active_regions.iter().copied() {
+        if let Some(mut batch) = scratch.carried_batches.remove(&region_key)
+            && batch.generation == contract_generation
+        {
+            sync_gpu_chunk_range_active_flags(&mut batch, &scratch.active_chunk_keys);
+            scratch.generated_batches.push(batch);
+            stats.batch_reuse = stats.batch_reuse.saturating_add(1);
+            continue;
+        }
+
+        if let Some(mut batch) = reuse_generated_region_cache_entry(
+            region_cache,
+            region_key,
+            region_origin_x,
+            region_origin_z,
+            region_size,
+            contract,
+            edit_store,
+            cache_frame,
+        ) {
+            stats.cache_hits = stats.cache_hits.saturating_add(1);
+            sync_gpu_chunk_range_active_flags(&mut batch, &scratch.active_chunk_keys);
+            scratch.generated_batches.push(batch);
+            continue;
+        }
+
+        if let Some(stale) = region_cache.entries.remove(&region_key) {
+            stats.cache_invalidated = stats.cache_invalidated.saturating_add(1);
+            let invalidated_by_edits = edit_store.region_has_edits_since(
+                region_origin_x,
+                region_origin_z,
+                region_size,
+                stale.edit_store_generation,
+            );
+            info!(
+                region_key,
+                old_generation = stale.generation,
+                new_generation = contract_generation,
+                invalidated_by_edits,
+                old_edit_store_generation = stale.edit_store_generation,
+                edit_store_generation = edit_store.generation(),
+                "PACKED GPU GENERATION: invalidated stale generated region cache entry"
+            );
+        } else {
+            stats.cache_misses = stats.cache_misses.saturating_add(1);
+        }
+
+        let entry = build_generated_region_cache_entry(
+            region_origin_x,
+            region_origin_z,
+            region_key,
+            cache_build,
+        );
+        let mut batch = entry.to_batch();
+        sync_gpu_chunk_range_active_flags(&mut batch, &scratch.active_chunk_keys);
+        region_cache.entries.insert(region_key, entry);
+        scratch.generated_batches.push(batch);
+    }
+
+    scratch.generated_batches.sort_by_key(|batch| batch.key);
+    stats
+}
+
+fn finalize_generated_batch_update(
+    cpu_batches: &mut PackedQuadBatches,
+    gpu_batches: &mut PackedGpuGenerationBatches,
+    scratch: &mut PackedGpuGenerationRegionScratch,
+    stats: GeneratedBatchAssemblyStats,
+    context: GeneratedBatchUpdateContext,
+    update_started: Instant,
+) {
+    cpu_batches.batches.clear();
+    record_packed_gpu_generation_region_mask(context.loaded_regions, context.generated_batch_count);
+    record_packed_gpu_generation_cache_lifecycle(
+        stats.cache_hits.saturating_add(stats.batch_reuse),
+        stats.cache_misses,
+        stats.cache_invalidated,
+        context.cache_evicted,
+        context.prefetched,
+    );
+
+    let batch_signature =
+        PackedGpuGenerationBatches::calculate_batch_signature(&scratch.generated_batches);
+    let batch_summary = PackedGpuGenerationBatches::summarize_batches(&scratch.generated_batches);
+    let changed = gpu_batches.batch_signature != batch_signature;
+
+    gpu_batches.target = Some(context.target);
+
+    if changed || gpu_batches.batches.is_empty() {
+        gpu_batches.batch_signature = batch_signature;
+        gpu_batches.summary = batch_summary;
+        std::mem::swap(&mut gpu_batches.batches, &mut scratch.generated_batches);
+
+        if context.log_update && changed {
+            info!(
+                region_size = context.target.region_size,
+                region_radius = context.target.region_radius,
+                generation = context.target.contract_generation,
+                loaded_regions = context.loaded_regions,
+                active_regions = gpu_batches.batches.len(),
+                batches = gpu_batches.batches.len(),
+                columns = gpu_batches.summary.total_column_count,
+                max_output_quads = gpu_batches.summary.total_max_output_quads,
+                batch_reuse = stats.batch_reuse,
+                cache_hits = stats.cache_hits,
+                cache_misses = stats.cache_misses,
+                "PACKED GPU GENERATION: updated compact column source batches for new camera target"
+            );
+        }
+    }
+    scratch.generated_batches.clear();
+    scratch.carried_batches.clear();
+
+    record_packed_gpu_generation_update(elapsed_us(update_started), false);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3299,10 +3518,10 @@ pub fn update_packed_gpu_generation_regions(
     };
     let view_center = IVec2::new(camera_chunk_x, camera_chunk_z);
     let view_radius = packed_view_radius_from_env();
-    let active_chunk_keys = active_gpu_generation_chunk_keys(view_center, view_radius);
     let generated_region_side = region_radius.saturating_mul(2).saturating_add(1).max(1) as usize;
     let loaded_region_capacity = generated_region_side.saturating_mul(generated_region_side);
     let scratch = &mut *region_scratch;
+    fill_active_gpu_generation_chunk_keys(&mut scratch.active_chunk_keys, view_center, view_radius);
     scratch.loaded_region_keys.clear();
     scratch.loaded_regions.clear();
     if scratch.loaded_region_keys.capacity() < loaded_region_capacity {
@@ -3336,7 +3555,7 @@ pub fn update_packed_gpu_generation_regions(
                 region_origin_x,
                 region_origin_z,
                 region_size,
-                &active_chunk_keys,
+                &scratch.active_chunk_keys,
             ) {
                 scratch
                     .active_regions
@@ -3352,8 +3571,9 @@ pub fn update_packed_gpu_generation_regions(
                 .iter()
                 .map(|(_, _, region_key)| *region_key),
         );
-    let (active_chunk_count, active_chunk_hash) =
-        PackedGpuGenerationTarget::active_chunk_signature(active_chunk_keys.iter().copied());
+    let (active_chunk_count, active_chunk_hash) = PackedGpuGenerationTarget::active_chunk_signature(
+        scratch.active_chunk_keys.iter().copied(),
+    );
     let target = PackedGpuGenerationTarget::new(
         camera_chunk_x,
         camera_chunk_z,
@@ -3395,7 +3615,7 @@ pub fn update_packed_gpu_generation_regions(
         && !gpu_batches.batches.is_empty()
     {
         for batch in &mut gpu_batches.batches {
-            sync_gpu_chunk_range_active_flags(batch, &active_chunk_keys);
+            sync_gpu_chunk_range_active_flags(batch, &scratch.active_chunk_keys);
         }
         let batch_signature =
             PackedGpuGenerationBatches::calculate_batch_signature(&gpu_batches.batches);
@@ -3418,112 +3638,100 @@ pub fn update_packed_gpu_generation_regions(
         return;
     }
 
-    scratch.generated_batches.clear();
-    let mut cache_hits = 0usize;
-    let mut cache_misses = 0usize;
-    let mut cache_invalidated = 0usize;
-
-    for (region_origin_x, region_origin_z, region_key) in scratch.active_regions.iter().copied() {
-        if let Some(mut batch) = reuse_generated_region_cache_entry(
-            &mut region_cache,
-            region_key,
-            region_origin_x,
-            region_origin_z,
-            region_size,
-            contract,
-            &edit_store,
-            cache_frame,
-        ) {
-            cache_hits = cache_hits.saturating_add(1);
-            sync_gpu_chunk_range_active_flags(&mut batch, &active_chunk_keys);
-            scratch.generated_batches.push(batch);
-            continue;
-        }
-
-        if let Some(stale) = region_cache.entries.remove(&region_key) {
-            cache_invalidated = cache_invalidated.saturating_add(1);
-            let invalidated_by_edits = edit_store.region_has_edits_since(
-                region_origin_x,
-                region_origin_z,
-                region_size,
-                stale.edit_store_generation,
-            );
-            info!(
-                region_key,
-                old_generation = stale.generation,
-                new_generation = contract_generation,
-                invalidated_by_edits,
-                old_edit_store_generation = stale.edit_store_generation,
-                edit_store_generation,
-                "PACKED GPU GENERATION: invalidated stale generated region cache entry"
-            );
-        } else {
-            cache_misses = cache_misses.saturating_add(1);
-        }
-
-        let entry = build_generated_region_cache_entry(
-            region_origin_x,
-            region_origin_z,
-            region_key,
-            &cache_build,
-        );
-        let mut batch = entry.to_batch();
-        sync_gpu_chunk_range_active_flags(&mut batch, &active_chunk_keys);
-        region_cache.entries.insert(region_key, entry);
-        scratch.generated_batches.push(batch);
-    }
-    scratch.generated_batches.sort_by_key(|batch| batch.key);
-    let generated_batch_count = scratch.generated_batches.len();
+    let sliding_shift = gpu_batches.target.is_some_and(|previous| {
+        previous.matches_sliding_window_contract(target) && !gpu_batches.batches.is_empty()
+    });
 
     let cache_evicted = retain_generated_region_cache_entries_for_loaded_keys(
         &mut region_cache,
         scratch.loaded_region_keys.as_mut_slice(),
     );
-    let prefetched = prefetch_loaded_generated_regions(
+
+    if sliding_shift {
+        scratch.carried_batches.clear();
+        scratch.carried_batches.extend(
+            gpu_batches
+                .batches
+                .drain(..)
+                .map(|batch| (batch.key, batch)),
+        );
+
+        let stats = assemble_generated_batches_for_active_regions(
+            scratch,
+            &mut region_cache,
+            contract,
+            contract_generation,
+            region_size,
+            &edit_store,
+            cache_frame,
+            &cache_build,
+        );
+        let prefetched = prefetch_loaded_generated_regions(
+            scratch,
+            &mut region_cache,
+            camera_chunk_x,
+            camera_chunk_z,
+            &cache_build,
+        );
+        let log_update = stats.cache_misses > 0 || stats.cache_invalidated > 0;
+        let generated_batch_count = scratch.generated_batches.len();
+
+        finalize_generated_batch_update(
+            &mut cpu_batches,
+            &mut gpu_batches,
+            scratch,
+            stats,
+            GeneratedBatchUpdateContext {
+                target,
+                loaded_regions,
+                generated_batch_count,
+                cache_evicted,
+                prefetched,
+                log_update,
+            },
+            update_started,
+        );
+        return;
+    }
+
+    let prefetch_budget = sliding_window_prefetch_budget(scratch, &region_cache);
+    let prefetched = prefetch_loaded_generated_regions_with_budget(
         scratch,
         &mut region_cache,
         camera_chunk_x,
         camera_chunk_z,
         &cache_build,
+        prefetch_budget,
     );
 
-    cpu_batches.batches.clear();
-    record_packed_gpu_generation_region_mask(loaded_regions, generated_batch_count);
-    record_packed_gpu_generation_cache_lifecycle(
-        cache_hits,
-        cache_misses,
-        cache_invalidated,
-        cache_evicted,
-        prefetched,
+    scratch.carried_batches.clear();
+    let stats = assemble_generated_batches_for_active_regions(
+        scratch,
+        &mut region_cache,
+        contract,
+        contract_generation,
+        region_size,
+        &edit_store,
+        cache_frame,
+        &cache_build,
     );
+    let generated_batch_count = scratch.generated_batches.len();
 
-    let batch_signature =
-        PackedGpuGenerationBatches::calculate_batch_signature(&scratch.generated_batches);
-    let batch_summary = PackedGpuGenerationBatches::summarize_batches(&scratch.generated_batches);
-    let changed = gpu_batches.batch_signature != batch_signature;
-
-    gpu_batches.target = Some(target);
-
-    if changed {
-        gpu_batches.batch_signature = batch_signature;
-        gpu_batches.summary = batch_summary;
-        std::mem::swap(&mut gpu_batches.batches, &mut scratch.generated_batches);
-
-        info!(
-            region_size,
-            region_radius,
-            generation = contract_generation,
+    finalize_generated_batch_update(
+        &mut cpu_batches,
+        &mut gpu_batches,
+        scratch,
+        stats,
+        GeneratedBatchUpdateContext {
+            target,
             loaded_regions,
-            active_regions = gpu_batches.batches.len(),
-            batches = gpu_batches.batches.len(),
-            columns = gpu_batches.summary.total_column_count,
-            max_output_quads = gpu_batches.summary.total_max_output_quads,
-            "PACKED GPU GENERATION: updated compact column source batches for new camera target"
-        );
-    }
-    scratch.generated_batches.clear();
-
-    record_packed_gpu_generation_update(elapsed_us(update_started), false);
+            generated_batch_count,
+            cache_evicted,
+            prefetched,
+            log_update: true,
+        },
+        update_started,
+    );
 }
 
 /// Region-grid half-width in region tiles needed to cover a circular chunk view radius.
@@ -5194,6 +5402,27 @@ mod tests {
         assert!(keys.contains(&pack_chunk_key(10, -4)));
         assert!(keys.contains(&pack_chunk_key(12, -4)));
         assert!(!keys.contains(&pack_chunk_key(13, -4)));
+    }
+
+    #[test]
+    fn test_fill_active_gpu_generation_chunk_keys_reuses_capacity() {
+        let mut keys = HashSet::with_capacity(32);
+
+        fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 2);
+
+        assert_eq!(keys.len(), 13);
+        assert!(keys.contains(&pack_chunk_key(10, -4)));
+        assert!(keys.contains(&pack_chunk_key(12, -4)));
+        assert!(!keys.contains(&pack_chunk_key(13, -4)));
+
+        let capacity_after_radius_two = keys.capacity();
+        fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 1);
+
+        assert_eq!(keys.len(), 5);
+        assert_eq!(keys.capacity(), capacity_after_radius_two);
+        assert!(keys.contains(&pack_chunk_key(10, -4)));
+        assert!(keys.contains(&pack_chunk_key(11, -4)));
+        assert!(!keys.contains(&pack_chunk_key(12, -4)));
     }
 
     #[test]

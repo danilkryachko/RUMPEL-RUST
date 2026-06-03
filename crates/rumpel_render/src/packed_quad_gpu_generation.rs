@@ -255,6 +255,16 @@ impl PackedGpuGenerationTarget {
             && self.active_region_hash == other.active_region_hash
     }
 
+    /// Same loaded-window dimensions and source contract, but center/active set may differ.
+    #[must_use]
+    pub fn matches_sliding_window_contract(self, other: Self) -> bool {
+        self.region_size == other.region_size
+            && self.region_radius == other.region_radius
+            && self.view_radius == other.view_radius
+            && self.contract_generation == other.contract_generation
+            && self.edit_store_generation == other.edit_store_generation
+    }
+
     #[must_use]
     pub fn matches_active_region_window(self, other: Self) -> bool {
         self.matches_region_window_layout(other)
@@ -1042,6 +1052,9 @@ mod tests {
         assert!(!base.matches_active_region_window(changed_active_region));
         assert!(!base.matches_active_region_window(changed_active_chunk));
         assert!(base.matches_region_window_layout(changed_active_chunk));
+        assert!(base.matches_sliding_window_contract(moved));
+        assert!(base.matches_sliding_window_contract(changed_active_region));
+        assert!(!base.matches_sliding_window_contract(edited));
         assert_eq!(base.loaded_regions(), 9);
         assert_eq!(
             PackedGpuGenerationTarget::new(

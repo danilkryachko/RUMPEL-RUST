@@ -76,7 +76,7 @@ Settings: `profile_seconds=5`, `warmup_seconds=2`, `capture_delay=8`, `view_radi
 ## Known caveats
 
 1. **~189 `draw_indirect`/frame on Metal** — down from 797 via CPU-matched visible index loop; still per-chunk (not single MDI) because macOS Metal lacks `MULTI_DRAW_INDIRECT_COUNT` and `multi_draw_indirect` breaks `first_instance`.
-2. **Tail spikes** — region-window shifts still hit ~50–55 ms GUI worst frames (`generated_update_us` ~54 ms on worst_packed); chunk-mask-only moves now skip full rebuild.
+2. **Tail spikes** — region-window shifts improved via sliding batch reuse (~52ms GUI worst `generated_update_us` vs ~54ms; 61/62 regions reused on worst shift frame, 1 edge cache miss). Chunk-mask-only moves still skip full rebuild.
 3. **Headless vs GUI region window** — headless compare fixes `region_radius=1` (9 active regions); GUI autopilot loads wider window (62–81 regions).
 4. **Metrics timing** — worst_packed snapshot is taken after main-world update, before render; reconciliation + bridge carry-forward keep acceptance fields positive (fixed false `generated_regions_visible=0` failure).
 
@@ -102,6 +102,29 @@ Settings: `profile_seconds=5`, `warmup_seconds=2`, `capture_delay=8`, `view_radi
 | Headless generated | `ge25` | 9 | **4** |
 
 Logs: GUI `.ai_tasks/rumpel_client_packed_20260603_211341.stdout.log`, headless `.ai_tasks/generated_headless_compare_20260603_211402/`.
+
+## Sliding-window reuse pass (20260603, post-`8f31b1c`)
+
+| Change | File(s) | Effect |
+|--------|---------|--------|
+| `matches_sliding_window_contract` | `packed_quad_gpu_generation.rs` | Detects center-origin shift with stable region/view/contract |
+| Incremental batch carry + assemble | `packed_quad_pipeline.rs` | Reuses in-flight batches by region key on window shift; builds only edge cache misses |
+| Prefetch ordering | `packed_quad_pipeline.rs` | Shift path assembles first (reuse), then normal-budget edge prefetch; full rebuild prefetches before assemble |
+
+### Before / after (same recipes)
+
+| Profile | Metric | Before (`78d0b29`) | After |
+|---------|--------|-------------------|-------|
+| GUI `just profile-packed-gpu-generated` | `avg_raw_fps` | 134.1 | **167.8** |
+| GUI | `worst_frame_ms` | 55.08 | **53.95** |
+| GUI | `ge25` | 22/807 | **21/1010** |
+| GUI | `packed_render_draw_calls` | 189 | **185** |
+| GUI | `generated_update_us` worst | ~54000 | **52757** (61 reuse + 1 miss on shift) |
+| Headless generated | `worst_frame_ms` | 49.81 | **49.78** |
+| Headless generated | `generated_update_us` worst | — | **48529** |
+| Visual horizon generated | `worst_frame_ms` | 48.95 | **21.30** |
+
+Logs: GUI `.ai_tasks/rumpel_client_packed_20260603_222741.stdout.log`, headless `.ai_tasks/generated_headless_compare_20260603_222803/`, visual `.ai_tasks/generated_visual_compare_20260603_222831/`.
 
 ## References
 
