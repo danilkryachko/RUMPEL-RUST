@@ -165,7 +165,27 @@ pub fn plan_gpu_generated_arena_allocations(
 ) -> (HashMap<u64, PackedQuadArenaAllocation>, usize) {
     let mut sorted_requests = requests.to_vec();
     sorted_requests.sort_by_key(|request| request.key);
+    plan_gpu_generated_arena_allocations_sorted(
+        existing_allocations,
+        &sorted_requests,
+        slot_capacity,
+    )
+}
 
+/// Plans stable GPU-generated region slots for requests already sorted by key.
+///
+/// This is the render-prepare hot path variant; callers that cannot guarantee
+/// sorted input should use `plan_gpu_generated_arena_allocations`.
+pub fn plan_gpu_generated_arena_allocations_sorted(
+    existing_allocations: &HashMap<u64, PackedQuadArenaAllocation>,
+    sorted_requests: &[PackedGpuGenerationAllocationRequest],
+    slot_capacity: impl Fn(usize) -> usize,
+) -> (HashMap<u64, PackedQuadArenaAllocation>, usize) {
+    debug_assert!(
+        sorted_requests
+            .windows(2)
+            .all(|window| window[0].key <= window[1].key)
+    );
     let mut remaining_existing =
         HashMap::with_capacity(existing_allocations.len().min(sorted_requests.len()));
     let mut free_slots = Vec::new();
@@ -185,7 +205,7 @@ pub fn plan_gpu_generated_arena_allocations(
 
     let mut new_allocations = HashMap::with_capacity(sorted_requests.len());
 
-    for request in sorted_requests {
+    for request in sorted_requests.iter().copied() {
         let requested_quads = request.requested_quads.max(1);
 
         if let Some(existing) = remaining_existing.remove(&request.key) {
@@ -503,6 +523,59 @@ mod tests {
         }
 
         assert!(high_water <= 3 * 1024);
+    }
+
+    #[test]
+    fn test_plan_gpu_generated_arena_allocations_sorted_matches_unsorted() {
+        let slot_capacity = |required: usize| required.max(16).next_power_of_two();
+        let existing = HashMap::from([
+            (
+                1_u64,
+                PackedQuadArenaAllocation {
+                    key: 1,
+                    offset_quads: 0,
+                    len_quads: 128,
+                    capacity_quads: 256,
+                    generation: 1,
+                },
+            ),
+            (
+                4_u64,
+                PackedQuadArenaAllocation {
+                    key: 4,
+                    offset_quads: 256,
+                    len_quads: 128,
+                    capacity_quads: 512,
+                    generation: 1,
+                },
+            ),
+        ]);
+        let requests = [
+            PackedGpuGenerationAllocationRequest {
+                key: 4,
+                requested_quads: 300,
+                generation: 2,
+            },
+            PackedGpuGenerationAllocationRequest {
+                key: 2,
+                requested_quads: 128,
+                generation: 1,
+            },
+            PackedGpuGenerationAllocationRequest {
+                key: 1,
+                requested_quads: 64,
+                generation: 2,
+            },
+        ];
+        let mut sorted_requests = requests.to_vec();
+        sorted_requests.sort_by_key(|request| request.key);
+
+        let unsorted_plan =
+            plan_gpu_generated_arena_allocations(&existing, &requests, slot_capacity);
+        let sorted_plan =
+            plan_gpu_generated_arena_allocations_sorted(&existing, &sorted_requests, slot_capacity);
+
+        assert_eq!(sorted_plan, unsorted_plan);
     }
 
     #[test]

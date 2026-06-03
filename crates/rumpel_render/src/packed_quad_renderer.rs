@@ -827,7 +827,7 @@ fn prepare_packed_gpu_generated_draw(
             }
         }));
     let (new_allocations, next_free_quads) =
-        crate::packed_quad_buffer::plan_gpu_generated_arena_allocations(
+        crate::packed_quad_buffer::plan_gpu_generated_arena_allocations_sorted(
             &arena.allocations,
             &buffers.allocation_requests,
             next_packed_gpu_generation_slot_capacity,
