@@ -1123,6 +1123,36 @@ mod tests {
     }
 
     #[test]
+    fn region_has_active_chunks_matches_active_chunk_set_scan() {
+        let center = IVec2::new(3, -2);
+
+        for view_radius in 0..=8 {
+            let keys = active_gpu_generation_chunk_keys(center, view_radius);
+            for region_size in [1, 2, 4, 8] {
+                for region_origin_z in (-12..=12).step_by(region_size as usize) {
+                    for region_origin_x in (-12..=12).step_by(region_size as usize) {
+                        assert_eq!(
+                            region_has_active_chunks(
+                                region_origin_x,
+                                region_origin_z,
+                                region_size,
+                                center,
+                                view_radius
+                            ),
+                            region_has_active_chunks_in_set(
+                                region_origin_x,
+                                region_origin_z,
+                                region_size,
+                                &keys
+                            )
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn sync_gpu_chunk_range_active_flags_updates_without_column_rebuild() {
         let mut batch = PackedGpuGenerationBatch {
             key: 1,

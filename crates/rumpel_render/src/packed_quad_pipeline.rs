@@ -27,7 +27,7 @@ use crate::packed_quad_gpu_generation::{
     PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationParams,
     PackedGpuGenerationTarget, order_loaded_regions_for_prefetch,
     packed_gpu_generation_columns_per_chunk, packed_gpu_generation_lod_for_cell_size,
-    packed_gpu_generation_prefetch_budget_from_env, region_has_active_chunks_in_set,
+    packed_gpu_generation_prefetch_budget_from_env, region_has_active_chunks,
     sync_gpu_chunk_range_active_flags,
 };
 use crate::voxel_material::load_block_atlas;
@@ -3591,11 +3591,12 @@ pub fn update_packed_gpu_generation_regions(
                 .loaded_regions
                 .push((region_origin_x, region_origin_z, region_key));
 
-            if region_has_active_chunks_in_set(
+            if region_has_active_chunks(
                 region_origin_x,
                 region_origin_z,
                 region_size,
-                &scratch.active_chunk_keys,
+                view_center,
+                view_radius,
             ) {
                 scratch
                     .active_regions
