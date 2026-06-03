@@ -126,6 +126,29 @@ Logs: GUI `.ai_tasks/rumpel_client_packed_20260603_211341.stdout.log`, headless 
 
 Logs: GUI `.ai_tasks/rumpel_client_packed_20260603_222741.stdout.log`, headless `.ai_tasks/generated_headless_compare_20260603_222803/`, visual `.ai_tasks/generated_visual_compare_20260603_222831/`.
 
+## Deferred edge builds + incremental arena (20260603)
+
+| Change | File(s) | Effect |
+|--------|---------|--------|
+| Active-only shift prefetch (budget = sync builds/frame) | `packed_quad_pipeline.rs` | Warms edge active regions before assemble without rebuilding entire loaded halo in one frame |
+| Pending edge queue + `MAX_SYNCHRONOUS_BUILDS_PER_FRAME` (default 1) | `packed_quad_pipeline.rs`, `packed_quad_gpu_generation.rs` | Defers extra cache misses across frames |
+| In-place sliding batch update | `packed_quad_pipeline.rs` | Skips full assemble/replace when all active regions are carried with matching generation |
+| `batch_structure_signature` + allocation equivalence | `packed_quad_gpu_generation.rs`, `packed_quad_buffer.rs`, `packed_quad_renderer.rs` | Render prepare reuses arena/columns when only chunk active masks change |
+
+### Before / after (GUI `just profile-packed-gpu-generated`, vs sliding-window baseline `222741`)
+
+| Metric | Baseline (`222741`) | After (`234813`) | Notes |
+|--------|---------------------|------------------|-------|
+| `avg_raw_fps` (measured) | 167.8 | 96.2 | Run-to-run autopilot variance; same-session `234551` measured **167.2** with `ge25=6/1004` |
+| `worst_frame_ms` | 53.95 | 62.00 | |
+| `ge25` | 21/1010 | 22/579 | |
+| worst_packed `generated_update_us` | 52757 | **60022** | Still one edge build/frame cap; no multi-region burst after active-only prefetch fix |
+| `packed_render_draw_calls` | 185 | 190 | |
+
+Headless compare after change: `.ai_tasks/generated_headless_compare_20260603_234614/` — generated `avg_raw_fps=510.7`, `worst=59.47ms`, `ge25=14`, worst `generated_update_us=54338`.
+
+Env: `RUMPEL_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME` (default `1`), existing `RUMPEL_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME`.
+
 ## References
 
 - Prior partial profile: `.ai_tasks/gpu_generated_profile_20260603_190618.md`

@@ -204,6 +204,24 @@ pub fn plan_gpu_generated_arena_allocations_sorted(
 ///
 /// This is intended for render-prepare hot paths where sorted requests and
 /// persistent scratch buffers are available.
+#[must_use]
+pub fn gpu_generated_allocation_maps_equivalent(
+    existing: &HashMap<u64, PackedQuadArenaAllocation>,
+    planned: &HashMap<u64, PackedQuadArenaAllocation>,
+) -> bool {
+    if existing.len() != planned.len() {
+        return false;
+    }
+    existing.iter().all(|(key, existing_allocation)| {
+        planned.get(key).is_some_and(|planned_allocation| {
+            existing_allocation.offset_quads == planned_allocation.offset_quads
+                && existing_allocation.len_quads == planned_allocation.len_quads
+                && existing_allocation.capacity_quads == planned_allocation.capacity_quads
+                && existing_allocation.generation == planned_allocation.generation
+        })
+    })
+}
+
 pub fn plan_gpu_generated_arena_allocations_sorted_into(
     existing_allocations: &HashMap<u64, PackedQuadArenaAllocation>,
     sorted_requests: &[PackedGpuGenerationAllocationRequest],
@@ -538,6 +556,47 @@ mod tests {
         assert_eq!(allocs[&3].offset_quads, 0);
         assert_eq!(allocs[&3].capacity_quads, 1024);
         assert_eq!(high_water, 1024);
+    }
+
+    #[test]
+    fn test_gpu_generated_allocation_maps_equivalent_detects_slot_changes() {
+        let existing = HashMap::from([(
+            7_u64,
+            PackedQuadArenaAllocation {
+                key: 7,
+                offset_quads: 0,
+                len_quads: 64,
+                capacity_quads: 128,
+                generation: 3,
+            },
+        )]);
+        let unchanged = HashMap::from([(
+            7_u64,
+            PackedQuadArenaAllocation {
+                key: 7,
+                offset_quads: 0,
+                len_quads: 64,
+                capacity_quads: 128,
+                generation: 3,
+            },
+        )]);
+        let shifted = HashMap::from([(
+            7_u64,
+            PackedQuadArenaAllocation {
+                key: 7,
+                offset_quads: 128,
+                len_quads: 64,
+                capacity_quads: 128,
+                generation: 3,
+            },
+        )]);
+
+        assert!(gpu_generated_allocation_maps_equivalent(
+            &existing, &unchanged
+        ));
+        assert!(!gpu_generated_allocation_maps_equivalent(
+            &existing, &shifted
+        ));
     }
 
     #[test]

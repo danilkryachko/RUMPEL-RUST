@@ -120,6 +120,7 @@ pub struct PreparedPackedGpuGeneratedDraw {
     pub command_count: usize,
     pub arena_generation: u64,
     pub batch_signature: u64,
+    pub batch_structure_signature: u64,
     pub cull_metadata_signature: u64,
     pub cull_source_signature: u64,
     dispatched: AtomicBool,
@@ -153,6 +154,7 @@ impl PreparedPackedGpuGeneratedDraw {
         self.command_count = 0;
         self.arena_generation = 0;
         self.batch_signature = 0;
+        self.batch_structure_signature = 0;
         self.cull_metadata_signature = 0;
         self.cull_source_signature = 0;
         self.dispatched.store(false, Ordering::Release);
@@ -204,6 +206,19 @@ impl PreparedPackedGpuGeneratedDraw {
             && self.arena_generation == arena_generation
             && self.regions.len() == batch_count
             && self.batch_signature == batch_signature
+    }
+
+    fn matches_structure(
+        &self,
+        batch_count: usize,
+        batch_structure_signature: u64,
+        arena_generation: u64,
+    ) -> bool {
+        self.enabled
+            && self.was_dispatched()
+            && self.arena_generation == arena_generation
+            && self.regions.len() == batch_count
+            && self.batch_structure_signature == batch_structure_signature
     }
 }
 
@@ -766,13 +781,18 @@ fn prepare_packed_gpu_generated_draw(
         return;
     };
 
-    let ordered_batches = extracted_batches.batches.as_slice();
+    let ordered_batches = extracted_batches.batches();
     let active_chunk_job_count =
         PackedGpuGenerationBatches::active_chunk_job_count(ordered_batches);
     let batch_signature = if extracted_batches.batch_signature == 0 {
         PackedGpuGenerationBatches::calculate_batch_signature(ordered_batches)
     } else {
         extracted_batches.batch_signature
+    };
+    let batch_structure_signature = if extracted_batches.batch_structure_signature == 0 {
+        PackedGpuGenerationBatches::calculate_batch_structure_signature(ordered_batches)
+    } else {
+        extracted_batches.batch_structure_signature
     };
     let batch_summary = if extracted_batches.batch_signature == 0 {
         PackedGpuGenerationBatches::summarize_batches(ordered_batches)
@@ -905,6 +925,11 @@ fn prepare_packed_gpu_generated_draw(
         }
     }
 
+    let allocation_unchanged = crate::packed_quad_buffer::gpu_generated_allocation_maps_equivalent(
+        &arena.allocations,
+        &buffers.allocation_plan,
+    );
+
     if arena.buffer.is_none() || next_free_quads > arena.capacity_quads {
         let next_capacity =
             next_packed_gpu_generation_arena_capacity(arena.capacity_quads, next_free_quads);
@@ -921,7 +946,158 @@ fn prepare_packed_gpu_generated_draw(
         arena.generation = arena.generation.saturating_add(1);
     }
 
-    std::mem::swap(&mut arena.allocations, &mut buffers.allocation_plan);
+    let can_refresh_active_dispatch = allocation_unchanged
+        && arena.buffer.is_some()
+        && next_free_quads <= arena.capacity_quads
+        && prepared.matches_structure(
+            active_chunk_job_count,
+            batch_structure_signature,
+            arena.generation,
+        )
+        && prepared.batch_signature != batch_signature
+        && prepared.generation_bind_group.is_some()
+        && prepared.render_bind_group.is_some()
+        && prepared.indirect_buffer.is_some()
+        && prepared.total_column_count == total_region_column_count
+        && buffers.jobs_capacity >= active_chunk_job_count
+        && buffers.draw_params_capacity >= active_chunk_job_count
+        && buffers.indirect_capacity_commands >= active_chunk_job_count
+        && buffers.counters_capacity >= active_chunk_job_count;
+
+    if can_refresh_active_dispatch {
+        arena.next_free_quads = next_free_quads;
+        arena.stats.used_quads = batch_summary.total_max_output_quads;
+        arena.stats.allocated_slot_quads = next_free_quads;
+        arena.stats.free_quads = arena
+            .capacity_quads
+            .saturating_sub(batch_summary.total_max_output_quads);
+
+        buffers.jobs.clear();
+        buffers.draw_params.clear();
+        let mut region_column_base = 0usize;
+        let mut draw_command_index = 0usize;
+        for batch in ordered_batches {
+            for range in batch.chunk_ranges.iter() {
+                if !range.active || range.column_len == 0 {
+                    continue;
+                }
+                let requested_quads = range
+                    .column_len
+                    .saturating_mul(
+                        crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN,
+                    )
+                    .max(1);
+                let Some(allocation) = buffers.allocation_plan.get(&range.chunk_key).copied()
+                else {
+                    continue;
+                };
+                let mut params = batch.params;
+                params.config[0] = range.column_len.min(u32::MAX as usize) as u32;
+                params.config[1] = requested_quads.min(u32::MAX as usize) as u32;
+                buffers.jobs.push(PackedGpuGenerationJob::new(
+                    params,
+                    region_column_base.saturating_add(range.column_start),
+                    allocation.offset_quads,
+                    draw_command_index,
+                    draw_command_index,
+                    draw_command_index,
+                ));
+                let mut translation = batch.translation;
+                translation.w = allocation.offset_quads as f32;
+                buffers
+                    .draw_params
+                    .push(crate::packed_quad_buffer::PackedQuadDrawParams {
+                        chunk_offset: translation.to_array(),
+                    });
+                draw_command_index = draw_command_index.saturating_add(1);
+            }
+            region_column_base = region_column_base.saturating_add(batch.columns.len());
+        }
+
+        let Some(jobs_buffer) = buffers.jobs_buffer.as_ref() else {
+            prepared.disable();
+            return;
+        };
+        let Some(draw_params_buffer) = buffers.draw_params_buffer.as_ref() else {
+            prepared.disable();
+            return;
+        };
+        let Some(columns_buffer) = buffers.columns_buffer.as_ref() else {
+            prepared.disable();
+            return;
+        };
+        let Some(counter_buffer) = buffers.counter_buffer.as_ref() else {
+            prepared.disable();
+            return;
+        };
+        let Some(indirect_buffer) = buffers.indirect_buffer.as_ref() else {
+            prepared.disable();
+            return;
+        };
+        let Some(arena_buffer) = arena.buffer.as_ref() else {
+            prepared.disable();
+            return;
+        };
+
+        render_queue.write_buffer(jobs_buffer, 0, bytemuck::cast_slice(&buffers.jobs));
+        render_queue.write_buffer(
+            draw_params_buffer,
+            0,
+            bytemuck::cast_slice(&buffers.draw_params),
+        );
+
+        let generation_bind_group = render_device.create_bind_group(
+            Some("packed_gpu_generation_bind_group"),
+            &generation_pipeline.bind_group_layout,
+            &BindGroupEntries::sequential((
+                jobs_buffer.as_entire_buffer_binding(),
+                columns_buffer.as_entire_buffer_binding(),
+                arena_buffer.as_entire_buffer_binding(),
+                counter_buffer.as_entire_buffer_binding(),
+                indirect_buffer.as_entire_buffer_binding(),
+            )),
+        );
+
+        prepared.regions.clone_from(&buffers.planned_regions);
+        prepared.command_count = buffers.jobs.len();
+        prepared.batch_signature = batch_signature;
+        prepared.batch_structure_signature = batch_structure_signature;
+        prepared.cull_metadata_signature =
+            generated_regions_cull_metadata_signature(&prepared.regions);
+        prepared.cull_source_signature =
+            generated_regions_cull_source_signature(&prepared.regions, prepared.arena_generation);
+        prepared.generation_bind_group = Some(generation_bind_group);
+        prepared.mark_pending();
+
+        crate::packed_quad_pipeline::record_packed_gpu_generation_prepare_reuse(false);
+        crate::packed_quad_pipeline::record_packed_gpu_generation_prepare(
+            arena.capacity_quads,
+            next_free_quads,
+            batch_summary.total_max_output_quads,
+            batch_summary.total_column_count,
+            active_chunk_job_count,
+            batch_summary.source_chunk_count,
+        );
+        prepare_generated_gpu_cull(
+            &render_device,
+            &render_queue,
+            &mut gpu_cull,
+            GeneratedGpuCullPrepareInput {
+                regions: &prepared.regions,
+                source_indirect_buffer: prepared.indirect_buffer.as_ref(),
+                cull_bind_group_layout: cull_pipeline
+                    .as_deref()
+                    .map(|pipeline| &pipeline.bind_group_layout),
+                metadata_signature: Some(prepared.cull_metadata_signature),
+                source_signature: Some(prepared.cull_source_signature),
+            },
+        );
+        return;
+    }
+
+    if !allocation_unchanged {
+        std::mem::swap(&mut arena.allocations, &mut buffers.allocation_plan);
+    }
     arena.next_free_quads = next_free_quads;
     arena.stats.used_quads = batch_summary.total_max_output_quads;
     arena.stats.allocated_slot_quads = next_free_quads;
@@ -1160,6 +1336,7 @@ fn prepare_packed_gpu_generated_draw(
     prepared.command_count = buffers.jobs.len();
     prepared.arena_generation = arena.generation;
     prepared.batch_signature = batch_signature;
+    prepared.batch_structure_signature = batch_structure_signature;
     prepared.cull_metadata_signature = generated_regions_cull_metadata_signature(&prepared.regions);
     prepared.cull_source_signature =
         generated_regions_cull_source_signature(&prepared.regions, prepared.arena_generation);

@@ -9,6 +9,9 @@ pub const PACKED_GPU_GENERATION_ENV: &str = "RUMPEL_PACKED_GPU_GENERATION";
 pub const PACKED_GPU_GENERATION_PREFETCH_ENV: &str =
     "RUMPEL_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME";
 const DEFAULT_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME: usize = 2;
+pub const PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_ENV: &str =
+    "RUMPEL_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME";
+const DEFAULT_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME: usize = 1;
 pub const PACKED_GPU_GENERATION_WORKGROUP_SIZE: usize = 64;
 pub const PACKED_GPU_GENERATION_MAX_SIDE_SEGMENTS_PER_FACE: usize = 3;
 pub const PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN: usize =
@@ -16,9 +19,11 @@ pub const PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN: usize =
 
 #[derive(Resource, Default, Clone)]
 pub struct PackedGpuGenerationBatches {
-    pub batches: Vec<PackedGpuGenerationBatch>,
+    pub batches: Arc<Vec<PackedGpuGenerationBatch>>,
     pub target: Option<PackedGpuGenerationTarget>,
     pub batch_signature: u64,
+    /// Region/column layout without per-chunk active masks (stable across sliding-window flag sync).
+    pub batch_structure_signature: u64,
     pub summary: PackedGpuGenerationBatchSummary,
 }
 
@@ -31,6 +36,26 @@ impl ExtractResource for PackedGpuGenerationBatches {
 }
 
 impl PackedGpuGenerationBatches {
+    #[must_use]
+    pub fn batches(&self) -> &[PackedGpuGenerationBatch] {
+        self.batches.as_slice()
+    }
+
+    pub fn batches_mut(&mut self) -> &mut Vec<PackedGpuGenerationBatch> {
+        Arc::make_mut(&mut self.batches)
+    }
+
+    pub fn replace_batches(&mut self, batches: Vec<PackedGpuGenerationBatch>) {
+        self.batches = Arc::new(batches);
+    }
+
+    pub fn take_batches(&mut self) -> Vec<PackedGpuGenerationBatch> {
+        match Arc::try_unwrap(std::mem::replace(&mut self.batches, Arc::new(Vec::new()))) {
+            Ok(batches) => batches,
+            Err(shared_batches) => shared_batches.as_ref().clone(),
+        }
+    }
+
     #[must_use]
     pub fn summarize_batches(
         batches: &[PackedGpuGenerationBatch],
@@ -98,6 +123,41 @@ impl PackedGpuGenerationBatches {
                 hash = fnv64(hash, range.column_start as u64);
                 hash = fnv64(hash, range.column_len as u64);
                 hash = fnv64(hash, u64::from(range.active));
+            }
+        }
+        hash.max(1)
+    }
+
+    #[must_use]
+    pub fn calculate_batch_structure_signature(batches: &[PackedGpuGenerationBatch]) -> u64 {
+        let mut hash = FNV64_OFFSET;
+        hash = fnv64(hash, batches.len() as u64);
+        for (index, batch) in batches.iter().enumerate() {
+            hash = fnv64(hash, index as u64);
+            hash = fnv64(hash, batch.key);
+            hash = fnv64(hash, batch.generation);
+            hash = fnv64(hash, batch.columns.len() as u64);
+            hash = fnv64(hash, batch.source_chunk_count as u64);
+            hash = fnv64(hash, batch.max_output_quads as u64);
+            for value in batch.params.config {
+                hash = fnv64(hash, u64::from(value));
+            }
+            for value in batch.params.palette {
+                hash = fnv64(hash, u64::from(value));
+            }
+            for value in batch.translation.to_array() {
+                hash = fnv64(hash, u64::from(value.to_bits()));
+            }
+            for value in batch.bounds_min.to_array() {
+                hash = fnv64(hash, u64::from(value.to_bits()));
+            }
+            for value in batch.bounds_max.to_array() {
+                hash = fnv64(hash, u64::from(value.to_bits()));
+            }
+            for range in batch.chunk_ranges.iter() {
+                hash = fnv64(hash, range.chunk_key);
+                hash = fnv64(hash, range.column_start as u64);
+                hash = fnv64(hash, range.column_len as u64);
             }
         }
         hash.max(1)
@@ -388,6 +448,28 @@ pub fn active_gpu_generation_chunk_keys(view_center: IVec2, view_radius: i32) ->
     keys
 }
 
+/// Deterministic signature for chunk keys inside the circular view radius.
+#[must_use]
+pub fn active_gpu_generation_chunk_signature(view_center: IVec2, view_radius: i32) -> (usize, u64) {
+    let radius = view_radius.max(0);
+    let radius_sq = radius * radius;
+    let mut count = 0usize;
+    let mut hash = FNV64_OFFSET;
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx * dx + dz * dz > radius_sq {
+                continue;
+            }
+            count = count.saturating_add(1);
+            hash = fnv64(
+                hash,
+                gpu_pack_chunk_key(view_center.x + dx, view_center.y + dz),
+            );
+        }
+    }
+    (count, hash)
+}
+
 /// Returns true when at least one chunk in the region grid is in `active_chunk_keys`.
 #[must_use]
 pub fn region_has_active_chunks_in_set(
@@ -667,6 +749,14 @@ pub fn packed_gpu_generation_prefetch_budget_from_env() -> usize {
         .unwrap_or(DEFAULT_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME)
 }
 
+#[must_use]
+pub fn packed_gpu_generation_max_synchronous_builds_from_env() -> usize {
+    std::env::var(PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME)
+}
+
 /// Sort loaded region origins nearest-first for moving-camera cache warmup.
 pub fn order_loaded_regions_for_prefetch(
     regions: &mut [(i32, i32, u64)],
@@ -770,6 +860,14 @@ mod tests {
         assert_eq!(std::mem::align_of::<PackedGpuSurfaceColumn>(), 4);
         assert_eq!(std::mem::size_of::<PackedGpuGenerationCounter>(), 16);
         assert_eq!(std::mem::align_of::<PackedGpuGenerationCounter>(), 4);
+    }
+
+    #[test]
+    fn packed_gpu_generation_extract_shares_batch_storage() {
+        let source = PackedGpuGenerationBatches::default();
+        let extracted = <PackedGpuGenerationBatches as ExtractResource>::extract_resource(&source);
+
+        assert!(Arc::ptr_eq(&source.batches, &extracted.batches));
     }
 
     #[test]
@@ -1087,11 +1185,63 @@ mod tests {
     }
 
     #[test]
+    fn active_gpu_generation_chunk_signature_uses_deterministic_scan_order() {
+        let center = IVec2::new(0, 0);
+        let expected = PackedGpuGenerationTarget::active_chunk_signature([
+            gpu_pack_chunk_key(0, -1),
+            gpu_pack_chunk_key(-1, 0),
+            gpu_pack_chunk_key(0, 0),
+            gpu_pack_chunk_key(1, 0),
+            gpu_pack_chunk_key(0, 1),
+        ]);
+
+        assert_eq!(active_gpu_generation_chunk_signature(center, 1), expected);
+        assert_eq!(
+            active_gpu_generation_chunk_signature(center, 1).0,
+            active_gpu_generation_chunk_keys(center, 1).len()
+        );
+        assert_ne!(
+            active_gpu_generation_chunk_signature(center, 1),
+            active_gpu_generation_chunk_signature(center, 2)
+        );
+    }
+
+    #[test]
     fn region_has_active_chunks_in_set_detects_partial_region_overlap() {
         let mut keys = HashSet::new();
         keys.insert(gpu_pack_chunk_key(7, 0));
         assert!(region_has_active_chunks_in_set(4, 0, 4, &keys));
         assert!(!region_has_active_chunks_in_set(12, 0, 4, &keys));
+    }
+
+    #[test]
+    fn region_has_active_chunks_matches_active_chunk_set_scan() {
+        let center = IVec2::new(3, -2);
+
+        for view_radius in 0..=8 {
+            let keys = active_gpu_generation_chunk_keys(center, view_radius);
+            for region_size in [1, 2, 4, 8] {
+                for region_origin_z in (-12..=12).step_by(region_size as usize) {
+                    for region_origin_x in (-12..=12).step_by(region_size as usize) {
+                        assert_eq!(
+                            region_has_active_chunks(
+                                region_origin_x,
+                                region_origin_z,
+                                region_size,
+                                center,
+                                view_radius
+                            ),
+                            region_has_active_chunks_in_set(
+                                region_origin_x,
+                                region_origin_z,
+                                region_size,
+                                &keys
+                            )
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1134,6 +1284,40 @@ mod tests {
         let signature_after =
             PackedGpuGenerationBatches::calculate_batch_signature(std::slice::from_ref(&batch));
         assert_ne!(signature_before, signature_after);
+    }
+
+    #[test]
+    fn packed_gpu_generation_batch_structure_signature_ignores_active_masks() {
+        let make_batch = |active: bool| PackedGpuGenerationBatch {
+            key: 1,
+            columns: Arc::new(vec![PackedGpuSurfaceColumn::from_parts(
+                [0, 0, 1, 1],
+                [4, 4, 4, 4, 4],
+                2,
+            )]),
+            chunk_ranges: Arc::new(vec![PackedGpuChunkRange {
+                chunk_key: 42,
+                column_start: 0,
+                column_len: 1,
+                active,
+            }]),
+            params: PackedGpuGenerationParams::new(1, 7, 0, 0, 1, 2, 3),
+            source_chunk_count: 1,
+            max_output_quads: 7,
+            translation: Vec4::ZERO,
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::ONE,
+            generation: 1,
+        };
+        let active_structure =
+            PackedGpuGenerationBatches::calculate_batch_structure_signature(&[make_batch(true)]);
+        let inactive_structure =
+            PackedGpuGenerationBatches::calculate_batch_structure_signature(&[make_batch(false)]);
+        assert_eq!(active_structure, inactive_structure);
+        assert_ne!(
+            PackedGpuGenerationBatches::calculate_batch_signature(&[make_batch(true)]),
+            PackedGpuGenerationBatches::calculate_batch_signature(&[make_batch(false)])
+        );
     }
 
     #[test]
