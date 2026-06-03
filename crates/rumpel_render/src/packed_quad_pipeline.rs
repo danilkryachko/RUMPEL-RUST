@@ -28,7 +28,8 @@ use crate::packed_quad_gpu_generation::{
     PackedGpuGenerationTarget, active_gpu_generation_chunk_signature,
     order_loaded_regions_for_prefetch, packed_gpu_generation_columns_per_chunk,
     packed_gpu_generation_lod_for_cell_size, packed_gpu_generation_max_synchronous_builds_from_env,
-    packed_gpu_generation_prefetch_budget_from_env, region_has_active_chunks,
+    packed_gpu_generation_prefetch_budget_from_env,
+    packed_gpu_generation_shift_sync_build_budget_from_env, region_has_active_chunks,
     sync_gpu_chunk_range_active_flags,
 };
 use crate::voxel_material::load_block_atlas;
@@ -3406,6 +3407,35 @@ fn prefetch_active_generated_regions_with_budget(
     prefetched
 }
 
+fn prune_stale_pending_active_region_builds(
+    pending: &mut Vec<(i32, i32, u64)>,
+    active_regions: &[(i32, i32, u64)],
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let active_keys: HashSet<u64> = active_regions
+        .iter()
+        .map(|(_, _, region_key)| *region_key)
+        .collect();
+    pending.retain(|(_, _, region_key)| active_keys.contains(region_key));
+}
+
+fn queue_pending_active_region_build(
+    pending: &mut Vec<(i32, i32, u64)>,
+    region_origin_x: i32,
+    region_origin_z: i32,
+    region_key: u64,
+) {
+    if pending
+        .iter()
+        .any(|(_, _, queued_key)| *queued_key == region_key)
+    {
+        return;
+    }
+    pending.push((region_origin_x, region_origin_z, region_key));
+}
+
 fn process_pending_generated_region_builds(
     pending: &mut Vec<(i32, i32, u64)>,
     region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
@@ -3574,11 +3604,12 @@ fn assemble_generated_batches_for_active_regions(
 
         if synchronous_builds >= max_synchronous_builds {
             stats.deferred_builds = stats.deferred_builds.saturating_add(1);
-            scratch.pending_active_region_builds.push((
+            queue_pending_active_region_build(
+                &mut scratch.pending_active_region_builds,
                 region_origin_x,
                 region_origin_z,
                 region_key,
-            ));
+            );
             continue;
         }
 
@@ -3886,21 +3917,19 @@ pub fn update_packed_gpu_generation_regions(
         scratch.carried_batches.clear();
         scratch.carried_batches.extend(
             gpu_batches
-                .take_batches()
-                .into_iter()
+                .batches()
+                .iter()
+                .cloned()
                 .map(|batch| (batch.key, batch)),
         );
 
-        let pending_built = process_pending_generated_region_builds(
+        let shift_sync_build_budget = packed_gpu_generation_shift_sync_build_budget_from_env();
+        prune_stale_pending_active_region_builds(
             &mut scratch.pending_active_region_builds,
-            &mut region_cache,
-            camera_chunk_x,
-            camera_chunk_z,
-            region_size,
-            &cache_build,
-            sync_build_budget,
+            scratch.active_regions.as_slice(),
         );
-        let remaining_sync_builds = sync_build_budget.saturating_sub(pending_built);
+        // Warm the new active edge before draining stale pending work so shift frames do not
+        // publish incomplete batch sets and trigger multi-frame render-prepare cascades.
         let prefetched = prefetch_active_generated_regions_with_budget(
             scratch,
             &mut region_cache,
@@ -3908,9 +3937,19 @@ pub fn update_packed_gpu_generation_regions(
             camera_chunk_z,
             region_size,
             &cache_build,
+            shift_sync_build_budget,
+        );
+        let remaining_sync_builds = shift_sync_build_budget.saturating_sub(prefetched);
+        let pending_built = process_pending_generated_region_builds(
+            &mut scratch.pending_active_region_builds,
+            &mut region_cache,
+            camera_chunk_x,
+            camera_chunk_z,
+            region_size,
+            &cache_build,
             remaining_sync_builds,
         );
-        let remaining_sync_builds = remaining_sync_builds.saturating_sub(prefetched);
+        let remaining_sync_builds = remaining_sync_builds.saturating_sub(pending_built);
 
         if sliding_shift_can_update_batches_in_place(
             &scratch.carried_batches,
@@ -3952,6 +3991,21 @@ pub fn update_packed_gpu_generation_regions(
         let log_update =
             stats.cache_misses > 0 || stats.cache_invalidated > 0 || stats.deferred_builds > 0;
         let generated_batch_count = scratch.generated_batches.len();
+        if stats.deferred_builds > 0 && generated_batch_count < active_region_count {
+            scratch.generated_batches.clear();
+            scratch.carried_batches.clear();
+            gpu_batches.target = Some(target);
+            record_packed_gpu_generation_region_mask(loaded_regions, gpu_batches.batches.len());
+            record_packed_gpu_generation_cache_lifecycle(
+                0,
+                stats.cache_misses,
+                stats.cache_invalidated,
+                cache_evicted,
+                prefetched.saturating_add(pending_built),
+            );
+            record_packed_gpu_generation_update(elapsed_us(update_started), false);
+            return;
+        }
 
         finalize_generated_batch_update(
             &mut cpu_batches,

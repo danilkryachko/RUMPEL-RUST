@@ -12,6 +12,7 @@ const DEFAULT_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME: usize = 2;
 pub const PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_ENV: &str =
     "RUMPEL_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME";
 const DEFAULT_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME: usize = 1;
+const DEFAULT_PACKED_GPU_GENERATION_SHIFT_SYNCHRONOUS_BUILDS_PER_FRAME: usize = 2;
 pub const PACKED_GPU_GENERATION_WORKGROUP_SIZE: usize = 64;
 pub const PACKED_GPU_GENERATION_MAX_SIDE_SEGMENTS_PER_FACE: usize = 3;
 pub const PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN: usize =
@@ -757,6 +758,13 @@ pub fn packed_gpu_generation_max_synchronous_builds_from_env() -> usize {
         .unwrap_or(DEFAULT_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME)
 }
 
+/// Sliding-window shift frames may need two edge regions in one step; never go below the shift default.
+#[must_use]
+pub fn packed_gpu_generation_shift_sync_build_budget_from_env() -> usize {
+    packed_gpu_generation_max_synchronous_builds_from_env()
+        .max(DEFAULT_PACKED_GPU_GENERATION_SHIFT_SYNCHRONOUS_BUILDS_PER_FRAME)
+}
+
 /// Sort loaded region origins nearest-first for moving-camera cache warmup.
 pub fn order_loaded_regions_for_prefetch(
     regions: &mut [(i32, i32, u64)],
@@ -1377,6 +1385,13 @@ mod tests {
         assert_eq!(regions[0].2, 1);
         assert_eq!(regions[1].2, 2);
         assert_eq!(regions[2].2, 3);
+    }
+
+    #[test]
+    fn packed_gpu_generation_shift_sync_build_budget_is_at_least_shift_default() {
+        let shift_budget = packed_gpu_generation_shift_sync_build_budget_from_env();
+        assert!(shift_budget >= DEFAULT_PACKED_GPU_GENERATION_SHIFT_SYNCHRONOUS_BUILDS_PER_FRAME);
+        assert!(shift_budget >= packed_gpu_generation_max_synchronous_builds_from_env());
     }
 
     #[test]

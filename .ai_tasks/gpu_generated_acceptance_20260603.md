@@ -149,6 +149,34 @@ Headless compare after change: `.ai_tasks/generated_headless_compare_20260603_23
 
 Env: `RUMPEL_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME` (default `1`), existing `RUMPEL_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME`.
 
+## Shift prefetch ordering fix (20260604)
+
+**Root cause of headless `ge25=14` regression:** on sliding-window shifts, `process_pending_generated_region_builds` ran **before** active-edge prefetch and consumed the per-frame sync budget. Stale pending entries from prior shifts blocked warming the new active edge, so assemble published incomplete batch sets and triggered multi-frame render-prepare cascades (~27–43ms frames at t=8.58–9.05 in headless log `234627`).
+
+| Fix | File(s) | Effect |
+|-----|---------|--------|
+| Active-edge prefetch before pending drain on shift | `packed_quad_pipeline.rs` | New edge regions build on the shift frame |
+| Shift sync budget default **2** (`shift_sync_build_budget_from_env`) | `packed_quad_gpu_generation.rs` | Corner shifts can warm two edges in one frame |
+| Prune/dedupe pending queue to current active regions | `packed_quad_pipeline.rs` | Stale pending no longer steals budget |
+| Clone (not take) batches on shift; skip finalize when still incomplete | `packed_quad_pipeline.rs` | Avoids empty/partial batch publish during deferred drain |
+
+### Before / after (same recipes)
+
+| Profile | Metric | Before (`234614` / `234813`) | After |
+|---------|--------|------------------------------|-------|
+| Headless generated | `ge25` | **14** | **4** |
+| Headless generated | `avg_raw_fps` | 510.7 | **1027.8** |
+| Headless generated | `worst_frame_ms` | 59.47 | **33.62** |
+| Headless generated | worst `generated_update_us` | 54338 | **32856** |
+| GUI `just profile-packed-gpu-generated` | `avg_raw_fps` | 96.2 | **132.3** |
+| GUI | `worst_frame_ms` | 62.00 | **32.71** |
+| GUI | `ge25` | 22/579 | **20/796** |
+| GUI | worst `generated_update_us` | 60022 | **31895** |
+
+Logs: headless `.ai_tasks/generated_headless_compare_20260604_004328/`, GUI `.ai_tasks/rumpel_client_packed_20260604_004415.stdout.log`. Static proof: `just verify`.
+
+Env: `RUMPEL_PACKED_GPU_GENERATION_MAX_SYNCHRONOUS_BUILDS_PER_FRAME` (default `1`, shift frames use `max(env, 2)`).
+
 ## References
 
 - Prior partial profile: `.ai_tasks/gpu_generated_profile_20260603_190618.md`
