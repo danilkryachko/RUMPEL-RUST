@@ -3463,6 +3463,7 @@ pub struct PackedQuadStreamingState {
     pub region_generations: HashMap<u64, u64>,
     pub pending_rebuild_regions: Vec<u64>,
     pub pending_compaction_regions: Vec<u64>,
+    pub regions_to_sync: HashSet<u64>,
 }
 
 pub struct LoadedPackedQuadChunk {
@@ -3704,7 +3705,7 @@ pub fn stream_packed_quad_chunks(
     let view_radius = packed_view_radius_from_env();
     let region_size = packed_region_size_from_env();
     let despawn_radius = view_radius + 2;
-    let mut regions_to_sync = HashSet::new();
+    state.regions_to_sync.clear();
 
     if state.last_center != Some(center) {
         let render_chunks = packed_render_chunks_for_center(center, view_radius);
@@ -3750,17 +3751,21 @@ pub fn stream_packed_quad_chunks(
             .copied()
             .collect::<Vec<_>>();
         for key in membership_changes {
-            let Some(loaded) = state.loaded.get(&key) else {
+            let Some((region_key, entity)) = state
+                .loaded
+                .get(&key)
+                .map(|loaded| (loaded.region_key, loaded.entity))
+            else {
                 continue;
             };
-            regions_to_sync.insert(loaded.region_key);
+            state.regions_to_sync.insert(region_key);
             if state.active_render_chunks.contains(&key) {
                 commands
-                    .entity(loaded.entity)
+                    .entity(entity)
                     .insert((RenderedChunk, RenderedChunkCount(1)));
             } else {
                 commands
-                    .entity(loaded.entity)
+                    .entity(entity)
                     .remove::<RenderedChunk>()
                     .remove::<RenderedChunkCount>();
             }
@@ -3780,7 +3785,7 @@ pub fn stream_packed_quad_chunks(
         state.last_center = Some(center);
     }
 
-    for region_key in regions_to_sync {
+    for region_key in state.regions_to_sync.iter().copied() {
         sync_region_batch_active_flags(&mut batches, &state, region_key);
     }
 
