@@ -252,6 +252,7 @@ pub struct PreparedPackedQuadBlockTexturePalette {
 pub struct PackedQuadIndirectBuffer {
     pub buffer: Option<Buffer>,
     pub capacity_commands: usize,
+    pub upload_signature: u64,
 }
 
 impl FromWorld for PackedQuadIndirectBuffer {
@@ -259,6 +260,7 @@ impl FromWorld for PackedQuadIndirectBuffer {
         Self {
             buffer: None,
             capacity_commands: 0,
+            upload_signature: 0,
         }
     }
 }
@@ -269,6 +271,7 @@ pub struct PackedQuadParamsBuffer {
     pub buffer: Option<Buffer>,
     pub capacity_params: usize,
     pub generation: u64,
+    pub upload_signature: u64,
 }
 
 impl FromWorld for PackedQuadParamsBuffer {
@@ -277,6 +280,7 @@ impl FromWorld for PackedQuadParamsBuffer {
             buffer: None,
             capacity_params: 0,
             generation: 0,
+            upload_signature: 0,
         }
     }
 }
@@ -847,6 +851,18 @@ fn packed_gpu_cull_config_signature(
     signature = packed_gpu_cull_signature_step(signature, u64::from(config.command_count));
     signature = packed_gpu_cull_signature_step(signature, u64::from(config.face_range_cull));
     signature = packed_gpu_cull_signature_step(signature, u64::from(config.compact_output));
+    signature.max(1)
+}
+
+fn packed_gpu_buffer_upload_signature<T: bytemuck::Pod>(items: &[T]) -> u64 {
+    let bytes: &[u8] = bytemuck::cast_slice(items);
+    let mut signature = PACKED_GPU_CULL_SIGNATURE_OFFSET;
+    signature = packed_gpu_cull_signature_step(signature, bytes.len() as u64);
+    for chunk in bytes.chunks(8) {
+        let mut lane = [0_u8; 8];
+        lane[..chunk.len()].copy_from_slice(chunk);
+        signature = packed_gpu_cull_signature_step(signature, u64::from_le_bytes(lane));
+    }
     signature.max(1)
 }
 
@@ -2195,6 +2211,7 @@ pub fn prepare_packed_quad_buffers(
 
             indirect_buf.buffer = Some(new_buffer);
             indirect_buf.capacity_commands = next_capacity;
+            indirect_buf.upload_signature = 0;
         }
 
         // Resize draw params buffer if needed
@@ -2220,14 +2237,24 @@ pub fn prepare_packed_quad_buffers(
             params_buf.buffer = Some(new_buffer);
             params_buf.capacity_params = next_capacity;
             params_buf.generation = params_buf.generation.saturating_add(1);
+            params_buf.upload_signature = 0;
         }
 
-        // Upload to command buffers
-        if let Some(buf) = &indirect_buf.buffer {
+        // Upload to command buffers only when the packed command/parameter bytes changed.
+        let command_upload_signature = packed_gpu_buffer_upload_signature(&indirect_draw.commands);
+        if indirect_buf.upload_signature != command_upload_signature
+            && let Some(buf) = &indirect_buf.buffer
+        {
             render_queue.write_buffer(buf, 0, bytemuck::cast_slice(&indirect_draw.commands));
+            indirect_buf.upload_signature = command_upload_signature;
         }
-        if let Some(buf) = &params_buf.buffer {
+        let params_upload_signature =
+            packed_gpu_buffer_upload_signature(&indirect_draw.params_staging);
+        if params_buf.upload_signature != params_upload_signature
+            && let Some(buf) = &params_buf.buffer
+        {
             render_queue.write_buffer(buf, 0, bytemuck::cast_slice(&indirect_draw.params_staging));
+            params_buf.upload_signature = params_upload_signature;
         }
     }
 
@@ -6596,6 +6623,38 @@ mod tests {
         assert_ne!(
             base_signature,
             packed_gpu_cull_metadata_signature(&[changed_bounds])
+        );
+    }
+
+    #[test]
+    fn test_packed_gpu_buffer_upload_signature_tracks_draw_command_bytes() {
+        let base = crate::packed_quad_buffer::PackedQuadDrawCommand {
+            vertex_count: 6,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 4,
+        };
+        let mut changed = base;
+        changed.first_instance = 5;
+
+        assert_ne!(
+            packed_gpu_buffer_upload_signature(&[base]),
+            packed_gpu_buffer_upload_signature(&[changed])
+        );
+    }
+
+    #[test]
+    fn test_packed_gpu_buffer_upload_signature_tracks_draw_param_bytes() {
+        let base = crate::packed_quad_buffer::PackedQuadDrawParams {
+            chunk_offset: [1.0, 2.0, 3.0, 4.0],
+        };
+        let changed = crate::packed_quad_buffer::PackedQuadDrawParams {
+            chunk_offset: [1.0, 2.0, 3.0, 8.0],
+        };
+
+        assert_ne!(
+            packed_gpu_buffer_upload_signature(&[base]),
+            packed_gpu_buffer_upload_signature(&[changed])
         );
     }
 
