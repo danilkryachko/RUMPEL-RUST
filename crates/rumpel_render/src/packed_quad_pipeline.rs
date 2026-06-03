@@ -3465,6 +3465,8 @@ pub struct PackedQuadStreamingState {
     pub pending_compaction_regions: Vec<u64>,
     pub regions_to_sync: HashSet<u64>,
     pub membership_changes: Vec<u64>,
+    pub chunks_to_despawn: Vec<u64>,
+    pub building_to_despawn: Vec<(u64, Entity)>,
 }
 
 pub struct LoadedPackedQuadChunk {
@@ -3717,23 +3719,26 @@ pub fn stream_packed_quad_chunks(
         let previous_active_render_chunks =
             std::mem::replace(&mut state.active_render_chunks, next_active_render_chunks);
         let despawn_radius_sq = despawn_radius * despawn_radius;
-        let mut to_despawn = Vec::new();
+        let mut chunks_to_despawn = std::mem::take(&mut state.chunks_to_despawn);
+        chunks_to_despawn.clear();
         for &key in state.loaded.keys() {
             let (cx, cz) = unpack_chunk_key(key);
             let dx = cx - center.x;
             let dz = cz - center.y;
             if dx * dx + dz * dz > despawn_radius_sq {
-                to_despawn.push(key);
+                chunks_to_despawn.push(key);
             }
         }
-        for key in to_despawn {
+        for &key in &chunks_to_despawn {
             if let Some(loaded) = state.loaded.remove(&key) {
                 commands.entity(loaded.entity).despawn();
                 evict_chunk_from_region_batch(&mut batches, &mut state, key, loaded.region_key);
             }
         }
+        state.chunks_to_despawn = chunks_to_despawn;
 
-        let mut building_to_despawn = Vec::new();
+        let mut building_to_despawn = std::mem::take(&mut state.building_to_despawn);
+        building_to_despawn.clear();
         for (&key, &entity) in &state.building {
             let (cx, cz) = unpack_chunk_key(key);
             let dx = cx - center.x;
@@ -3742,10 +3747,11 @@ pub fn stream_packed_quad_chunks(
                 building_to_despawn.push((key, entity));
             }
         }
-        for (key, entity) in building_to_despawn {
+        for &(key, entity) in &building_to_despawn {
             state.building.remove(&key);
             commands.entity(entity).despawn();
         }
+        state.building_to_despawn = building_to_despawn;
 
         let mut membership_changes = std::mem::take(&mut state.membership_changes);
         membership_changes.clear();
