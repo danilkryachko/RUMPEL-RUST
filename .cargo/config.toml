@@ -1,10 +1,16 @@
 # Оптимизация компиляции для Bevy на macOS
 # Использование родного CPU для максимальной производительности
+[build]
+rustc-wrapper = "/opt/homebrew/bin/sccache"
+
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "target-cpu=native"]
 
 [target.aarch64-apple-darwin]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = [
+  "-C", "target-cpu=native",
+  "-C", "link-arg=-fuse-ld=/opt/homebrew/bin/ld64.lld",
+]
 
 # Опционально: если у вас установлен линкер zld (brew install michaeleisel/zld/zld)
 # раскомментируйте строки ниже для сверхбыстрой сборки:

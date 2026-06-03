@@ -1,0 +1,20 @@
+---
+description: RUMPEL custom subagents in .cursor/agents (delegate or /name invoke)
+alwaysApply: true
+---
+
+# RUMPEL subagents
+
+Project subagents live in `.cursor/agents/`. Prefer delegating or explicit `/name` invocation:
+
+| Subagent | Use for |
+| --- | --- |
+| `/engine-architect` | `rumpel_world`, `rumpel_render`, meshing, chunks, FPS, shaders |
+| `/gameplay-coder` | `rumpel_player`, ECS gameplay, UI, startup Lua mods |
+| `/code-reviewer` | Independent review; `cargo check`, `test`, `clippy` (readonly) |
+| `/game-designer` | `GDD.md`, `BOARD.md`, feature specs |
+| `/art-director` | `assets/` textures and block visuals |
+
+Built-in Cursor subagents (`explore`, `bash`, `browser`) remain available for search, shell, and browser.
+
+Game Director: assign disjoint file ownership; do not revert unrelated edits.

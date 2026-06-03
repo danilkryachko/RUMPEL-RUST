@@ -33,6 +33,9 @@ jobs:
       - name: Cache Cargo registry and build outputs
         uses: swatinem/rust-cache@v2
 
+      - name: Disable macOS-only rustc wrapper on Linux CI
+        run: sed -i '/^rustc-wrapper =/d' .cargo/config.toml
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

@@ -28,4 +28,12 @@
 * **Данные:** Базовые блоки живут в `assets/blocks/base.ron`.
 * **Скрипты:** Lua-моды живут в `assets/mods/*.lua` и подключаются через `rumpel_modding`.
 * **Первый API:** `register_block({...})` позволяет модам добавлять новые блоки до генерации мира.
+* **Worldgen:** `assets/mods/world_gen.lua` является отдельным post-pass генерации мира и запускается через `rumpel_world` с ограниченным API (`get_block`, `set_block`, `get_height`, `Chunk`). Он не загружается как обычный startup-мод.
+* **Lua IDE:** `assets/mods/.luarc.json` и `assets/mods/api_stub.lua` описывают runtime API для автодополнения и linting в редакторе; игра эти stub-функции не исполняет.
 * **Будущее API:** события блоков, рецепты, NPC, квесты и игровые правила должны добавляться через явные безопасные функции, без прямого доступа к памяти чанков.
+
+## 6. Техническое направление рендера
+* **Базовая цель:** Сохранять дальность прорисовки и поднимать FPS через удешевление mesh/render path, а не через урезание мира.
+* **Текущий production path:** Surface-aware streaming с `VoxelQuadMaterial`, texture-array atlas, LOD и greedy-merged quads.
+* **GPU-driven путь:** Compute meshing -> GPU streaming queue -> packed quads/vertex pulling -> MultiDrawIndirect/GPU culling -> far-field hierarchy.
+* **Baseline:** CPU surface streaming остается старым базовым режимом для сравнения, пока GPU-driven path проходит визуальную и профильную parity-проверку.

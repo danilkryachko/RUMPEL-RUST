@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 bevy = { workspace = true }
 rumpel_prelude = { workspace = true }
+rumpel_world = { workspace = true }
+rumpel_modding = { workspace = true }
+mlua = { workspace = true }

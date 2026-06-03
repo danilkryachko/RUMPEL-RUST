@@ -7,3 +7,4 @@ edition = "2024"
 bevy = { workspace = true }
 mlua = { workspace = true }
 rumpel_blocks = { workspace = true }
+rumpel_world = { workspace = true }

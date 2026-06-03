@@ -125,6 +125,13 @@
             is_solid: true,
             is_transparent: false,
             color: (0.95, 0.85, 0.5, 1.0),
+        ),
+        (
+            id: "water",
+            name: "Вода",
+            is_solid: false,
+            is_transparent: true,
+            color: (0.1, 0.4, 0.9, 0.65),
         )
     ]
 )

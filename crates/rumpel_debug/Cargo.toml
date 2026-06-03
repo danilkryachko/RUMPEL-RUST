@@ -13,3 +13,4 @@ bevy_egui = { workspace = true, optional = true }
 bevy-inspector-egui = { workspace = true, optional = true }
 rumpel_prelude = { workspace = true }
 rumpel_player = { path = "../rumpel_player" }
+rumpel_render = { workspace = true }
