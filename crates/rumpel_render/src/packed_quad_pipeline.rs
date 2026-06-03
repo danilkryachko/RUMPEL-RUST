@@ -30,7 +30,7 @@ use crate::packed_quad_gpu_generation::{
     packed_gpu_generation_lod_for_cell_size, packed_gpu_generation_max_synchronous_builds_from_env,
     packed_gpu_generation_prefetch_budget_from_env,
     packed_gpu_generation_shift_sync_build_budget_from_env, region_has_active_chunks,
-    sync_gpu_chunk_range_active_flags,
+    retain_nearest_loaded_regions_for_prefetch, sync_gpu_chunk_range_active_flags,
 };
 use crate::voxel_material::load_block_atlas;
 use crate::voxel_packed_quads::{PackedVoxelFace, PackedVoxelQuad};
@@ -248,6 +248,7 @@ impl ExtractResource for PackedQuadBlockAtlas {
 pub struct PreparedPackedQuadBlockTexturePalette {
     pub buffer: Option<Buffer>,
     pub tiles: Vec<[u32; 4]>,
+    pub generation: u64,
 }
 
 /// Resource in the Render World storing the shared GPU indirect draw command buffer.
@@ -255,6 +256,7 @@ pub struct PreparedPackedQuadBlockTexturePalette {
 pub struct PackedQuadIndirectBuffer {
     pub buffer: Option<Buffer>,
     pub capacity_commands: usize,
+    pub upload_signature: u64,
 }
 
 impl FromWorld for PackedQuadIndirectBuffer {
@@ -262,6 +264,7 @@ impl FromWorld for PackedQuadIndirectBuffer {
         Self {
             buffer: None,
             capacity_commands: 0,
+            upload_signature: 0,
         }
     }
 }
@@ -271,6 +274,8 @@ impl FromWorld for PackedQuadIndirectBuffer {
 pub struct PackedQuadParamsBuffer {
     pub buffer: Option<Buffer>,
     pub capacity_params: usize,
+    pub generation: u64,
+    pub upload_signature: u64,
 }
 
 impl FromWorld for PackedQuadParamsBuffer {
@@ -278,8 +283,17 @@ impl FromWorld for PackedQuadParamsBuffer {
         Self {
             buffer: None,
             capacity_params: 0,
+            generation: 0,
+            upload_signature: 0,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedQuadIndirectBindGroupKey {
+    pub arena_generation: u64,
+    pub params_generation: u64,
+    pub palette_generation: u64,
 }
 
 /// Combined metadata and resources for unified indirect rendering.
@@ -287,6 +301,8 @@ impl FromWorld for PackedQuadParamsBuffer {
 pub struct PreparedPackedQuadIndirectDraw {
     /// Cached single global bind group.
     pub bind_group: Option<BindGroup>,
+    /// Resource generations used to validate the cached global bind group.
+    pub bind_group_key: Option<PackedQuadIndirectBindGroupKey>,
     /// Buffer holding indirect draw commands.
     pub indirect_buffer: Option<Buffer>,
     /// Number of active draw commands in the buffer.
@@ -804,6 +820,54 @@ const PACKED_CONFIRM_FNV64_PRIME: u64 = 1_099_511_628_211;
 
 fn packed_confirm_fnv64(hash: u64, value: u64) -> u64 {
     (hash ^ value).wrapping_mul(PACKED_CONFIRM_FNV64_PRIME)
+}
+
+const PACKED_GPU_CULL_SIGNATURE_OFFSET: u64 = 14_695_981_039_346_656_037;
+const PACKED_GPU_CULL_SIGNATURE_PRIME: u64 = 1_099_511_628_211;
+
+fn packed_gpu_cull_signature_step(signature: u64, value: u64) -> u64 {
+    (signature ^ value).wrapping_mul(PACKED_GPU_CULL_SIGNATURE_PRIME)
+}
+
+fn packed_gpu_cull_metadata_signature(metadata: &[PackedQuadIndirectCommandMetadata]) -> u64 {
+    let mut signature = PACKED_GPU_CULL_SIGNATURE_OFFSET;
+    signature = packed_gpu_cull_signature_step(signature, metadata.len() as u64);
+    for (index, command) in metadata.iter().enumerate() {
+        signature = packed_gpu_cull_signature_step(signature, index as u64);
+        signature = packed_gpu_cull_signature_step(signature, command.batch_key);
+        signature =
+            packed_gpu_cull_signature_step(signature, command.face.map_or(u64::MAX, u64::from));
+        signature = packed_gpu_cull_signature_step(signature, command.len_quads as u64);
+        for value in command.bounds_min.to_array() {
+            signature = packed_gpu_cull_signature_step(signature, u64::from(value.to_bits()));
+        }
+        for value in command.bounds_max.to_array() {
+            signature = packed_gpu_cull_signature_step(signature, u64::from(value.to_bits()));
+        }
+    }
+    signature.max(1)
+}
+
+fn packed_gpu_cull_config_signature(
+    config: crate::packed_quad_buffer::PackedQuadCullConfig,
+) -> u64 {
+    let mut signature = PACKED_GPU_CULL_SIGNATURE_OFFSET;
+    signature = packed_gpu_cull_signature_step(signature, u64::from(config.command_count));
+    signature = packed_gpu_cull_signature_step(signature, u64::from(config.face_range_cull));
+    signature = packed_gpu_cull_signature_step(signature, u64::from(config.compact_output));
+    signature.max(1)
+}
+
+fn packed_gpu_buffer_upload_signature<T: bytemuck::Pod>(items: &[T]) -> u64 {
+    let bytes: &[u8] = bytemuck::cast_slice(items);
+    let mut signature = PACKED_GPU_CULL_SIGNATURE_OFFSET;
+    signature = packed_gpu_cull_signature_step(signature, bytes.len() as u64);
+    for chunk in bytes.chunks(8) {
+        let mut lane = [0_u8; 8];
+        lane[..chunk.len()].copy_from_slice(chunk);
+        signature = packed_gpu_cull_signature_step(signature, u64::from_le_bytes(lane));
+    }
+    signature.max(1)
 }
 
 /// Pure helper function to determine the next buffer capacity when growing is required.
@@ -1669,6 +1733,7 @@ pub fn prepare_packed_quad_buffers(
         });
         render_queue.write_buffer(&buffer, 0, bytemuck::cast_slice(extracted_palette_tiles));
         prepared_palette.buffer = Some(buffer);
+        prepared_palette.generation = prepared_palette.generation.saturating_add(1);
         prepared_palette.tiles.clear();
         prepared_palette
             .tiles
@@ -2150,6 +2215,7 @@ pub fn prepare_packed_quad_buffers(
 
             indirect_buf.buffer = Some(new_buffer);
             indirect_buf.capacity_commands = next_capacity;
+            indirect_buf.upload_signature = 0;
         }
 
         // Resize draw params buffer if needed
@@ -2174,36 +2240,59 @@ pub fn prepare_packed_quad_buffers(
 
             params_buf.buffer = Some(new_buffer);
             params_buf.capacity_params = next_capacity;
+            params_buf.generation = params_buf.generation.saturating_add(1);
+            params_buf.upload_signature = 0;
         }
 
-        // Upload to command buffers
-        if let Some(buf) = &indirect_buf.buffer {
+        // Upload to command buffers only when the packed command/parameter bytes changed.
+        let command_upload_signature = packed_gpu_buffer_upload_signature(&indirect_draw.commands);
+        if indirect_buf.upload_signature != command_upload_signature
+            && let Some(buf) = &indirect_buf.buffer
+        {
             render_queue.write_buffer(buf, 0, bytemuck::cast_slice(&indirect_draw.commands));
+            indirect_buf.upload_signature = command_upload_signature;
         }
-        if let Some(buf) = &params_buf.buffer {
+        let params_upload_signature =
+            packed_gpu_buffer_upload_signature(&indirect_draw.params_staging);
+        if params_buf.upload_signature != params_upload_signature
+            && let Some(buf) = &params_buf.buffer
+        {
             render_queue.write_buffer(buf, 0, bytemuck::cast_slice(&indirect_draw.params_staging));
+            params_buf.upload_signature = params_upload_signature;
         }
     }
 
-    // 9. Build the single unified global BindGroup for the drawing pass
-    let mut global_bind_group = None;
+    // 9. Build or reuse the single unified global BindGroup for the drawing pass.
     if let Some(pipeline) = pipeline_res
         && command_count > 0
         && let (Some(arena_buffer), Some(params_buffer)) = (&arena.buffer, &params_buf.buffer)
     {
-        let bind_group_label = "packed_quad_indirect_global_bind_group";
-        let bg = render_device.create_bind_group(
-            Some(bind_group_label),
-            &pipeline.quad_bind_group_layout,
-            &BindGroupEntries::sequential((
-                arena_buffer.as_entire_buffer_binding(),
-                params_buffer.as_entire_buffer_binding(),
-                texture_palette_buffer.as_entire_buffer_binding(),
-                BindingResource::TextureView(&gpu_atlas.texture_view),
-                BindingResource::Sampler(&gpu_atlas.sampler),
-            )),
-        );
-        global_bind_group = Some(bg);
+        let bind_group_key = PackedQuadIndirectBindGroupKey {
+            arena_generation: arena.generation,
+            params_generation: params_buf.generation,
+            palette_generation: prepared_palette.generation,
+        };
+        if indirect_draw.bind_group.is_none()
+            || indirect_draw.bind_group_key != Some(bind_group_key)
+        {
+            let bind_group_label = "packed_quad_indirect_global_bind_group";
+            let bg = render_device.create_bind_group(
+                Some(bind_group_label),
+                &pipeline.quad_bind_group_layout,
+                &BindGroupEntries::sequential((
+                    arena_buffer.as_entire_buffer_binding(),
+                    params_buffer.as_entire_buffer_binding(),
+                    texture_palette_buffer.as_entire_buffer_binding(),
+                    BindingResource::TextureView(&gpu_atlas.texture_view),
+                    BindingResource::Sampler(&gpu_atlas.sampler),
+                )),
+            );
+            indirect_draw.bind_group = Some(bg);
+            indirect_draw.bind_group_key = Some(bind_group_key);
+        }
+    } else {
+        indirect_draw.bind_group = None;
+        indirect_draw.bind_group_key = None;
     }
 
     // Prefer the validated loop-indirect packed path when first_instance is
@@ -2280,10 +2369,11 @@ pub fn prepare_packed_quad_buffers(
             gpu_cull.capacity_commands
         };
 
-        if next_capacity != gpu_cull.capacity_commands
+        let cull_buffers_recreated = next_capacity != gpu_cull.capacity_commands
             || gpu_cull.metadata_buffer.is_none()
-            || gpu_cull.output_indirect_buffer.is_none()
-        {
+            || gpu_cull.output_indirect_buffer.is_none();
+
+        if cull_buffers_recreated {
             let metadata_size_bytes = next_capacity as u64
                 * std::mem::size_of::<crate::packed_quad_buffer::PackedQuadCullCommandMetadata>()
                     as u64;
@@ -2306,7 +2396,8 @@ pub fn prepare_packed_quad_buffers(
             gpu_cull.capacity_commands = next_capacity;
         }
 
-        if gpu_cull.config_buffer.is_none() {
+        let config_buffer_recreated = gpu_cull.config_buffer.is_none();
+        if config_buffer_recreated {
             gpu_cull.config_buffer = Some(render_device.create_buffer(&BufferDescriptor {
                 label: Some("packed_quad_gpu_cull_config_buffer"),
                 size: std::mem::size_of::<crate::packed_quad_buffer::PackedQuadCullConfig>() as u64,
@@ -2323,35 +2414,42 @@ pub fn prepare_packed_quad_buffers(
             }));
         }
 
-        gpu_cull.metadata_scratch.clear();
-        let metadata_capacity = gpu_cull.metadata_scratch.capacity();
-        if metadata_capacity < command_count {
-            gpu_cull
-                .metadata_scratch
-                .reserve(command_count - metadata_capacity);
-        }
-        gpu_cull.metadata_scratch.extend(
-            indirect_draw
-                .command_metadata
-                .iter()
-                .copied()
-                .map(packed_gpu_cull_metadata_from_command),
-        );
         let cull_config = crate::packed_quad_buffer::PackedQuadCullConfig {
             command_count: command_count.min(u32::MAX as usize) as u32,
             face_range_cull: u32::from(face_range_cull_enabled),
             compact_output: u32::from(gpu_cull_compact_enabled),
             _padding: 0,
         };
-
-        if let Some(metadata_buffer) = &gpu_cull.metadata_buffer {
-            render_queue.write_buffer(
-                metadata_buffer,
-                0,
-                bytemuck::cast_slice(&gpu_cull.metadata_scratch),
+        let command_metadata = &indirect_draw.command_metadata[..command_count];
+        let metadata_signature = packed_gpu_cull_metadata_signature(command_metadata);
+        let config_signature = packed_gpu_cull_config_signature(cull_config);
+        let metadata_upload_needed =
+            cull_buffers_recreated || gpu_cull.metadata_signature != metadata_signature;
+        if metadata_upload_needed {
+            gpu_cull.metadata_scratch.clear();
+            let metadata_capacity = gpu_cull.metadata_scratch.capacity();
+            if metadata_capacity < command_count {
+                gpu_cull
+                    .metadata_scratch
+                    .reserve(command_count - metadata_capacity);
+            }
+            gpu_cull.metadata_scratch.extend(
+                command_metadata
+                    .iter()
+                    .copied()
+                    .map(packed_gpu_cull_metadata_from_command),
             );
+            if let Some(metadata_buffer) = &gpu_cull.metadata_buffer {
+                render_queue.write_buffer(
+                    metadata_buffer,
+                    0,
+                    bytemuck::cast_slice(&gpu_cull.metadata_scratch),
+                );
+            }
         }
-        if let Some(config_buffer) = &gpu_cull.config_buffer {
+        let config_upload_needed =
+            config_buffer_recreated || gpu_cull.config_signature != config_signature;
+        if config_upload_needed && let Some(config_buffer) = &gpu_cull.config_buffer {
             render_queue.write_buffer(config_buffer, 0, bytemuck::bytes_of(&cull_config));
         }
 
@@ -2361,8 +2459,8 @@ pub fn prepare_packed_quad_buffers(
         gpu_cull.command_count = command_count;
         gpu_cull.bind_group = None;
         gpu_cull.source_signature = 0;
-        gpu_cull.metadata_signature = 0;
-        gpu_cull.config_signature = 0;
+        gpu_cull.metadata_signature = metadata_signature;
+        gpu_cull.config_signature = config_signature;
         gpu_cull.reset_dispatched();
     } else {
         gpu_cull.disable();
@@ -2375,7 +2473,6 @@ pub fn prepare_packed_quad_buffers(
     );
     record_packed_quad_cpu_visible_indirect(false, 0);
 
-    indirect_draw.bind_group = global_bind_group;
     indirect_draw.indirect_buffer = indirect_buf.buffer.clone();
     indirect_draw.command_count = command_count;
     indirect_draw.draw_mode = draw_mode;
@@ -3413,8 +3510,9 @@ fn prefetch_loaded_generated_regions_with_budget(
         return 0;
     }
 
-    order_loaded_regions_for_prefetch(
-        scratch.prefetch_candidates.as_mut_slice(),
+    retain_nearest_loaded_regions_for_prefetch(
+        &mut scratch.prefetch_candidates,
+        budget,
         camera_chunk_x,
         camera_chunk_z,
         build.region_size,
@@ -3422,7 +3520,7 @@ fn prefetch_loaded_generated_regions_with_budget(
 
     let mut prefetched = 0usize;
     for (region_origin_x, region_origin_z, region_key) in
-        scratch.prefetch_candidates.iter().copied().take(budget)
+        scratch.prefetch_candidates.iter().copied()
     {
         let entry =
             build_generated_region_cache_entry(region_origin_x, region_origin_z, region_key, build);
@@ -6689,6 +6787,63 @@ mod tests {
         assert_ne!(
             confirmed_packed_batch_generation_signature(&reversed),
             confirmed_packed_batch_generation_signature(&changed_key)
+        );
+    }
+
+    #[test]
+    fn test_packed_indirect_bind_group_key_tracks_resource_generations() {
+        let base = PackedQuadIndirectBindGroupKey {
+            arena_generation: 1,
+            params_generation: 2,
+            palette_generation: 3,
+        };
+        assert_eq!(
+            base,
+            PackedQuadIndirectBindGroupKey {
+                arena_generation: 1,
+                params_generation: 2,
+                palette_generation: 3,
+            }
+        );
+        assert_ne!(
+            base,
+            PackedQuadIndirectBindGroupKey {
+                arena_generation: 2,
+                params_generation: 2,
+                palette_generation: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn test_packed_gpu_buffer_upload_signature_tracks_draw_command_bytes() {
+        let base = crate::packed_quad_buffer::PackedQuadDrawCommand {
+            vertex_count: 6,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 4,
+        };
+        let mut changed = base;
+        changed.first_instance = 5;
+
+        assert_ne!(
+            packed_gpu_buffer_upload_signature(&[base]),
+            packed_gpu_buffer_upload_signature(&[changed])
+        );
+    }
+
+    #[test]
+    fn test_packed_gpu_buffer_upload_signature_tracks_draw_param_bytes() {
+        let base = crate::packed_quad_buffer::PackedQuadDrawParams {
+            chunk_offset: [1.0, 2.0, 3.0, 4.0],
+        };
+        let changed = crate::packed_quad_buffer::PackedQuadDrawParams {
+            chunk_offset: [1.0, 2.0, 3.0, 8.0],
+        };
+
+        assert_ne!(
+            packed_gpu_buffer_upload_signature(&[base]),
+            packed_gpu_buffer_upload_signature(&[changed])
         );
     }
 
