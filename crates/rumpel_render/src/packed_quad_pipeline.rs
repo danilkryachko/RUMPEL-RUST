@@ -1635,11 +1635,12 @@ pub fn prepare_packed_quad_buffers(
     }
 
     if arena_reallocated {
-        dirty_batch_keys = extracted_batches
-            .batches
-            .iter()
-            .map(|batch| batch.key)
-            .collect();
+        dirty_batch_keys.clear();
+        let dirty_key_capacity = dirty_batch_keys.capacity();
+        if dirty_key_capacity < extracted_batches.batches.len() {
+            dirty_batch_keys.reserve(extracted_batches.batches.len() - dirty_key_capacity);
+        }
+        dirty_batch_keys.extend(extracted_batches.batches.iter().map(|batch| batch.key));
     }
 
     indirect_draw.dirty_batch_key_set.clear();
