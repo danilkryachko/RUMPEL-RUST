@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-03: CPU packed `PackedQuadBatches` extraction now shares the batch vector through `Arc<Vec<_>>`; streaming/material mutation paths use explicit COW access. This removes the stable per-frame extracted batch Vec clone on unchanged CPU packed targets. Static proof: render check, extract-sharing test, render clippy with `-D warnings`, and `just verify`.
 - 2026-06-03: Packed arena/memory region-count estimates now count region rectangles intersecting the circular view radius arithmetically, removing the runtime `HashSet` allocation. Static proof: render check, brute-force parity region-count test, render clippy with `-D warnings`, and `just verify`.
 - 2026-06-03: Packed texture palette extraction now shares the main-world tile table with `Arc<Vec<_>>` and preserves prepared render-world Vec reuse for GPU uploads. Static proof: render check, focused palette extract-sharing test, render clippy with `-D warnings`, and `just verify`.
 - 2026-06-03: `PackedGpuGenerationBatches` extraction now shares generated batch storage with `Arc<Vec<_>>`; mutation paths use explicit COW/take helpers. This removes the stable per-frame extracted Vec clone on unchanged GPU-generated targets. Static proof: render check, extract-sharing test, render clippy with `-D warnings`, and `just verify`.

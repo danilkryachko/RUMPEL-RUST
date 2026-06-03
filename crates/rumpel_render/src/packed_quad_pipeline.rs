@@ -127,7 +127,7 @@ pub struct PackedQuadDirtyRange {
 /// Resource in the Main World storing all active packed quad batches.
 #[derive(Resource, Default, Clone)]
 pub struct PackedQuadBatches {
-    pub batches: Vec<PackedQuadBatch>,
+    pub batches: Arc<Vec<PackedQuadBatch>>,
 }
 
 // Manual compile-safe implementation of ExtractResource for Bevy 0.18 compatibility.
@@ -136,6 +136,17 @@ impl ExtractResource for PackedQuadBatches {
 
     fn extract_resource(source: &Self::Source) -> Self {
         source.clone()
+    }
+}
+
+impl PackedQuadBatches {
+    #[must_use]
+    pub fn batches(&self) -> &[PackedQuadBatch] {
+        self.batches.as_slice()
+    }
+
+    pub fn batches_mut(&mut self) -> &mut Vec<PackedQuadBatch> {
+        Arc::make_mut(&mut self.batches)
     }
 }
 
@@ -1655,24 +1666,25 @@ pub fn prepare_packed_quad_buffers(
         return;
     };
     ensure_packed_gpu_memory_reserve(&render_device, &mut gpu_reserve);
+    let extracted_batch_list = extracted_batches.batches();
 
     // 1. Evict prepared batches that are no longer present in CPU extracted batches
     indirect_draw.active_batch_keys.clear();
     let active_key_capacity = indirect_draw.active_batch_keys.capacity();
-    if active_key_capacity < extracted_batches.batches.len() {
+    if active_key_capacity < extracted_batch_list.len() {
         indirect_draw
             .active_batch_keys
-            .reserve(extracted_batches.batches.len() - active_key_capacity);
+            .reserve(extracted_batch_list.len() - active_key_capacity);
     }
     indirect_draw
         .active_batch_keys
-        .extend(extracted_batches.batches.iter().map(|batch| batch.key));
+        .extend(extracted_batch_list.iter().map(|batch| batch.key));
     let active_batch_keys = &indirect_draw.active_batch_keys;
     prepared_batches
         .batches
         .retain(|key, _| active_batch_keys.contains(key));
 
-    sort_packed_batch_order(&mut indirect_draw.batch_order, &extracted_batches.batches);
+    sort_packed_batch_order(&mut indirect_draw.batch_order, extracted_batch_list);
 
     // 2. Compute stable per-region allocations. Offsets do not shift when a
     // region grows, so unchanged regions keep their GPU data and bind group.
@@ -1687,7 +1699,7 @@ pub fn prepare_packed_quad_buffers(
         } = &mut *indirect_draw;
         plan_stable_arena_allocations_for_order_into(
             &arena.allocations,
-            &extracted_batches.batches,
+            extracted_batch_list,
             batch_order,
             arena.next_free_quads,
             default_batch_capacity_quads,
@@ -1707,7 +1719,7 @@ pub fn prepare_packed_quad_buffers(
             } = &mut *indirect_draw;
             plan_stable_arena_allocations_for_order_into(
                 &empty_allocations,
-                &extracted_batches.batches,
+                extracted_batch_list,
                 batch_order,
                 0,
                 default_batch_capacity_quads,
@@ -1767,11 +1779,11 @@ pub fn prepare_packed_quad_buffers(
         indirect_draw.dirty_batch_keys.clear();
         reserve_vec_capacity(
             &mut indirect_draw.dirty_batch_keys,
-            extracted_batches.batches.len(),
+            extracted_batch_list.len(),
         );
         indirect_draw
             .dirty_batch_keys
-            .extend(extracted_batches.batches.iter().map(|batch| batch.key));
+            .extend(extracted_batch_list.iter().map(|batch| batch.key));
     }
 
     {
@@ -1793,7 +1805,7 @@ pub fn prepare_packed_quad_buffers(
     // 4. Upload only changed stable ranges. A buffer reallocation marks all
     // active ranges dirty because the new GPU buffer starts empty.
     if let Some(arena_buffer) = arena.buffer.as_ref() {
-        for batch in &extracted_batches.batches {
+        for batch in extracted_batch_list {
             let is_full_dirty = dirty_batch_key_set.contains(&batch.key);
             if batch.quads.is_empty() {
                 continue;
@@ -1864,7 +1876,7 @@ pub fn prepare_packed_quad_buffers(
         .batch_order
         .iter()
         .map(|batch_index| {
-            let batch = &extracted_batches.batches[*batch_index];
+            let batch = &extracted_batch_list[*batch_index];
             batch
                 .chunk_ranges
                 .iter()
@@ -1908,7 +1920,7 @@ pub fn prepare_packed_quad_buffers(
             ..
         } = &mut *indirect_draw;
         for batch_index in batch_order.iter().copied() {
-            let batch = &extracted_batches.batches[batch_index];
+            let batch = &extracted_batch_list[batch_index];
             let allocation = allocation_plan.get(&batch.key).copied().unwrap_or(
                 crate::packed_quad_buffer::PackedQuadArenaAllocation {
                     key: batch.key,
@@ -2358,7 +2370,7 @@ pub fn prepare_packed_quad_buffers(
     let mut tombstone_capacity_quads = 0;
     let mut dirty_ranges = 0;
     let mut dirty_range_quads = 0;
-    for batch in &extracted_batches.batches {
+    for batch in extracted_batch_list {
         chunk_ranges += batch.chunk_ranges.len();
         dirty_ranges += batch.dirty_ranges.len();
         dirty_range_quads += batch
@@ -2380,7 +2392,7 @@ pub fn prepare_packed_quad_buffers(
     // 7. Store metrics in the atomic bridge for Main World access
     METRICS_BRIDGE
         .batches
-        .store(extracted_batches.batches.len(), Ordering::Relaxed);
+        .store(extracted_batch_list.len(), Ordering::Relaxed);
     METRICS_BRIDGE
         .chunk_ranges
         .store(chunk_ranges, Ordering::Relaxed);
@@ -2403,11 +2415,7 @@ pub fn prepare_packed_quad_buffers(
         .dirty_range_quads
         .store(dirty_range_quads, Ordering::Relaxed);
     METRICS_BRIDGE.quads.store(
-        extracted_batches
-            .batches
-            .iter()
-            .map(|b| b.quads.len())
-            .sum(),
+        extracted_batch_list.iter().map(|b| b.quads.len()).sum(),
         Ordering::Relaxed,
     );
     METRICS_BRIDGE
@@ -2833,7 +2841,7 @@ pub fn prune_confirmed_packed_dirty_ranges(mut batches: ResMut<PackedQuadBatches
         return;
     }
 
-    for batch in &mut batches.batches {
+    for batch in batches.batches_mut().iter_mut() {
         if let Some(&confirmed_generation) = confirmed_generations.get(&batch.key) {
             prune_dirty_ranges_confirmed_through(batch, confirmed_generation);
         }
@@ -3085,7 +3093,7 @@ pub fn setup_packed_quad_debug_producer(
     );
 
     // Publish batch with unique id 1 and generation 1
-    batches.batches.push(PackedQuadBatch {
+    batches.batches_mut().push(PackedQuadBatch {
         key: pack_chunk_key(chunk_pos.x, chunk_pos.z),
         chunk_ranges: Arc::new(vec![PackedQuadChunkRange {
             chunk_key: pack_chunk_key(chunk_pos.x, chunk_pos.z),
@@ -3415,7 +3423,7 @@ fn finalize_generated_batch_update(
     context: GeneratedBatchUpdateContext,
     update_started: Instant,
 ) {
-    cpu_batches.batches.clear();
+    cpu_batches.batches_mut().clear();
     record_packed_gpu_generation_region_mask(context.loaded_regions, context.generated_batch_count);
     record_packed_gpu_generation_cache_lifecycle(
         stats.cache_hits.saturating_add(stats.batch_reuse),
@@ -4053,7 +4061,7 @@ fn sync_region_batch_active_flags(
     region_key: u64,
 ) {
     let Some(batch) = batches
-        .batches
+        .batches_mut()
         .iter_mut()
         .find(|batch| batch.key == region_key)
     else {
@@ -4073,7 +4081,7 @@ fn evict_chunk_from_region_batch(
     region_key: u64,
 ) -> bool {
     let Some(batch_index) = batches
-        .batches
+        .batches()
         .iter()
         .position(|batch| batch.key == region_key)
     else {
@@ -4081,7 +4089,7 @@ fn evict_chunk_from_region_batch(
     };
 
     let has_resident_ranges = {
-        let batch = &mut batches.batches[batch_index];
+        let batch = &mut batches.batches_mut()[batch_index];
         let ranges = Arc::make_mut(&mut batch.chunk_ranges);
         let Some(range) = ranges
             .iter_mut()
@@ -4109,7 +4117,7 @@ fn evict_chunk_from_region_batch(
         return true;
     }
 
-    batches.batches.remove(batch_index);
+    batches.batches_mut().remove(batch_index);
     state.region_generations.remove(&region_key);
     true
 }
@@ -4509,11 +4517,8 @@ fn append_chunk_to_region_batch_with_capacity_and_mode(
     let generation = next_region_generation(state, region_key);
     let active = state.active_render_chunks.contains(&chunk_key);
 
-    if let Some(batch) = batches
-        .batches
-        .iter_mut()
-        .find(|batch| batch.key == region_key)
-    {
+    let batch_list = batches.batches_mut();
+    if let Some(batch) = batch_list.iter_mut().find(|batch| batch.key == region_key) {
         let reusable_range_index = batch.chunk_ranges.iter().position(|range| {
             !range.resident
                 && range.capacity_quads >= quads.len()
@@ -4580,7 +4585,7 @@ fn append_chunk_to_region_batch_with_capacity_and_mode(
     } else {
         let mut region_quads = Vec::with_capacity(reserved_capacity_quads.max(quads.len()));
         region_quads.extend_from_slice(quads);
-        batches.batches.push(PackedQuadBatch {
+        batch_list.push(PackedQuadBatch {
             key: region_key,
             quads: Arc::new(region_quads),
             chunk_ranges: Arc::new(vec![PackedQuadChunkRange {
@@ -4697,7 +4702,9 @@ fn rebuild_region_batch(
     );
     chunk_keys.sort_unstable();
 
-    batches.batches.retain(|batch| batch.key != region_key);
+    batches
+        .batches_mut()
+        .retain(|batch| batch.key != region_key);
 
     if chunk_keys.is_empty() {
         state.region_generations.remove(&region_key);
@@ -4746,7 +4753,7 @@ fn rebuild_region_batch(
             &mut state.region_compaction_scratch,
         );
     }
-    batches.batches.push(batch);
+    batches.batches_mut().push(batch);
     if defer_compaction {
         mark_region_for_deferred_compaction(state, region_key);
     }
@@ -4759,21 +4766,24 @@ fn compact_deferred_packed_region_batch(
     region_key: u64,
 ) -> bool {
     let Some(batch_index) = batches
-        .batches
+        .batches()
         .iter()
         .position(|batch| batch.key == region_key)
     else {
         return false;
     };
 
-    let changed = compact_region_batch_preserving_chunk_ranges_with_scratch(
-        &mut batches.batches[batch_index],
-        &mut state.region_compaction_scratch,
-    );
+    let changed = {
+        let batch = &mut batches.batches_mut()[batch_index];
+        compact_region_batch_preserving_chunk_ranges_with_scratch(
+            batch,
+            &mut state.region_compaction_scratch,
+        )
+    };
     if changed {
-        batches.batches[batch_index].generation = next_region_generation(state, region_key);
+        batches.batches_mut()[batch_index].generation = next_region_generation(state, region_key);
     }
-    batches.batches[batch_index].needs_compaction = false;
+    batches.batches_mut()[batch_index].needs_compaction = false;
     true
 }
 
@@ -4851,13 +4861,14 @@ pub fn sync_packed_material_entities(
     atlas: Res<PackedQuadBlockAtlas>,
 ) {
     let system_started_at = Instant::now();
+    let batch_list = batches.batches();
     let mut active_keys = std::mem::take(&mut entity_map.active_keys);
     active_keys.clear();
     let active_key_capacity = active_keys.capacity();
-    if active_key_capacity < batches.batches.len() {
-        active_keys.reserve(batches.batches.len() - active_key_capacity);
+    if active_key_capacity < batch_list.len() {
+        active_keys.reserve(batch_list.len() - active_key_capacity);
     }
-    active_keys.extend(batches.batches.iter().map(|batch| batch.key));
+    active_keys.extend(batch_list.iter().map(|batch| batch.key));
 
     entity_map.entities.retain(|key, (entity, _)| {
         if !active_keys.contains(key) {
@@ -4871,7 +4882,7 @@ pub fn sync_packed_material_entities(
     });
     entity_map.active_keys = active_keys;
 
-    for batch in &batches.batches {
+    for batch in batch_list {
         let current_gen = batch.generation;
         let needs_update = match entity_map.entities.get(&batch.key) {
             Some((_, g)) => *g != current_gen,
@@ -4978,6 +4989,14 @@ mod tests {
             <PackedQuadBlockTexturePalette as ExtractResource>::extract_resource(&source);
 
         assert!(Arc::ptr_eq(&source.tiles, &extracted.tiles));
+    }
+
+    #[test]
+    fn packed_quad_batches_extract_shares_batch_storage() {
+        let source = PackedQuadBatches::default();
+        let extracted = <PackedQuadBatches as ExtractResource>::extract_resource(&source);
+
+        assert!(Arc::ptr_eq(&source.batches, &extracted.batches));
     }
 
     #[test]
