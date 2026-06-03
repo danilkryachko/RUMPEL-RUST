@@ -311,7 +311,7 @@ fn take_best_fit_arena_free_slot(
         .min_by_key(|(_, slot)| (slot.capacity_quads, slot.offset_quads))
         .map(|(index, _)| index)?;
 
-    Some(free_slots.remove(best_index))
+    Some(free_slots.swap_remove(best_index))
 }
 
 fn arena_slot_high_water_mark(
