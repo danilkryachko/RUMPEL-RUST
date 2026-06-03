@@ -251,6 +251,33 @@ Headless compare after fix: `.ai_tasks/generated_headless_compare_20260604_01114
 
 Static proof: `just verify`, unit test `chunk_needs_gpu_generation_tracks_per_chunk_batch_generation`.
 
+## Structure-stable render-prepare skip (20260604)
+
+**Profile diagnosis (`011102`):** steady autopilot кадры тратили ~7–15ms в render tail (`render_manage_views_us`), а `prepare_packed_gpu_generated_draw` на active-mask rotation всё ещё прогонял arena allocation planner до structure refresh.
+
+| Change | File(s) | Effect |
+|--------|---------|--------|
+| Early structure-stable refresh до allocation plan | `packed_quad_renderer.rs` | Active-mask rotation пропускает `plan_gpu_generated_arena_allocations_*`, когда arena slots уже покрывают active chunks |
+| `refresh_structure_stable_gpu_generated_prepare` helper | `packed_quad_renderer.rs` | Общий partial-prepare path: jobs/params upload + cached bind groups, без full rebuild |
+| Generated cull prepare no-op when signatures unchanged | `packed_quad_renderer.rs` | Steady кадры не пересобирают metadata scratch / bind group |
+| `structure_stable_gpu_allocations_satisfied` test | `packed_quad_renderer.rs` | Guards arena slot precheck |
+
+**Draw loop:** ~178 `draw_indirect`/frame на Metal остаётся — `MULTI_DRAW_INDIRECT_COUNT` недоступен, per-chunk `first_instance` требует отдельных indirect calls (см. ADR/board backlog).
+
+### Before / after (GUI `just profile-packed-gpu-generated`, settle=2s)
+
+| Metric | Before (`011102`) | After (`011654`) | Target |
+|--------|-------------------|------------------|--------|
+| `avg_raw_fps` | 131.0 | 129.8 | ≥150 |
+| `ge25` | 0/787 | **6/780** | ≤10/1000 |
+| `worst_frame_ms` | 24.04 | 37.33 (tail spike t=10.91) | — |
+| worst `generated_update_us` | 23001 | 36268 (shift) | ≤55000 |
+| `generated_prepare_skipped` (worst_packed) | false | **true** | — |
+
+Headless compare after fix: `.ai_tasks/generated_headless_compare_20260604_011717/` — generated `ge25=4`, `avg_raw_fps=1034.4`, worst **33.12ms**.
+
+Static proof: `just verify`, unit test `structure_stable_gpu_allocations_satisfied_requires_active_slots`.
+
 ## References
 
 - Prior partial profile: `.ai_tasks/gpu_generated_profile_20260603_190618.md`
