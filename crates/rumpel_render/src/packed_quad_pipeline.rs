@@ -271,6 +271,8 @@ pub struct PreparedPackedQuadIndirectDraw {
     pub batch_order: Vec<usize>,
     /// Reused extracted batch key set for prepared-batch eviction.
     pub active_batch_keys: HashSet<u64>,
+    /// Reused dirty batch key set for upload decisions.
+    pub dirty_batch_key_set: HashSet<u64>,
     /// Reused CPU staging copy of draw params before uploading the params buffer.
     pub params_staging: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
     /// Mode of drawing used (`direct`, `indirect`, `multi-indirect`, or `material`).
@@ -1606,14 +1608,22 @@ pub fn prepare_packed_quad_buffers(
             .collect();
     }
 
-    let dirty_batch_keys = dirty_batch_keys.into_iter().collect::<HashSet<_>>();
+    indirect_draw.dirty_batch_key_set.clear();
+    let dirty_key_capacity = indirect_draw.dirty_batch_key_set.capacity();
+    if dirty_key_capacity < dirty_batch_keys.len() {
+        indirect_draw
+            .dirty_batch_key_set
+            .reserve(dirty_batch_keys.len() - dirty_key_capacity);
+    }
+    indirect_draw.dirty_batch_key_set.extend(dirty_batch_keys);
+    let dirty_batch_key_set = &indirect_draw.dirty_batch_key_set;
     let mut uploaded_batches = 0;
 
     // 4. Upload only changed stable ranges. A buffer reallocation marks all
     // active ranges dirty because the new GPU buffer starts empty.
     if let Some(arena_buffer) = arena.buffer.as_ref() {
         for batch in &extracted_batches.batches {
-            let is_full_dirty = dirty_batch_keys.contains(&batch.key);
+            let is_full_dirty = dirty_batch_key_set.contains(&batch.key);
             if batch.quads.is_empty() {
                 continue;
             }
