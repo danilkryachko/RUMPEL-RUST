@@ -3497,7 +3497,7 @@ pub struct BuiltPackedQuadChunk {
 
 fn build_packed_quad_chunk(
     pending: PendingChunk,
-    context: WorldGenerationContext,
+    context: Arc<WorldGenerationContext>,
     region_size: i32,
     lod_enabled: bool,
     min_cell_size: usize,
@@ -3858,7 +3858,7 @@ pub fn stream_packed_quad_chunks(
     let max_build_tasks = packed_max_build_tasks_from_env();
     let lod_enabled = env_flag_default(PACKED_LOD_ENV, true);
     let min_cell_size = packed_min_cell_size_from_env();
-    let context = WorldGenerationContext::from_registry(&registry);
+    let context = Arc::new(WorldGenerationContext::from_registry(&registry));
     let sand_block = registry.get_id("sand").unwrap_or(context.palette.dirt);
     let thread_pool = AsyncComputeTaskPool::get();
     let mut spawned_this_frame = 0;
@@ -3873,7 +3873,7 @@ pub fn stream_packed_quad_chunks(
             continue;
         }
 
-        let context = context.clone();
+        let context = Arc::clone(&context);
         let task = thread_pool.spawn(async move {
             build_packed_quad_chunk(
                 pending,
