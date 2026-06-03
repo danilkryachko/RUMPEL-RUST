@@ -162,6 +162,7 @@ pub struct PackedGpuGenerationRegionScratch {
     generated_batches: Vec<PackedGpuGenerationBatch>,
     carried_batches: HashMap<u64, PackedGpuGenerationBatch>,
     pending_active_region_builds: Vec<(i32, i32, u64)>,
+    pending_loaded_region_builds: Vec<(i32, i32, u64)>,
 }
 
 /// Represents a prepared batch of packed voxel quads in the Render World.
@@ -3265,24 +3266,66 @@ fn build_generated_region_cache_entry(
     }
 }
 
-fn prefetch_loaded_generated_regions(
+const SLIDING_WINDOW_PREFETCH_BUDGET_CAP: usize = 32;
+const STEADY_LOADED_REGION_PREFETCH_BUDGET: usize = 1;
+
+fn prune_stale_pending_loaded_region_builds(
+    pending: &mut Vec<(i32, i32, u64)>,
+    loaded_region_keys: &[u64],
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let loaded_keys: HashSet<u64> = loaded_region_keys.iter().copied().collect();
+    pending.retain(|(_, _, region_key)| loaded_keys.contains(region_key));
+}
+
+fn enqueue_missing_loaded_region_prefetch_builds(
+    loaded_regions: &[(i32, i32, u64)],
+    pending: &mut Vec<(i32, i32, u64)>,
+    region_cache: &crate::packed_quad_gpu_generation::GeneratedRegionCache,
+) {
+    for (region_origin_x, region_origin_z, region_key) in loaded_regions {
+        if region_cache.entries.contains_key(region_key) {
+            continue;
+        }
+        if pending
+            .iter()
+            .any(|(_, _, queued_key)| queued_key == region_key)
+        {
+            continue;
+        }
+        pending.push((*region_origin_x, *region_origin_z, *region_key));
+    }
+}
+
+fn process_steady_loaded_region_prefetch(
     scratch: &mut PackedGpuGenerationRegionScratch,
     region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
     camera_chunk_x: i32,
     camera_chunk_z: i32,
+    region_size: i32,
     build: &GeneratedRegionCacheBuildContext<'_>,
 ) -> usize {
-    prefetch_loaded_generated_regions_with_budget(
-        scratch,
+    prune_stale_pending_loaded_region_builds(
+        &mut scratch.pending_loaded_region_builds,
+        scratch.loaded_region_keys.as_slice(),
+    );
+    enqueue_missing_loaded_region_prefetch_builds(
+        scratch.loaded_regions.as_slice(),
+        &mut scratch.pending_loaded_region_builds,
+        region_cache,
+    );
+    process_pending_generated_region_builds(
+        &mut scratch.pending_loaded_region_builds,
         region_cache,
         camera_chunk_x,
         camera_chunk_z,
+        region_size,
         build,
-        packed_gpu_generation_prefetch_budget_from_env(),
+        STEADY_LOADED_REGION_PREFETCH_BUDGET,
     )
 }
-
-const SLIDING_WINDOW_PREFETCH_BUDGET_CAP: usize = 32;
 
 fn sliding_window_prefetch_budget(
     scratch: &PackedGpuGenerationRegionScratch,
@@ -3853,11 +3896,12 @@ pub fn update_packed_gpu_generation_regions(
         .is_some_and(|previous| previous.matches_active_region_window(target))
         && !gpu_batches.batches.is_empty()
     {
-        let prefetched = prefetch_loaded_generated_regions(
+        let prefetched = process_steady_loaded_region_prefetch(
             scratch,
             &mut region_cache,
             camera_chunk_x,
             camera_chunk_z,
+            region_size,
             &cache_build,
         );
         record_packed_gpu_generation_region_mask(loaded_regions, active_region_count);
@@ -3888,11 +3932,12 @@ pub fn update_packed_gpu_generation_regions(
             gpu_batches.batch_structure_signature = batch_structure_signature;
             gpu_batches.summary = batch_summary;
         }
-        let prefetched = prefetch_loaded_generated_regions(
+        let prefetched = process_steady_loaded_region_prefetch(
             scratch,
             &mut region_cache,
             camera_chunk_x,
             camera_chunk_z,
+            region_size,
             &cache_build,
         );
         record_packed_gpu_generation_region_mask(loaded_regions, active_region_count);

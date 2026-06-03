@@ -203,6 +203,31 @@ Static proof: `just verify`, unit test `settle_period_excludes_initial_measureme
 
 Env: `RUMPEL_PROFILE_SETTLE_SECONDS` (default `0`; GUI generated recipe uses `2`).
 
+## Render-prepare tail fix (20260604)
+
+**Profile diagnosis (`004925`):** counting-window ge25 split into (a) **21× ~27ms main-thread** frames with `packed_generated_update_us≈26ms` and `generated_cache_prefetched=2` on chunk-mask-only fast path — sync `prefetch_loaded_generated_regions` burst; (b) **4× ~25–31ms tail** frames with `render_manage_views_us≈render_prepare_windows_us≈23–27ms` on region shift; (c) occasional depth-texture prepare spikes. Worst frame t=13.23 was tail shift, not `generated_update_us`.
+
+| Change | File(s) | Effect |
+|--------|---------|--------|
+| Remove sync prefetch on `matches_active_region_window` / `matches_region_window_layout` | `packed_quad_pipeline.rs` | Eliminates 2× region build (~26ms) on chunk-mask-only frames |
+| Steady loaded-region prefetch queue (budget **1**/frame) | `packed_quad_pipeline.rs` | Warms edge cache without burst; `pending_loaded_region_builds` + `process_steady_loaded_region_prefetch` |
+| Active-mask refresh reuses generation bind group | `packed_quad_renderer.rs` | `can_refresh_active_dispatch` writes jobs/params only when structure unchanged |
+| `matches_structure` unit test | `packed_quad_renderer.rs` | Guards partial render-prepare path for active-mask rotation |
+
+### Before / after (GUI `just profile-packed-gpu-generated`, settle=2s)
+
+| Metric | Before (`004925`) | After (`010242`) | Target |
+|--------|-------------------|------------------|--------|
+| `ge25` | 24/853 | **0/778** | ≤10/1000 |
+| `avg_raw_fps` | 142.1 | 129.4 | ≥150 |
+| `worst_frame_ms` | 31.69 | **24.83** | — |
+| worst `generated_update_us` | 48 (worst_packed snapshot) | **24008** (shift) | ≤55000 |
+| ~27ms main-thread spike count (counting) | 21 | **0** | — |
+
+Headless compare after fix: `.ai_tasks/generated_headless_compare_20260604_010312/` — generated `ge25=4`, worst `generated_update_us=31848`.
+
+Static proof: `just verify`, `packed_gpu_generation_prepared_matches_structure_for_active_mask_refresh`.
+
 ## References
 
 - Prior partial profile: `.ai_tasks/gpu_generated_profile_20260603_190618.md`

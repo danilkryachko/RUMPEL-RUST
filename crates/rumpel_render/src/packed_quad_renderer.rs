@@ -1046,19 +1046,25 @@ fn prepare_packed_gpu_generated_draw(
             bytemuck::cast_slice(&buffers.draw_params),
         );
 
-        let generation_bind_group = render_device.create_bind_group(
-            Some("packed_gpu_generation_bind_group"),
-            &generation_pipeline.bind_group_layout,
-            &BindGroupEntries::sequential((
-                jobs_buffer.as_entire_buffer_binding(),
-                columns_buffer.as_entire_buffer_binding(),
-                arena_buffer.as_entire_buffer_binding(),
-                counter_buffer.as_entire_buffer_binding(),
-                indirect_buffer.as_entire_buffer_binding(),
-            )),
-        );
+        if prepared.generation_bind_group.is_none() {
+            prepared.generation_bind_group = Some(render_device.create_bind_group(
+                Some("packed_gpu_generation_bind_group"),
+                &generation_pipeline.bind_group_layout,
+                &BindGroupEntries::sequential((
+                    jobs_buffer.as_entire_buffer_binding(),
+                    columns_buffer.as_entire_buffer_binding(),
+                    arena_buffer.as_entire_buffer_binding(),
+                    counter_buffer.as_entire_buffer_binding(),
+                    indirect_buffer.as_entire_buffer_binding(),
+                )),
+            ));
+        }
 
         prepared.regions.clone_from(&buffers.planned_regions);
+        prepared.total_column_count = batch_summary.total_column_count;
+        prepared.max_column_count = batch_summary.max_column_count;
+        prepared.total_max_output_quads = batch_summary.total_max_output_quads;
+        prepared.source_chunk_count = batch_summary.source_chunk_count;
         prepared.command_count = buffers.jobs.len();
         prepared.batch_signature = batch_signature;
         prepared.batch_structure_signature = batch_structure_signature;
@@ -1066,7 +1072,6 @@ fn prepare_packed_gpu_generated_draw(
             generated_regions_cull_metadata_signature(&prepared.regions);
         prepared.cull_source_signature =
             generated_regions_cull_source_signature(&prepared.regions, prepared.arena_generation);
-        prepared.generation_bind_group = Some(generation_bind_group);
         prepared.mark_pending();
 
         crate::packed_quad_pipeline::record_packed_gpu_generation_prepare_reuse(false);
@@ -3126,6 +3131,81 @@ mod tests {
             )),
             3
         ));
+    }
+
+    #[test]
+    fn packed_gpu_generation_prepared_matches_structure_for_active_mask_refresh() {
+        let chunk_key = 88_u64;
+        let make_batch =
+            |active: bool| crate::packed_quad_gpu_generation::PackedGpuGenerationBatch {
+                key: 42,
+                columns: std::sync::Arc::new(vec![
+                    crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
+                        [0, 0, 1, 1],
+                        [4, 4, 4, 4, 4],
+                        2,
+                    ),
+                ]),
+                chunk_ranges: std::sync::Arc::new(vec![
+                    crate::packed_quad_gpu_generation::PackedGpuChunkRange {
+                        chunk_key,
+                        column_start: 0,
+                        column_len: 1,
+                        active,
+                    },
+                ]),
+                params: crate::packed_quad_gpu_generation::PackedGpuGenerationParams::new(
+                    1, 7, 0, 0, 1, 2, 3,
+                ),
+                source_chunk_count: 1,
+                max_output_quads: 7,
+                translation: Vec4::ZERO,
+                bounds_min: Vec3::new(-1.0, 0.0, 2.0),
+                bounds_max: Vec3::new(3.0, 4.0, 5.0),
+                generation: 9,
+            };
+        let active_batch = make_batch(true);
+        let inactive_batch = make_batch(false);
+        let structure_signature = PackedGpuGenerationBatches::calculate_batch_structure_signature(
+            std::slice::from_ref(&active_batch),
+        );
+        let active_signature = PackedGpuGenerationBatches::calculate_batch_signature(
+            std::slice::from_ref(&active_batch),
+        );
+        let inactive_signature = PackedGpuGenerationBatches::calculate_batch_signature(
+            std::slice::from_ref(&inactive_batch),
+        );
+        assert_ne!(active_signature, inactive_signature);
+        assert_eq!(
+            structure_signature,
+            PackedGpuGenerationBatches::calculate_batch_structure_signature(&[inactive_batch])
+        );
+
+        let prepared = PreparedPackedGpuGeneratedDraw {
+            enabled: true,
+            regions: vec![PreparedPackedGpuGeneratedRegion {
+                key: active_batch.key,
+                chunk_key,
+                generation: active_batch.generation,
+                column_count: 1,
+                max_output_quads:
+                    crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN,
+                arena_offset_quads: 16,
+                arena_capacity_quads: 32,
+                draw_command_index: 0,
+                bounds_min: active_batch.bounds_min,
+                bounds_max: active_batch.bounds_max,
+            }],
+            command_count: 1,
+            arena_generation: 3,
+            batch_signature: active_signature,
+            batch_structure_signature: structure_signature,
+            ..Default::default()
+        };
+        prepared.mark_dispatched();
+
+        assert!(!prepared.matches_batches(1, inactive_signature, 3));
+        assert!(prepared.matches_structure(1, structure_signature, 3));
     }
 
     #[test]
