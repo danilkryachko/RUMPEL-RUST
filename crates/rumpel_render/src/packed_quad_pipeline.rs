@@ -3453,6 +3453,13 @@ pub struct PendingChunk {
     pub distance_sq: i32,
 }
 
+#[derive(Default)]
+pub struct PackedRegionCompactionScratch {
+    compacted_quads: Vec<PackedVoxelQuad>,
+    compacted_ranges: Vec<PackedQuadChunkRange>,
+    chunk_quads: Vec<PackedVoxelQuad>,
+}
+
 #[derive(Resource, Default)]
 pub struct PackedQuadStreamingState {
     pub loaded: HashMap<u64, LoadedPackedQuadChunk>,
@@ -3470,6 +3477,7 @@ pub struct PackedQuadStreamingState {
     pub building_to_despawn: Vec<(u64, Entity)>,
     pub render_chunks: Vec<PendingChunk>,
     pub region_rebuild_chunk_keys: Vec<u64>,
+    pub region_compaction_scratch: PackedRegionCompactionScratch,
 }
 
 pub struct LoadedPackedQuadChunk {
@@ -4109,7 +4117,10 @@ fn append_chunk_to_region_batch_with_capacity_and_mode(
             batch.needs_compaction = true;
             mark_region_for_deferred_compaction(state, region_key);
         } else {
-            compact_region_batch_preserving_chunk_ranges(batch);
+            compact_region_batch_preserving_chunk_ranges_with_scratch(
+                batch,
+                &mut state.region_compaction_scratch,
+            );
             batch.needs_compaction = false;
         }
     } else {
@@ -4133,15 +4144,36 @@ fn append_chunk_to_region_batch_with_capacity_and_mode(
     }
 }
 
+#[cfg(test)]
 fn compact_region_batch_preserving_chunk_ranges(batch: &mut PackedQuadBatch) -> bool {
+    let mut scratch = PackedRegionCompactionScratch::default();
+    compact_region_batch_preserving_chunk_ranges_with_scratch(batch, &mut scratch)
+}
+
+fn compact_region_batch_preserving_chunk_ranges_with_scratch(
+    batch: &mut PackedQuadBatch,
+    scratch: &mut PackedRegionCompactionScratch,
+) -> bool {
     if batch.quads.len() < 2 || batch.chunk_ranges.is_empty() {
         return false;
     }
 
     let old_quads = batch.quads.as_slice();
     let old_ranges = batch.chunk_ranges.as_slice();
-    let mut compacted_quads = Vec::with_capacity(batch.quads.capacity());
-    let mut compacted_ranges = Vec::with_capacity(old_ranges.len());
+    scratch.compacted_quads.clear();
+    let compacted_quads_capacity = scratch.compacted_quads.capacity();
+    if compacted_quads_capacity < batch.quads.capacity() {
+        scratch
+            .compacted_quads
+            .reserve(batch.quads.capacity() - compacted_quads_capacity);
+    }
+    scratch.compacted_ranges.clear();
+    let compacted_ranges_capacity = scratch.compacted_ranges.capacity();
+    if compacted_ranges_capacity < old_ranges.len() {
+        scratch
+            .compacted_ranges
+            .reserve(old_ranges.len() - compacted_ranges_capacity);
+    }
 
     for range in old_ranges {
         let start_quads = range.start_quads.min(old_quads.len());
@@ -4154,9 +4186,11 @@ fn compact_region_batch_preserving_chunk_ranges(batch: &mut PackedQuadBatch) -> 
             .saturating_add(slot_len_quads)
             .min(old_quads.len());
         if !range.resident {
-            let compacted_start = compacted_quads.len();
-            compacted_quads.extend_from_slice(&old_quads[start_quads..end_quads]);
-            compacted_ranges.push(PackedQuadChunkRange {
+            let compacted_start = scratch.compacted_quads.len();
+            scratch
+                .compacted_quads
+                .extend_from_slice(&old_quads[start_quads..end_quads]);
+            scratch.compacted_ranges.push(PackedQuadChunkRange {
                 start_quads: compacted_start,
                 len_quads: 0,
                 capacity_quads: end_quads - start_quads,
@@ -4167,23 +4201,29 @@ fn compact_region_batch_preserving_chunk_ranges(batch: &mut PackedQuadBatch) -> 
             continue;
         }
 
-        let mut chunk_quads = old_quads[start_quads..end_quads].to_vec();
-        crate::voxel_packed_quads::compact_packed_quads(&mut chunk_quads);
+        scratch.chunk_quads.clear();
+        scratch
+            .chunk_quads
+            .extend_from_slice(&old_quads[start_quads..end_quads]);
+        crate::voxel_packed_quads::compact_packed_quads(&mut scratch.chunk_quads);
 
-        let compacted_start = compacted_quads.len();
-        compacted_quads.extend_from_slice(&chunk_quads);
-        compacted_ranges.push(PackedQuadChunkRange {
+        let compacted_start = scratch.compacted_quads.len();
+        scratch
+            .compacted_quads
+            .extend_from_slice(&scratch.chunk_quads);
+        scratch.compacted_ranges.push(PackedQuadChunkRange {
             start_quads: compacted_start,
-            len_quads: chunk_quads.len(),
-            capacity_quads: chunk_quads.len(),
+            len_quads: scratch.chunk_quads.len(),
+            capacity_quads: scratch.chunk_quads.len(),
             ..*range
         });
     }
 
-    let changed = compacted_quads.as_slice() != old_quads || compacted_ranges != old_ranges;
+    let changed =
+        scratch.compacted_quads.as_slice() != old_quads || scratch.compacted_ranges != old_ranges;
     if changed {
-        batch.quads = Arc::new(compacted_quads);
-        batch.chunk_ranges = Arc::new(compacted_ranges);
+        batch.quads = Arc::new(std::mem::take(&mut scratch.compacted_quads));
+        batch.chunk_ranges = Arc::new(std::mem::take(&mut scratch.compacted_ranges));
         batch.dirty_ranges = Arc::new(Vec::new());
     }
     changed
@@ -4247,7 +4287,10 @@ fn rebuild_region_batch(
         needs_compaction: defer_compaction,
     };
     if !defer_compaction {
-        compact_region_batch_preserving_chunk_ranges(&mut batch);
+        compact_region_batch_preserving_chunk_ranges_with_scratch(
+            &mut batch,
+            &mut state.region_compaction_scratch,
+        );
     }
     batches.batches.push(batch);
     if defer_compaction {
@@ -4269,7 +4312,10 @@ fn compact_deferred_packed_region_batch(
         return false;
     };
 
-    let changed = compact_region_batch_preserving_chunk_ranges(&mut batches.batches[batch_index]);
+    let changed = compact_region_batch_preserving_chunk_ranges_with_scratch(
+        &mut batches.batches[batch_index],
+        &mut state.region_compaction_scratch,
+    );
     if changed {
         batches.batches[batch_index].generation = next_region_generation(state, region_key);
     }
