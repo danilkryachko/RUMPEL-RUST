@@ -408,6 +408,28 @@ pub fn active_gpu_generation_chunk_keys(view_center: IVec2, view_radius: i32) ->
     keys
 }
 
+/// Deterministic signature for chunk keys inside the circular view radius.
+#[must_use]
+pub fn active_gpu_generation_chunk_signature(view_center: IVec2, view_radius: i32) -> (usize, u64) {
+    let radius = view_radius.max(0);
+    let radius_sq = radius * radius;
+    let mut count = 0usize;
+    let mut hash = FNV64_OFFSET;
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx * dx + dz * dz > radius_sq {
+                continue;
+            }
+            count = count.saturating_add(1);
+            hash = fnv64(
+                hash,
+                gpu_pack_chunk_key(view_center.x + dx, view_center.y + dz),
+            );
+        }
+    }
+    (count, hash)
+}
+
 /// Returns true when at least one chunk in the region grid is in `active_chunk_keys`.
 #[must_use]
 pub fn region_has_active_chunks_in_set(
@@ -1112,6 +1134,28 @@ mod tests {
         assert!(keys.contains(&gpu_pack_chunk_key(0, 0)));
         assert!(keys.contains(&gpu_pack_chunk_key(1, 0)));
         assert!(!keys.contains(&gpu_pack_chunk_key(2, 0)));
+    }
+
+    #[test]
+    fn active_gpu_generation_chunk_signature_uses_deterministic_scan_order() {
+        let center = IVec2::new(0, 0);
+        let expected = PackedGpuGenerationTarget::active_chunk_signature([
+            gpu_pack_chunk_key(0, -1),
+            gpu_pack_chunk_key(-1, 0),
+            gpu_pack_chunk_key(0, 0),
+            gpu_pack_chunk_key(1, 0),
+            gpu_pack_chunk_key(0, 1),
+        ]);
+
+        assert_eq!(active_gpu_generation_chunk_signature(center, 1), expected);
+        assert_eq!(
+            active_gpu_generation_chunk_signature(center, 1).0,
+            active_gpu_generation_chunk_keys(center, 1).len()
+        );
+        assert_ne!(
+            active_gpu_generation_chunk_signature(center, 1),
+            active_gpu_generation_chunk_signature(center, 2)
+        );
     }
 
     #[test]

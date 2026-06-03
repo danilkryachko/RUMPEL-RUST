@@ -25,10 +25,10 @@ use rumpel_world::world_gen::{WorldGenerationContext, terrain_surface_contract_v
 use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuChunkRange, PackedGpuGenerationBatch,
     PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationParams,
-    PackedGpuGenerationTarget, order_loaded_regions_for_prefetch,
-    packed_gpu_generation_columns_per_chunk, packed_gpu_generation_lod_for_cell_size,
-    packed_gpu_generation_prefetch_budget_from_env, region_has_active_chunks,
-    sync_gpu_chunk_range_active_flags,
+    PackedGpuGenerationTarget, active_gpu_generation_chunk_signature,
+    order_loaded_regions_for_prefetch, packed_gpu_generation_columns_per_chunk,
+    packed_gpu_generation_lod_for_cell_size, packed_gpu_generation_prefetch_budget_from_env,
+    region_has_active_chunks, sync_gpu_chunk_range_active_flags,
 };
 use crate::voxel_material::load_block_atlas;
 use crate::voxel_packed_quads::{PackedVoxelFace, PackedVoxelQuad};
@@ -3646,9 +3646,8 @@ pub fn update_packed_gpu_generation_regions(
                 .iter()
                 .map(|(_, _, region_key)| *region_key),
         );
-    let (active_chunk_count, active_chunk_hash) = PackedGpuGenerationTarget::active_chunk_signature(
-        scratch.active_chunk_keys.iter().copied(),
-    );
+    let (active_chunk_count, active_chunk_hash) =
+        active_gpu_generation_chunk_signature(view_center, view_radius);
     let target = PackedGpuGenerationTarget::new(
         camera_chunk_x,
         camera_chunk_z,
