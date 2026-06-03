@@ -298,6 +298,16 @@ Static proof: `just verify`, unit test `structure_stable_gpu_allocations_satisfi
 
 **Статус vs цели:** `ge25` в норме (≤10/1000); `avg_raw_fps` ~134–137, цель ≥150 не достигнута — дальше только engine-side снижение GPU→swapchain backpressure (не custom present).
 
+## Merge director micro-perf (20260604)
+
+**Commit:** `1f91fca` — merge `origin/ai/director-проанализируйте-опти` (88 коммитов) в `ai/gpu-generated-acceptance-20260604`.
+
+**Сохранено с acceptance-ветки:** Metal per-chunk draw, sliding-window, deferred edge builds, active-edge prefetch, settle, pacing, acceptance scripts.
+
+**Интегрировано с director:** upload signatures (skip unchanged buffer uploads), cull metadata/config gating, global indirect bind group cache, `retain_nearest_loaded_regions_for_prefetch`, scratch reuse (streaming/compaction/prepare), deterministic chunk signatures.
+
+**Конфликты:** 9 файлов; auto-merge render core + ручная склейка docs/scripts. `just verify` PASS после merge.
+
 ## References
 
 - Prior partial profile: `.ai_tasks/gpu_generated_profile_20260603_190618.md`
