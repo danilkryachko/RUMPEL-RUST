@@ -2796,9 +2796,9 @@ fn prune_dirty_ranges_confirmed_through(
 /// Main World system that removes dirty subrange metadata after render-world upload planning
 /// has confirmed the corresponding batch generation.
 pub fn prune_confirmed_packed_dirty_ranges(mut batches: ResMut<PackedQuadBatches>) {
-    let confirmed_generations = CONFIRMED_PACKED_BATCH_GENERATIONS
-        .lock()
-        .map_or_else(|_| HashMap::new(), |generations| generations.clone());
+    let Ok(confirmed_generations) = CONFIRMED_PACKED_BATCH_GENERATIONS.lock() else {
+        return;
+    };
     if confirmed_generations.is_empty() {
         return;
     }
