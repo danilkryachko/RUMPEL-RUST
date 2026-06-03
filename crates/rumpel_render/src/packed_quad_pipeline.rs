@@ -3858,10 +3858,9 @@ pub fn stream_packed_quad_chunks(
     let max_build_tasks = packed_max_build_tasks_from_env();
     let lod_enabled = env_flag_default(PACKED_LOD_ENV, true);
     let min_cell_size = packed_min_cell_size_from_env();
-    let context = Arc::new(WorldGenerationContext::from_registry(&registry));
-    let sand_block = registry.get_id("sand").unwrap_or(context.palette.dirt);
     let thread_pool = AsyncComputeTaskPool::get();
     let mut spawned_this_frame = 0;
+    let mut build_context: Option<(Arc<WorldGenerationContext>, u16)> = None;
 
     while spawned_this_frame < max_builds && state.building.len() < max_build_tasks {
         let Some(pending) = state.pending.pop() else {
@@ -3873,7 +3872,16 @@ pub fn stream_packed_quad_chunks(
             continue;
         }
 
-        let context = Arc::clone(&context);
+        if build_context.is_none() {
+            let context = Arc::new(WorldGenerationContext::from_registry(&registry));
+            let sand_block = registry.get_id("sand").unwrap_or(context.palette.dirt);
+            build_context = Some((context, sand_block));
+        }
+        let Some((context, sand_block)) = build_context.as_ref() else {
+            continue;
+        };
+        let context = Arc::clone(context);
+        let sand_block = *sand_block;
         let task = thread_pool.spawn(async move {
             build_packed_quad_chunk(
                 pending,
