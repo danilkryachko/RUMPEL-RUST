@@ -709,6 +709,20 @@ pub fn packed_gpu_generation_prefetch_budget_from_env() -> usize {
         .unwrap_or(DEFAULT_PACKED_GPU_GENERATION_PREFETCH_PER_FRAME)
 }
 
+fn loaded_region_prefetch_distance_key(
+    region: (i32, i32, u64),
+    camera_chunk_x: i32,
+    camera_chunk_z: i32,
+    region_size: i32,
+) -> i32 {
+    let center_offset = region_size.max(1) / 2;
+    let center_x = region.0.saturating_add(center_offset);
+    let center_z = region.1.saturating_add(center_offset);
+    let dx = center_x - camera_chunk_x;
+    let dz = center_z - camera_chunk_z;
+    dx * dx + dz * dz
+}
+
 /// Sort loaded region origins nearest-first for moving-camera cache warmup.
 pub fn order_loaded_regions_for_prefetch(
     regions: &mut [(i32, i32, u64)],
@@ -716,14 +730,39 @@ pub fn order_loaded_regions_for_prefetch(
     camera_chunk_z: i32,
     region_size: i32,
 ) {
-    let center_offset = region_size.max(1) / 2;
-    regions.sort_by_key(|(origin_x, origin_z, _)| {
-        let center_x = origin_x.saturating_add(center_offset);
-        let center_z = origin_z.saturating_add(center_offset);
-        let dx = center_x - camera_chunk_x;
-        let dz = center_z - camera_chunk_z;
-        dx * dx + dz * dz
+    regions.sort_by_key(|region| {
+        loaded_region_prefetch_distance_key(*region, camera_chunk_x, camera_chunk_z, region_size)
     });
+}
+
+pub fn retain_nearest_loaded_regions_for_prefetch(
+    regions: &mut Vec<(i32, i32, u64)>,
+    budget: usize,
+    camera_chunk_x: i32,
+    camera_chunk_z: i32,
+    region_size: i32,
+) {
+    if budget == 0 {
+        regions.clear();
+        return;
+    }
+    if regions.len() > budget {
+        regions.select_nth_unstable_by_key(budget, |region| {
+            loaded_region_prefetch_distance_key(
+                *region,
+                camera_chunk_x,
+                camera_chunk_z,
+                region_size,
+            )
+        });
+        regions.truncate(budget);
+    }
+    order_loaded_regions_for_prefetch(
+        regions.as_mut_slice(),
+        camera_chunk_x,
+        camera_chunk_z,
+        region_size,
+    );
 }
 
 #[must_use]
@@ -1286,6 +1325,17 @@ mod tests {
         let center = IVec2::new(9, -3);
         assert!(region_has_active_chunks(8, -4, 4, center, 0));
         assert!(!region_has_active_chunks(12, -4, 4, center, 0));
+    }
+
+    #[test]
+    fn retain_nearest_loaded_regions_for_prefetch_limits_to_budget() {
+        let mut regions = [(24, 0, 4_u64), (8, 0, 2_u64), (0, 0, 1_u64), (16, 0, 3_u64)].to_vec();
+
+        retain_nearest_loaded_regions_for_prefetch(&mut regions, 2, 13, 0, 4);
+
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].2, 2);
+        assert_eq!(regions[1].2, 3);
     }
 
     #[test]

@@ -26,9 +26,9 @@ use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuChunkRange, PackedGpuGenerationBatch,
     PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationParams,
     PackedGpuGenerationTarget, active_gpu_generation_chunk_signature,
-    order_loaded_regions_for_prefetch, packed_gpu_generation_columns_per_chunk,
-    packed_gpu_generation_lod_for_cell_size, packed_gpu_generation_prefetch_budget_from_env,
-    region_has_active_chunks, sync_gpu_chunk_range_active_flags,
+    packed_gpu_generation_columns_per_chunk, packed_gpu_generation_lod_for_cell_size,
+    packed_gpu_generation_prefetch_budget_from_env, region_has_active_chunks,
+    retain_nearest_loaded_regions_for_prefetch, sync_gpu_chunk_range_active_flags,
 };
 use crate::voxel_material::load_block_atlas;
 use crate::voxel_packed_quads::{PackedVoxelFace, PackedVoxelQuad};
@@ -3428,8 +3428,9 @@ fn prefetch_loaded_generated_regions_with_budget(
         return 0;
     }
 
-    order_loaded_regions_for_prefetch(
-        scratch.prefetch_candidates.as_mut_slice(),
+    retain_nearest_loaded_regions_for_prefetch(
+        &mut scratch.prefetch_candidates,
+        budget,
         camera_chunk_x,
         camera_chunk_z,
         build.region_size,
@@ -3437,7 +3438,7 @@ fn prefetch_loaded_generated_regions_with_budget(
 
     let mut prefetched = 0usize;
     for (region_origin_x, region_origin_z, region_key) in
-        scratch.prefetch_candidates.iter().copied().take(budget)
+        scratch.prefetch_candidates.iter().copied()
     {
         let entry =
             build_generated_region_cache_entry(region_origin_x, region_origin_z, region_key, build);
