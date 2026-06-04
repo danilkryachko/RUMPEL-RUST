@@ -171,7 +171,7 @@ pub fn plan_gpu_generated_arena_allocations(
     slot_capacity: impl Fn(usize) -> usize,
 ) -> (HashMap<u64, PackedQuadArenaAllocation>, usize) {
     let mut sorted_requests = requests.to_vec();
-    sorted_requests.sort_by_key(|request| request.key);
+    sorted_requests.sort_unstable_by_key(|request| request.key);
     plan_gpu_generated_arena_allocations_sorted(
         existing_allocations,
         &sorted_requests,
@@ -671,7 +671,7 @@ mod tests {
             },
         ];
         let mut sorted_requests = requests.to_vec();
-        sorted_requests.sort_by_key(|request| request.key);
+        sorted_requests.sort_unstable_by_key(|request| request.key);
 
         let unsorted_plan =
             plan_gpu_generated_arena_allocations(&existing, &requests, slot_capacity);
