@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated structure-stable refresh now builds `planned_regions` only after readiness and allocation-satisfaction checks pass, avoiding wasted planned-region scans on fallback prepare frames. Verified with focused prepare tests and full `just verify`.
 - 2026-06-04: GPU-generated full prepare now lets `collect_active_gpu_generation_jobs` own jobs clear/reserve, removing the duplicate pre-clear/pre-reserve block before job collection while preserving separate column staging reserve. Verified with focused prepare tests and full `just verify`.
 - 2026-06-04: GPU-generated batch metadata now has a combined one-pass `calculate_batch_metadata` path used by render prepare, active-mask refresh, sliding-shift updates, and generated batch finalization instead of separate signature/structure/summary scans. Verified with focused metadata/prepare tests and full `just verify`.
 - 2026-06-04: GPU-generated loaded-region prefetch ordering now skips distance sort for 0/1-region candidate lists, preserving existing nearest-first behavior for longer lists while avoiding no-op sort overhead on tiny pending/prefetch windows. Verified with focused ordering tests and full `just verify`.

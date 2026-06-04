@@ -996,6 +996,13 @@ fn refresh_structure_stable_gpu_generated_prepare(
         return false;
     }
 
+    build_planned_gpu_generated_regions(
+        ordered_batches,
+        &arena.allocations,
+        &mut buffers.planned_regions,
+        active_chunk_job_count,
+    );
+
     arena.next_free_quads = arena
         .next_free_quads
         .max(batch_summary.total_max_output_quads);
@@ -1211,14 +1218,8 @@ fn prepare_packed_gpu_generated_draw(
         return;
     }
 
-    if prepared.batch_signature != batch_signature {
-        build_planned_gpu_generated_regions(
-            ordered_batches,
-            &arena.allocations,
-            &mut buffers.planned_regions,
-            active_chunk_job_count,
-        );
-        if refresh_structure_stable_gpu_generated_prepare(
+    if prepared.batch_signature != batch_signature
+        && refresh_structure_stable_gpu_generated_prepare(
             &render_device,
             &render_queue,
             generation_pipeline,
@@ -1232,9 +1233,9 @@ fn prepare_packed_gpu_generated_draw(
             &mut buffers,
             &mut prepared,
             &mut gpu_cull,
-        ) {
-            return;
-        }
+        )
+    {
+        return;
     }
 
     buffers.allocation_requests.clear();
