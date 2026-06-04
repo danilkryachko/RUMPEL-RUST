@@ -157,6 +157,7 @@ pub struct PackedGpuGenerationRegionScratch {
     loaded_region_keys: Vec<u64>,
     loaded_regions: Vec<(i32, i32, u64)>,
     active_regions: Vec<(i32, i32, u64)>,
+    active_region_keys: Vec<u64>,
     prefetch_candidates: Vec<(i32, i32, u64)>,
     active_chunk_keys: HashSet<u64>,
     generated_batches: Vec<PackedGpuGenerationBatch>,
@@ -3548,16 +3549,13 @@ fn prefetch_active_generated_regions_with_budget(
 
 fn prune_stale_pending_active_region_builds(
     pending: &mut Vec<(i32, i32, u64)>,
-    active_regions: &[(i32, i32, u64)],
+    sorted_active_region_keys: &[u64],
 ) {
     if pending.is_empty() {
         return;
     }
-    let active_keys: HashSet<u64> = active_regions
-        .iter()
-        .map(|(_, _, region_key)| *region_key)
-        .collect();
-    pending.retain(|(_, _, region_key)| active_keys.contains(region_key));
+    pending
+        .retain(|(_, _, region_key)| sorted_active_region_keys.binary_search(region_key).is_ok());
 }
 
 fn queue_pending_active_region_build(
@@ -3936,10 +3934,16 @@ pub fn update_packed_gpu_generation_regions(
             .reserve(loaded_region_capacity - scratch.loaded_regions.capacity());
     }
     scratch.active_regions.clear();
+    scratch.active_region_keys.clear();
     if scratch.active_regions.capacity() < loaded_region_capacity {
         scratch
             .active_regions
             .reserve(loaded_region_capacity - scratch.active_regions.capacity());
+    }
+    if scratch.active_region_keys.capacity() < loaded_region_capacity {
+        scratch
+            .active_region_keys
+            .reserve(loaded_region_capacity - scratch.active_region_keys.capacity());
     }
 
     for region_z in -region_radius..=region_radius {
@@ -3962,10 +3966,12 @@ pub fn update_packed_gpu_generation_regions(
                 scratch
                     .active_regions
                     .push((region_origin_x, region_origin_z, region_key));
+                scratch.active_region_keys.push(region_key);
             }
         }
     }
     scratch.loaded_region_keys.sort_unstable();
+    scratch.active_region_keys.sort_unstable();
     let loaded_regions = scratch.loaded_region_keys.len();
     let (active_region_count, active_region_hash) =
         PackedGpuGenerationTarget::active_region_signature(
@@ -4070,7 +4076,7 @@ pub fn update_packed_gpu_generation_regions(
         let shift_sync_build_budget = packed_gpu_generation_shift_sync_build_budget_from_env();
         prune_stale_pending_active_region_builds(
             &mut scratch.pending_active_region_builds,
-            scratch.active_regions.as_slice(),
+            scratch.active_region_keys.as_slice(),
         );
         // Warm the new active edge before draining stale pending work so shift frames do not
         // publish incomplete batch sets and trigger multi-frame render-prepare cascades.
@@ -5615,6 +5621,19 @@ mod tests {
         prune_stale_pending_loaded_region_builds(&mut pending, &loaded_region_keys);
 
         assert_eq!(pending, vec![(0, 0, loaded_a), (8, 0, loaded_b)]);
+    }
+
+    #[test]
+    fn test_prune_stale_pending_active_region_builds_uses_sorted_keys() {
+        let active_a = pack_chunk_key(0, 0);
+        let active_b = pack_chunk_key(8, 0);
+        let inactive = pack_chunk_key(16, 0);
+        let active_region_keys = [active_a, active_b];
+        let mut pending = vec![(16, 0, inactive), (0, 0, active_a), (8, 0, active_b)];
+
+        prune_stale_pending_active_region_builds(&mut pending, &active_region_keys);
+
+        assert_eq!(pending, vec![(0, 0, active_a), (8, 0, active_b)]);
     }
 
     #[test]
