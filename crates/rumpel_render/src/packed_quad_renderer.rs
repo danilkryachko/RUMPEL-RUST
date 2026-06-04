@@ -1143,10 +1143,7 @@ fn prepare_packed_gpu_generated_draw(
     } else {
         extracted_batches.summary
     };
-    let total_region_column_count = ordered_batches
-        .iter()
-        .map(|batch| batch.columns.len())
-        .sum();
+    let total_region_column_count = batch_summary.total_column_count;
 
     if !batch_summary.is_renderable(ordered_batches.len()) {
         prepared.disable();

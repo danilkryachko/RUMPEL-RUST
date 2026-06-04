@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated render prepare now uses the producer-side batch summary's total column count instead of scanning every generated batch before the steady-frame early return. Verified with focused render tests and full `just verify`.
 - 2026-06-04: GPU-generated render prepare now builds planned regions directly from the reusable allocation-plan scratch instead of cloning the whole allocation `HashMap` during rebuild/region-shift work. Verified with focused render checks and full `just verify`.
 - 2026-06-03: GPU-generated region prefetch now uses bounded nearest-region selection before sorting the selected budget, reducing prefetch ordering work when missing-region lists are larger than the per-frame prefetch window. Verified with focused render checks and clean temp `just verify`.
 - 2026-06-03: CPU-packed indirect command and draw-param buffers now use byte signatures to skip unchanged `write_buffer` uploads on stable frames, with signatures reset on buffer recreation. Verified with focused render checks and clean temp `just verify`.
