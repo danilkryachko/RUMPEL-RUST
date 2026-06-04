@@ -1,11 +1,16 @@
 use bevy::prelude::*;
 
+pub mod feature_decor_invalidation;
+pub mod legacy_render_modes;
+pub mod packed_feature_overlay;
 pub mod packed_quad_buffer;
 pub mod packed_quad_gpu_generation;
 pub mod packed_quad_material;
 pub mod packed_quad_pipeline;
 pub mod packed_quad_renderer;
+pub mod surface_decor;
 pub mod surface_streaming;
+pub mod terrain_feature_overlay;
 pub mod voxel_compute;
 pub mod voxel_material;
 pub mod voxel_packed_quads;
@@ -23,90 +28,66 @@ impl Plugin for RumpelRenderPlugin {
         let render_mode = RumpelRenderMode::from_env();
         app.insert_resource(render_mode);
 
-        if render_mode == RumpelRenderMode::PackedPrototype
-            || render_mode == RumpelRenderMode::PackedMaterial
-            || env_flag("RUMPEL_PACKED_QUAD_DEBUG")
-            || env_flag("RUMPEL_PACKED_QUAD_RENDERER")
+        if render_mode == RumpelRenderMode::Surface
+            || render_mode == RumpelRenderMode::ComputePrototype
         {
-            info!("packed quad pipeline/debug mode: enabled");
-            app.add_plugins(packed_quad_pipeline::PackedQuadPipelinePlugin);
-
-            if render_mode == RumpelRenderMode::PackedPrototype {
-                app.init_resource::<packed_quad_pipeline::PackedQuadStreamingState>();
-                if packed_quad_gpu_generation::packed_gpu_generation_enabled_from_env() {
-                    app.init_resource::<packed_quad_gpu_generation::GeneratedRegionCache>();
-                    app.add_systems(
-                        Update,
-                        packed_quad_pipeline::update_packed_gpu_generation_regions
-                            .after(rumpel_world::chunk::record_world_block_edits)
-                            .run_if(in_state(rumpel_prelude::GameState::InGame)),
-                    );
-                } else {
-                    app.add_systems(
-                        Update,
-                        (
-                            packed_quad_pipeline::handle_packed_quad_build_tasks,
-                            packed_quad_pipeline::compact_pending_packed_regions,
-                            packed_quad_pipeline::stream_packed_quad_chunks,
-                        )
-                            .chain()
-                            .run_if(in_state(rumpel_prelude::GameState::InGame)),
-                    );
-                }
-            } else if render_mode == RumpelRenderMode::PackedMaterial {
-                // Инициализация ресурсов для материального режима
-                app.init_resource::<packed_quad_pipeline::PackedQuadStreamingState>();
-                app.init_resource::<packed_quad_pipeline::PackedMaterialEntities>();
-                app.add_plugins(packed_quad_material::PackedVoxelMaterialPlugin);
-                app.add_systems(
-                    Update,
-                    (
-                        packed_quad_pipeline::handle_packed_quad_build_tasks,
-                        packed_quad_pipeline::compact_pending_packed_regions,
-                        packed_quad_pipeline::stream_packed_quad_chunks,
-                        packed_quad_pipeline::sync_packed_material_entities,
-                    )
-                        .chain()
-                        .run_if(in_state(rumpel_prelude::GameState::InGame)),
-                );
-            } else {
-                app.add_systems(
-                    Update,
-                    packed_quad_pipeline::setup_packed_quad_debug_producer
-                        .run_if(in_state(rumpel_prelude::GameState::Loading)),
-                );
-            }
+            legacy_render_modes::add_legacy_render_plugins(app, render_mode);
+            return;
         }
 
-        if render_mode == RumpelRenderMode::PackedPrototype
-            || env_flag("RUMPEL_PACKED_QUAD_RENDERER")
-        {
-            info!("packed quad renderer mode: enabled");
-            app.add_plugins(packed_quad_renderer::PackedQuadRendererPlugin);
+        info!("packed quad pipeline: enabled");
+        app.add_plugins(packed_quad_pipeline::PackedQuadPipelinePlugin);
+        app.init_resource::<packed_quad_pipeline::PackedQuadStreamingState>();
+        if packed_quad_gpu_generation::packed_gpu_generation_enabled_from_env() {
+            app.init_resource::<packed_quad_gpu_generation::GeneratedRegionCache>();
+            app.add_systems(
+                Update,
+                packed_quad_pipeline::update_packed_gpu_generation_regions
+                    .after(rumpel_world::chunk::record_world_block_edits)
+                    .run_if(in_state(rumpel_prelude::GameState::InGame)),
+            );
+        } else {
+            app.add_systems(
+                Update,
+                (
+                    packed_quad_pipeline::handle_packed_quad_build_tasks,
+                    packed_quad_pipeline::compact_pending_packed_regions,
+                    packed_quad_pipeline::stream_packed_quad_chunks,
+                )
+                    .chain()
+                    .run_if(in_state(rumpel_prelude::GameState::InGame)),
+            );
         }
 
-        match render_mode {
-            RumpelRenderMode::Surface => {
-                info!("rumpel render mode: surface streaming");
-                app.add_plugins((
-                    voxel_material::VoxelQuadMaterialPlugin,
-                    surface_streaming::SurfaceStreamingPlugin,
-                ));
-            }
-            RumpelRenderMode::ComputePrototype => {
-                info!("rumpel render mode: GPU compute prototype");
-                app.add_plugins((
-                    voxel_material::VoxelQuadMaterialPlugin,
-                    voxel_compute::VoxelComputePlugin,
-                ));
-            }
-            RumpelRenderMode::PackedPrototype => {
-                info!("rumpel render mode: PackedVoxelQuad benchmark");
-            }
-            RumpelRenderMode::PackedMaterial => {
-                info!("rumpel render mode: PackedVoxelQuad Custom Material Pipeline");
-            }
+        if env_flag("RUMPEL_PACKED_QUAD_DEBUG") || env_flag("RUMPEL_PACKED_QUAD_RENDERER") {
+            app.add_systems(
+                Update,
+                packed_quad_pipeline::setup_packed_quad_debug_producer
+                    .run_if(in_state(rumpel_prelude::GameState::Loading)),
+            );
         }
+
+        info!("packed quad renderer: enabled");
+        app.add_plugins(packed_quad_renderer::PackedQuadRendererPlugin);
+
+        info!("packed lua feature overlay + decor: enabled");
+        app.add_plugins((
+            voxel_material::VoxelQuadMaterialPlugin,
+            packed_feature_overlay::PackedFeatureOverlayPlugin,
+            surface_decor::SurfaceDecorPlugin,
+        ));
+
+        app.add_systems(
+            Update,
+            (
+                packed_feature_overlay::invalidate_edited_overlay_chunks,
+                surface_decor::invalidate_edited_decor_chunks,
+            )
+                .after(rumpel_world::chunk::record_world_block_edits)
+                .run_if(in_state(rumpel_prelude::GameState::InGame)),
+        );
+
+        info!("rumpel render mode: packed");
     }
 }
 
@@ -128,26 +109,38 @@ impl RumpelRenderMode {
         }
 
         if env_flag(COMPUTE_PROTOTYPE_ENV) {
-            Self::ComputePrototype
-        } else {
-            Self::Surface
+            warn!(
+                "{COMPUTE_PROTOTYPE_ENV} is deprecated; using packed renderer (set {RENDER_MODE_ENV}=packed explicitly)"
+            );
         }
+
+        Self::PackedPrototype
     }
 
     pub fn from_mode_value(value: &str) -> Self {
         match value.to_ascii_lowercase().as_str() {
-            "surface" | "cpu" | "cpu-surface" => Self::Surface,
-            "compute" | "compute-prototype" | "gpu" | "gpu-compute" => Self::ComputePrototype,
             "packed" | "packed-quad" | "packed-quads" | "packed-renderer" => Self::PackedPrototype,
+            "surface" | "cpu" | "cpu-surface" => {
+                warn!(render_mode = value, "legacy surface render mode requested");
+                Self::Surface
+            }
+            "compute" | "compute-prototype" | "gpu" | "gpu-compute" => {
+                warn!(render_mode = value, "legacy compute render mode requested");
+                Self::ComputePrototype
+            }
             "packed_material" | "packed-material" | "material" | "material-packed" => {
-                Self::PackedMaterial
+                warn!(
+                    render_mode = value,
+                    "packed-material mode is not implemented; using packed renderer"
+                );
+                Self::PackedPrototype
             }
             unknown => {
                 warn!(
                     render_mode = unknown,
-                    "unknown RUMPEL_RENDER_MODE; falling back to surface streaming"
+                    "unknown RUMPEL_RENDER_MODE; falling back to packed renderer"
                 );
-                Self::Surface
+                Self::PackedPrototype
             }
         }
     }
@@ -169,32 +162,6 @@ mod tests {
     #[test]
     fn test_rumpel_render_mode_parsing() {
         assert_eq!(
-            RumpelRenderMode::from_mode_value("surface"),
-            RumpelRenderMode::Surface
-        );
-        assert_eq!(
-            RumpelRenderMode::from_mode_value("CPU-surface"),
-            RumpelRenderMode::Surface
-        );
-        assert_eq!(
-            RumpelRenderMode::from_mode_value("cpu"),
-            RumpelRenderMode::Surface
-        );
-
-        assert_eq!(
-            RumpelRenderMode::from_mode_value("compute"),
-            RumpelRenderMode::ComputePrototype
-        );
-        assert_eq!(
-            RumpelRenderMode::from_mode_value("GPU-COMPUTE"),
-            RumpelRenderMode::ComputePrototype
-        );
-        assert_eq!(
-            RumpelRenderMode::from_mode_value("gpu"),
-            RumpelRenderMode::ComputePrototype
-        );
-
-        assert_eq!(
             RumpelRenderMode::from_mode_value("packed"),
             RumpelRenderMode::PackedPrototype
         );
@@ -208,18 +175,29 @@ mod tests {
         );
 
         assert_eq!(
-            RumpelRenderMode::from_mode_value("packed_material"),
-            RumpelRenderMode::PackedMaterial
+            RumpelRenderMode::from_mode_value("surface"),
+            RumpelRenderMode::Surface
         );
         assert_eq!(
-            RumpelRenderMode::from_mode_value("packed-material"),
-            RumpelRenderMode::PackedMaterial
+            RumpelRenderMode::from_mode_value("cpu"),
+            RumpelRenderMode::Surface
+        );
+        assert_eq!(
+            RumpelRenderMode::from_mode_value("compute"),
+            RumpelRenderMode::ComputePrototype
+        );
+        assert_eq!(
+            RumpelRenderMode::from_mode_value("gpu"),
+            RumpelRenderMode::ComputePrototype
+        );
+        assert_eq!(
+            RumpelRenderMode::from_mode_value("packed_material"),
+            RumpelRenderMode::PackedPrototype
         );
 
-        // Unknown mode values keep the explicit surface baseline.
         assert_eq!(
             RumpelRenderMode::from_mode_value("unknown_mode"),
-            RumpelRenderMode::Surface
+            RumpelRenderMode::PackedPrototype
         );
     }
 }

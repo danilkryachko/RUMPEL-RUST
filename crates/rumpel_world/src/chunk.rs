@@ -4,7 +4,14 @@ use rumpel_coords::{ChunkPos, LocalBlockPos};
 use std::mem::size_of;
 
 pub const CHUNK_SIZE: usize = 32;
-pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+/// Vertical extent of a chunk in blocks. Chunks are 32×CHUNK_HEIGHT×32 prisms;
+/// the world is one chunk tall but those chunks can stretch vertically so
+/// mountains, canyon mesas, and tall forests fit without ceiling clipping.
+///
+/// 320 gives enough headroom for >300-block-tall terrain with cliffs, mesas,
+/// trees on peaks, and weather/cloud space above.
+pub const CHUNK_HEIGHT: usize = 320;
+pub const CHUNK_VOLUME: usize = CHUNK_SIZE * CHUNK_HEIGHT * CHUNK_SIZE;
 
 /// A flat array of block IDs optimized for GPU StorageBuffers
 #[derive(Clone, Component)]
@@ -14,21 +21,26 @@ pub struct ChunkData {
 
 impl Default for ChunkData {
     fn default() -> Self {
-        Self {
-            blocks: Box::new([AIR_BLOCK_ID; CHUNK_VOLUME]),
-        }
+        // Allocate directly on the heap. `Box::new([x; N])` materialises the
+        // whole array on the stack first which is unsafe once CHUNK_VOLUME
+        // grows past a few tens of KiB (now ~128 KiB at 32×64×32).
+        let boxed_slice = vec![AIR_BLOCK_ID; CHUNK_VOLUME].into_boxed_slice();
+        let blocks: Box<[BlockId; CHUNK_VOLUME]> = boxed_slice
+            .try_into()
+            .expect("vec length matches CHUNK_VOLUME");
+        Self { blocks }
     }
 }
 
 impl ChunkData {
     #[inline]
     pub fn get_index(x: usize, y: usize, z: usize) -> usize {
-        x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_SIZE
+        x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_HEIGHT
     }
 
     #[inline]
     pub fn get_block(&self, x: usize, y: usize, z: usize) -> BlockId {
-        if x < CHUNK_SIZE && y < CHUNK_SIZE && z < CHUNK_SIZE {
+        if x < CHUNK_SIZE && y < CHUNK_HEIGHT && z < CHUNK_SIZE {
             self.blocks[Self::get_index(x, y, z)]
         } else {
             AIR_BLOCK_ID
@@ -37,7 +49,7 @@ impl ChunkData {
 
     #[inline]
     pub fn set_block(&mut self, x: usize, y: usize, z: usize, id: BlockId) {
-        if x < CHUNK_SIZE && y < CHUNK_SIZE && z < CHUNK_SIZE {
+        if x < CHUNK_SIZE && y < CHUNK_HEIGHT && z < CHUNK_SIZE {
             let index = Self::get_index(x, y, z);
             self.blocks[index] = id;
         }
@@ -131,6 +143,21 @@ impl PaletteRleChunk {
     pub fn estimated_bytes(&self) -> usize {
         self.palette.len() * size_of::<BlockId>() + self.runs.len() * size_of::<PaletteRleRun>()
     }
+
+    #[must_use]
+    pub fn palette_blocks(&self) -> &[BlockId] {
+        &self.palette
+    }
+
+    #[must_use]
+    pub fn runs_slice(&self) -> &[PaletteRleRun] {
+        &self.runs
+    }
+
+    #[must_use]
+    pub fn from_palette_runs(palette: Vec<BlockId>, runs: Vec<PaletteRleRun>) -> Self {
+        Self { palette, runs }
+    }
 }
 
 /// Tracks the loaded chunks and their entities
@@ -162,9 +189,11 @@ impl WorldBlockEdit {
             return None;
         }
 
-        let layer_size = CHUNK_SIZE * CHUNK_SIZE;
-        let z = index / layer_size;
-        let layer_index = index % layer_size;
+        // Layout matches `ChunkData::get_index`: x stride 1, y stride
+        // CHUNK_SIZE, z stride CHUNK_SIZE * CHUNK_HEIGHT.
+        let xy_layer = CHUNK_SIZE * CHUNK_HEIGHT;
+        let z = index / xy_layer;
+        let layer_index = index % xy_layer;
         let y = layer_index / CHUNK_SIZE;
         let x = layer_index % CHUNK_SIZE;
 
@@ -205,7 +234,7 @@ impl WorldBlockEditKey {
     }
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct WorldEditStore {
     edits: HashMap<WorldBlockEditKey, BlockId>,
     generation: u64,
@@ -229,6 +258,7 @@ impl WorldEditStore {
         self.edits.insert(key, edit.block);
         self.generation = self.generation.wrapping_add(1);
         self.chunk_revisions.insert(edit.chunk_pos, self.generation);
+        crate::chunk_disk::mark_chunk_pending(edit.chunk_pos);
         true
     }
 
@@ -282,7 +312,7 @@ impl WorldEditStore {
         y_base: i32,
         chunk: &mut ChunkData,
     ) -> usize {
-        let y_end = y_base + CHUNK_SIZE as i32;
+        let y_end = y_base + CHUNK_HEIGHT as i32;
         let mut applied = 0;
 
         for (&key, &block) in &self.edits {
@@ -298,6 +328,41 @@ impl WorldEditStore {
             let Ok(y) = usize::try_from(world_y - y_base) else {
                 continue;
             };
+            let x = usize::from(key.local_pos.x);
+            let z = usize::from(key.local_pos.z);
+            chunk.set_block(x, y, z, block);
+            applied += 1;
+        }
+
+        applied
+    }
+
+    pub fn iter_edits(&self) -> impl Iterator<Item = (&WorldBlockEditKey, &BlockId)> {
+        self.edits.iter()
+    }
+
+    pub fn restore_edits(&mut self, edits: Vec<(WorldBlockEditKey, BlockId)>, generation: u64) {
+        self.edits = edits.into_iter().collect();
+        self.generation = generation;
+        self.chunk_revisions.clear();
+        for key in self.edits.keys() {
+            self.chunk_revisions.insert(key.chunk_pos, generation);
+        }
+    }
+
+    pub fn apply_all_edits_to_chunk(&self, chunk_pos: ChunkPos, chunk: &mut ChunkData) -> usize {
+        let mut applied = 0;
+
+        for (&key, &block) in &self.edits {
+            if key.chunk_pos != chunk_pos {
+                continue;
+            }
+
+            let y = usize::from(key.local_pos.y);
+            if y >= CHUNK_HEIGHT {
+                continue;
+            }
+
             let x = usize::from(key.local_pos.x);
             let z = usize::from(key.local_pos.z);
             chunk.set_block(x, y, z, block);
@@ -338,9 +403,18 @@ pub fn record_world_block_edits(
 mod tests {
     use super::*;
 
+    fn fresh_chunk_blocks() -> Box<[BlockId; CHUNK_VOLUME]> {
+        // CHUNK_VOLUME is large enough (~300 KiB) that stack allocation can
+        // overflow; build on the heap via vec.
+        vec![AIR_BLOCK_ID; CHUNK_VOLUME]
+            .into_boxed_slice()
+            .try_into()
+            .expect("vec length matches CHUNK_VOLUME")
+    }
+
     #[test]
     fn palette_rle_roundtrips_dense_chunk() {
-        let mut blocks = [AIR_BLOCK_ID; CHUNK_VOLUME];
+        let mut blocks = fresh_chunk_blocks();
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let height = 4 + (x % 3) + (z % 5);
@@ -352,17 +426,20 @@ mod tests {
 
         let encoded = PaletteRleChunk::from_blocks(&blocks);
 
-        assert_eq!(&*encoded.to_blocks(), &blocks);
+        assert_eq!(&*encoded.to_blocks(), &*blocks);
         assert_eq!(encoded.palette_len(), 3);
     }
 
     #[test]
     fn palette_rle_compresses_uniform_air() {
-        let blocks = [AIR_BLOCK_ID; CHUNK_VOLUME];
+        let blocks = fresh_chunk_blocks();
         let encoded = PaletteRleChunk::from_blocks(&blocks);
 
         assert_eq!(encoded.palette_len(), 1);
-        assert_eq!(encoded.run_count(), 1);
+        // Run length is `u16`, so each run covers at most u16::MAX cells.
+        // CHUNK_VOLUME may need several runs even for fully uniform chunks.
+        let expected_runs = CHUNK_VOLUME.div_ceil(usize::from(u16::MAX));
+        assert_eq!(encoded.run_count(), expected_runs);
         assert!(encoded.estimated_bytes() < CHUNK_VOLUME * size_of::<BlockId>());
     }
 
@@ -481,14 +558,21 @@ impl ChunkManager {
 
 #[derive(Resource, Clone, bevy::render::extract_resource::ExtractResource)]
 pub struct SingleChunkExtract {
-    pub blocks: Box<[u32; 32768]>, // WGSL expects array<u32>
+    /// Block ids for the player's local chunk, flat array indexed via
+    /// `x + y * CHUNK_SIZE + z * CHUNK_SIZE * CHUNK_HEIGHT` (matches
+    /// `ChunkData::get_index`). WGSL expects `array<u32>`.
+    pub blocks: Box<[u32; CHUNK_VOLUME]>,
     pub has_changes: bool,
 }
 
 impl Default for SingleChunkExtract {
     fn default() -> Self {
+        let boxed_slice = vec![0u32; CHUNK_VOLUME].into_boxed_slice();
+        let blocks: Box<[u32; CHUNK_VOLUME]> = boxed_slice
+            .try_into()
+            .expect("vec length matches CHUNK_VOLUME");
         Self {
-            blocks: Box::new([0; 32768]),
+            blocks,
             has_changes: false,
         }
     }

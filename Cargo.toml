@@ -9,6 +9,7 @@ bevy = { version = "0.18" }
 bevy_asset = "0.18"
 bevy_egui = "0.39"
 serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
 ron = "0.8"
 noise = "0.9"
 mlua = { version = "0.11.6", features = ["lua54", "vendored"] }
@@ -17,6 +18,7 @@ bevy-inspector-egui = "0.36"
 rumpel_coords = { path = "crates/rumpel_coords" }
 rumpel_blocks = { path = "crates/rumpel_blocks" }
 rumpel_world = { path = "crates/rumpel_world" }
+rumpel_world_store = { path = "crates/rumpel_world_store" }
 rumpel_render = { path = "crates/rumpel_render" }
 rumpel_player = { path = "crates/rumpel_player" }
 rumpel_modding = { path = "crates/rumpel_modding" }

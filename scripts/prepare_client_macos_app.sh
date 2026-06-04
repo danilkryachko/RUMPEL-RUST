@@ -8,7 +8,7 @@ cd "$repo_dir"
 build_profile="${RUMPEL_CLIENT_BUILD_PROFILE:-dev}"
 target_profile="debug"
 cargo_args=("-p" "rumpel_client")
-mode="${RUMPEL_RENDER_MODE:-surface}"
+mode="${RUMPEL_RENDER_MODE:-packed}"
 
 case "$build_profile" in
     dev | debug)
@@ -24,10 +24,12 @@ case "$build_profile" in
 esac
 
 case "$mode" in
-    surface | compute | packed)
+    packed)
         ;;
+    # surface | compute | packed_material)
+    #     ;;
     *)
-        echo "unsupported RUMPEL_RENDER_MODE='$mode' (use surface, compute, or packed)" >&2
+        echo "unsupported RUMPEL_RENDER_MODE='$mode' (active mode: packed)" >&2
         exit 64
         ;;
 esac

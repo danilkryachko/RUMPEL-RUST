@@ -3,6 +3,7 @@ use bevy::{
     ecs::system::SystemParam,
     prelude::*,
 };
+use rumpel_player::{Player, PlayerPhysics};
 use rumpel_render::{RenderedChunkCount, surface_streaming::SurfaceStreamingMetrics};
 
 const FPS_PENDING_TEXT: &str = "FPS -- | Chunks --";
@@ -15,11 +16,16 @@ pub(crate) fn spawn_fps_hud() {
     // Spawned dynamically in update_debug_hud to ensure UI Camera exists and is targeted
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system receives independent ECS params directly for scheduler access."
+)]
 pub(crate) fn update_debug_hud(
     mut commands: Commands,
     diagnostics: Res<DiagnosticsStore>,
     mut fps_text: Query<&mut Text, With<FpsHudText>>,
     chunk_meshes: Query<&RenderedChunkCount>,
+    player_mode: Query<&PlayerPhysics, With<Player>>,
     surface_metrics: Option<Res<SurfaceStreamingMetrics>>,
     packed_stats: Option<Res<rumpel_render::packed_quad_pipeline::PackedQuadPipelineStats>>,
     cameras: DebugHudCameras,
@@ -64,10 +70,21 @@ pub(crate) fn update_debug_hud(
     };
     let active_chunk_count = chunk_meshes.iter().map(|count| count.0).sum::<usize>();
     let surface = surface_metrics.as_deref().copied().unwrap_or_default();
+    let mode_label = player_mode
+        .iter()
+        .next()
+        .map(|physics| {
+            if physics.game_mode.is_creative() {
+                "Cre"
+            } else {
+                "Surv"
+            }
+        })
+        .unwrap_or("--");
 
     for mut text in &mut fps_text {
         let mut text_str = format!(
-            "FPS {fps:>5.1} | Chunks {active_chunk_count} | Q {}/{} | Up {}",
+            "FPS {fps:>5.1} | Chunks {active_chunk_count} | {mode_label} | Q {}/{} | Up {}",
             surface.pending_regions, surface.building_regions, surface.uploaded_regions_last_frame
         );
 

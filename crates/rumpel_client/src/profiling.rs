@@ -21,7 +21,7 @@ use bevy::{
         view::{prepare_view_attachments, prepare_view_uniforms, window::prepare_windows},
     },
 };
-use rumpel_player::{Player, PlayerPhysics};
+use rumpel_player::{Player, PlayerGameMode, PlayerPhysics};
 use rumpel_render::{
     RenderedChunkCount,
     packed_quad_pipeline::{PackedQuadPipelineStats, snapshot_packed_quad_metrics},
@@ -1447,12 +1447,13 @@ fn announce_profiling_run(
     }
 
     let render_mode_value = render_mode.as_ref().map(|mode| **mode);
-    let mode_str = match render_mode_value.unwrap_or(rumpel_render::RumpelRenderMode::Surface) {
-        rumpel_render::RumpelRenderMode::Surface => "surface",
-        rumpel_render::RumpelRenderMode::ComputePrototype => "compute",
-        rumpel_render::RumpelRenderMode::PackedPrototype => "packed",
-        rumpel_render::RumpelRenderMode::PackedMaterial => "packed_material",
-    };
+    let mode_str =
+        match render_mode_value.unwrap_or(rumpel_render::RumpelRenderMode::PackedPrototype) {
+            rumpel_render::RumpelRenderMode::Surface => "surface",
+            rumpel_render::RumpelRenderMode::ComputePrototype => "compute",
+            rumpel_render::RumpelRenderMode::PackedPrototype => "packed",
+            rumpel_render::RumpelRenderMode::PackedMaterial => "packed_material",
+        };
 
     println!(
         "profile start duration={:.1}s warmup={:.1}s settle={:.1}s measured_target={:.1}s ready_gate={} ready_stable_frames={} ready_frame_ms={:.1} ready_max_extra={:.1}s autopilot={} autopilot_preroll={:.1}s interval={:.1}s slow_frame_ms={:.1} render_mode={} render_target={} headless_wait_ms={} gpu_frame_timestamps={} present_mode={} frame_latency={} window_size={} shadows={} debug_hud={}",
@@ -1502,7 +1503,7 @@ fn profile_autopilot(
         return;
     };
     if let Some(mut physics) = player_physics {
-        physics.is_flying = true;
+        physics.game_mode = PlayerGameMode::Creative;
         physics.velocity = Vec3::ZERO;
         physics.is_grounded = false;
     }

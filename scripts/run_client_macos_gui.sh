@@ -5,12 +5,15 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && /bin/pwd -P)"
 repo_dir="$(cd -- "$script_dir/.." && /bin/pwd -P)"
 cd "$repo_dir"
 
-mode="${1:-${RUMPEL_RENDER_MODE:-surface}}"
+mode="${1:-${RUMPEL_RENDER_MODE:-packed}}"
 case "$mode" in
-    surface | compute | packed | packed_material)
+    packed)
         ;;
+    # surface | compute | packed_material)
+    #     legacy render modes; enable in RumpelRenderPlugin to use
+    #     ;;
     *)
-        echo "unsupported render mode '$mode' (use surface, compute, packed, or packed_material)" >&2
+        echo "unsupported render mode '$mode' (active mode: packed)" >&2
         exit 64
         ;;
 esac

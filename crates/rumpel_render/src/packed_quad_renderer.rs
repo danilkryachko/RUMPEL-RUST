@@ -127,8 +127,8 @@ pub struct PreparedPackedGpuGeneratedDraw {
     pub cull_metadata_signature: u64,
     pub cull_source_signature: u64,
     dispatched: AtomicBool,
-    chunk_dispatched_generation: HashMap<u64, PackedGpuDispatchedChunkState>,
-    pending_chunk_generations: Vec<(u64, PackedGpuDispatchedChunkState)>,
+    chunk_dispatched_generation: HashMap<u64, u64>,
+    pending_chunk_generations: Vec<(u64, u64)>,
 }
 
 #[derive(Clone, Copy)]
@@ -246,225 +246,113 @@ struct PackedGpuGenerationBuffers {
     allocation_plan: HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
     allocation_plan_scratch:
         crate::packed_quad_buffer::PackedGpuGenerationArenaAllocationPlanScratch,
-    active_ranges: Vec<PackedGpuGenerationActiveRange>,
     planned_regions: Vec<PreparedPackedGpuGeneratedRegion>,
     jobs: Vec<PackedGpuGenerationJob>,
     columns: Vec<PackedGpuSurfaceColumn>,
     draw_params: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
     dirty_jobs: Vec<PackedGpuGenerationJob>,
-    pending_chunk_generations: Vec<(u64, PackedGpuDispatchedChunkState)>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct PackedGpuDispatchedChunkState {
-    generation: u64,
-    arena_offset_quads: usize,
-    arena_len_quads: usize,
-    arena_capacity_quads: usize,
-}
-
-impl PackedGpuDispatchedChunkState {
-    fn new(
-        generation: u64,
-        allocation: crate::packed_quad_buffer::PackedQuadArenaAllocation,
-    ) -> Self {
-        Self {
-            generation,
-            arena_offset_quads: allocation.offset_quads,
-            arena_len_quads: allocation.len_quads,
-            arena_capacity_quads: allocation.capacity_quads,
-        }
-    }
-
-    fn matches_allocation(
-        self,
-        allocation: crate::packed_quad_buffer::PackedQuadArenaAllocation,
-    ) -> bool {
-        self.arena_offset_quads == allocation.offset_quads
-            && self.arena_len_quads == allocation.len_quads
-            && self.arena_capacity_quads == allocation.capacity_quads
-    }
-}
-
-#[derive(Clone, Copy)]
-struct PackedGpuGenerationActiveRange {
-    key: u64,
-    chunk_key: u64,
-    generation: u64,
-    column_offset: usize,
-    column_len: usize,
-    requested_quads: usize,
-    params: crate::packed_quad_gpu_generation::PackedGpuGenerationParams,
-    translation: Vec4,
-    bounds_min: Vec3,
-    bounds_max: Vec3,
-}
-
-fn reserve_vec_for_len<T>(values: &mut Vec<T>, len: usize) {
-    if values.capacity() < len {
-        values.reserve(len - values.capacity());
-    }
+    pending_chunk_generations: Vec<(u64, u64)>,
 }
 
 #[must_use]
 fn chunk_needs_gpu_generation(
     chunk_key: u64,
     batch_generation: u64,
-    allocation: crate::packed_quad_buffer::PackedQuadArenaAllocation,
-    dispatched: &HashMap<u64, PackedGpuDispatchedChunkState>,
+    dispatched: &HashMap<u64, u64>,
 ) -> bool {
-    dispatched.get(&chunk_key).copied()
-        != Some(PackedGpuDispatchedChunkState::new(
-            batch_generation,
-            allocation,
-        ))
+    dispatched.get(&chunk_key).copied().unwrap_or(0) < batch_generation
 }
 
-fn retain_dispatched_gpu_generation_chunks(
-    dispatched: &mut HashMap<u64, PackedGpuDispatchedChunkState>,
-    allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
-) {
-    dispatched.retain(|chunk_key, dispatched_state| {
-        allocations
-            .get(chunk_key)
-            .is_some_and(|allocation| dispatched_state.matches_allocation(*allocation))
-    });
-}
-
-fn collect_active_gpu_generation_ranges(
+fn collect_active_gpu_generation_jobs(
     ordered_batches: &[crate::packed_quad_gpu_generation::PackedGpuGenerationBatch],
-    active_ranges: &mut Vec<PackedGpuGenerationActiveRange>,
-    active_chunk_job_count: usize,
+    allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+    dispatched: &HashMap<u64, u64>,
+    buffers: &mut PackedGpuGenerationBuffers,
 ) {
-    active_ranges.clear();
-    reserve_vec_for_len(active_ranges, active_chunk_job_count);
+    buffers.jobs.clear();
+    buffers.dirty_jobs.clear();
+    buffers.pending_chunk_generations.clear();
+    buffers.draw_params.clear();
+
+    let jobs_reserve = ordered_batches
+        .iter()
+        .map(|batch| {
+            batch
+                .chunk_ranges
+                .iter()
+                .filter(|range| range.active && range.column_len > 0)
+                .count()
+        })
+        .sum::<usize>();
+    if buffers.jobs.capacity() < jobs_reserve {
+        buffers.jobs.reserve(jobs_reserve - buffers.jobs.capacity());
+    }
+    if buffers.dirty_jobs.capacity() < jobs_reserve {
+        buffers
+            .dirty_jobs
+            .reserve(jobs_reserve - buffers.dirty_jobs.capacity());
+    }
+    if buffers.draw_params.capacity() < jobs_reserve {
+        buffers
+            .draw_params
+            .reserve(jobs_reserve - buffers.draw_params.capacity());
+    }
 
     let mut region_column_base = 0usize;
+    let mut draw_command_index = 0usize;
     for batch in ordered_batches {
         for range in batch.chunk_ranges.iter() {
             if !range.active || range.column_len == 0 {
                 continue;
             }
-            let requested_quads = active_chunk_requested_quads(range);
+            let requested_quads = range
+                .column_len
+                .saturating_mul(
+                    crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN,
+                )
+                .max(1);
+            let Some(allocation) = allocations.get(&range.chunk_key).copied() else {
+                continue;
+            };
+
             let mut params = batch.params;
             params.config[0] = range.column_len.min(u32::MAX as usize) as u32;
             params.config[1] = requested_quads.min(u32::MAX as usize) as u32;
-            let (bounds_min, bounds_max) =
-                crate::packed_quad_pipeline::packed_chunk_world_bounds(range.chunk_key);
-            active_ranges.push(PackedGpuGenerationActiveRange {
-                key: batch.key,
-                chunk_key: range.chunk_key,
-                generation: batch.generation,
-                column_offset: region_column_base.saturating_add(range.column_start),
-                column_len: range.column_len,
-                requested_quads,
+            let job = PackedGpuGenerationJob::new(
                 params,
-                translation: batch.translation,
-                bounds_min,
-                bounds_max,
-            });
+                region_column_base.saturating_add(range.column_start),
+                allocation.offset_quads,
+                draw_command_index,
+                draw_command_index,
+                draw_command_index,
+            );
+            buffers.jobs.push(job);
+            if chunk_needs_gpu_generation(range.chunk_key, batch.generation, dispatched) {
+                buffers.dirty_jobs.push(job);
+                buffers
+                    .pending_chunk_generations
+                    .push((range.chunk_key, batch.generation));
+            }
+
+            let mut translation = batch.translation;
+            translation.w = allocation.offset_quads as f32;
+            buffers
+                .draw_params
+                .push(crate::packed_quad_buffer::PackedQuadDrawParams {
+                    chunk_offset: translation.to_array(),
+                });
+            draw_command_index = draw_command_index.saturating_add(1);
         }
         region_column_base = region_column_base.saturating_add(batch.columns.len());
     }
 }
 
-fn collect_gpu_generation_allocation_requests(
-    active_ranges: &[PackedGpuGenerationActiveRange],
-    allocation_requests: &mut Vec<crate::packed_quad_buffer::PackedGpuGenerationAllocationRequest>,
-    active_chunk_job_count: usize,
-) {
-    allocation_requests.clear();
-    reserve_vec_for_len(allocation_requests, active_chunk_job_count);
-    allocation_requests.extend(active_ranges.iter().map(|range| {
-        crate::packed_quad_buffer::PackedGpuGenerationAllocationRequest {
-            key: range.chunk_key,
-            requested_quads: range.requested_quads,
-            generation: range.generation,
-        }
-    }));
-}
-
-fn collect_active_gpu_generation_jobs(
-    allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
-    dispatched: &HashMap<u64, PackedGpuDispatchedChunkState>,
-    buffers: &mut PackedGpuGenerationBuffers,
-    active_chunk_job_count: usize,
-) {
-    let PackedGpuGenerationBuffers {
-        active_ranges,
-        jobs,
-        dirty_jobs,
-        pending_chunk_generations,
-        draw_params,
-        ..
-    } = buffers;
-
-    jobs.clear();
-    dirty_jobs.clear();
-    pending_chunk_generations.clear();
-    draw_params.clear();
-
-    let jobs_reserve = active_chunk_job_count;
-    reserve_vec_for_len(jobs, jobs_reserve);
-    reserve_vec_for_len(dirty_jobs, jobs_reserve);
-    reserve_vec_for_len(pending_chunk_generations, jobs_reserve);
-    reserve_vec_for_len(draw_params, jobs_reserve);
-
-    let mut draw_command_index = 0usize;
-    for range in active_ranges.iter() {
-        let Some(allocation) = allocations.get(&range.chunk_key).copied() else {
-            continue;
-        };
-
-        let job = PackedGpuGenerationJob::new(
-            range.params,
-            range.column_offset,
-            allocation.offset_quads,
-            draw_command_index,
-            draw_command_index,
-            draw_command_index,
-        );
-        jobs.push(job);
-        let dispatched_state = PackedGpuDispatchedChunkState::new(range.generation, allocation);
-        if chunk_needs_gpu_generation(range.chunk_key, range.generation, allocation, dispatched) {
-            dirty_jobs.push(job);
-            pending_chunk_generations.push((range.chunk_key, dispatched_state));
-        }
-
-        let mut translation = range.translation;
-        translation.w = allocation.offset_quads as f32;
-        draw_params.push(crate::packed_quad_buffer::PackedQuadDrawParams {
-            chunk_offset: translation.to_array(),
-        });
-        draw_command_index = draw_command_index.saturating_add(1);
-    }
-}
-
 fn record_dispatched_chunk_generations(prepared: &mut PreparedPackedGpuGeneratedDraw) {
-    for (chunk_key, dispatched_state) in prepared.pending_chunk_generations.drain(..) {
+    for (chunk_key, generation) in prepared.pending_chunk_generations.drain(..) {
         prepared
             .chunk_dispatched_generation
-            .insert(chunk_key, dispatched_state);
+            .insert(chunk_key, generation);
     }
-}
-
-fn move_pending_chunk_generations_to_prepared(
-    buffers: &mut PackedGpuGenerationBuffers,
-    prepared: &mut PreparedPackedGpuGeneratedDraw,
-) {
-    std::mem::swap(
-        &mut prepared.pending_chunk_generations,
-        &mut buffers.pending_chunk_generations,
-    );
-    buffers.pending_chunk_generations.clear();
-}
-
-fn move_planned_regions_to_prepared(
-    buffers: &mut PackedGpuGenerationBuffers,
-    prepared: &mut PreparedPackedGpuGeneratedDraw,
-) {
-    std::mem::swap(&mut prepared.regions, &mut buffers.planned_regions);
-    buffers.planned_regions.clear();
 }
 
 fn active_chunk_requested_quads(
@@ -478,72 +366,66 @@ fn active_chunk_requested_quads(
         .max(1)
 }
 
-fn build_planned_gpu_generated_regions(
-    active_ranges: &[PackedGpuGenerationActiveRange],
+fn structure_stable_gpu_allocations_satisfied(
+    ordered_batches: &[crate::packed_quad_gpu_generation::PackedGpuGenerationBatch],
     allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
-    planned_regions: &mut Vec<PreparedPackedGpuGeneratedRegion>,
-    active_chunk_job_count: usize,
-) {
-    planned_regions.clear();
-    reserve_vec_for_len(planned_regions, active_chunk_job_count);
-
-    let mut draw_command_index = 0usize;
-    for range in active_ranges {
-        let Some(allocation) = allocations.get(&range.chunk_key).copied() else {
-            continue;
-        };
-
-        planned_regions.push(PreparedPackedGpuGeneratedRegion {
-            key: range.key,
-            chunk_key: range.chunk_key,
-            generation: range.generation,
-            column_count: range.column_len,
-            max_output_quads: range.requested_quads,
-            arena_offset_quads: allocation.offset_quads,
-            arena_capacity_quads: allocation.capacity_quads,
-            draw_command_index,
-            bounds_min: range.bounds_min,
-            bounds_max: range.bounds_max,
-        });
-        draw_command_index = draw_command_index.saturating_add(1);
-    }
-}
-
-fn build_planned_gpu_generated_regions_if_allocations_satisfied(
-    active_ranges: &[PackedGpuGenerationActiveRange],
-    allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
-    planned_regions: &mut Vec<PreparedPackedGpuGeneratedRegion>,
-    active_chunk_job_count: usize,
 ) -> bool {
-    planned_regions.clear();
-    reserve_vec_for_len(planned_regions, active_chunk_job_count);
-
-    let mut draw_command_index = 0usize;
-    for range in active_ranges {
-        let Some(allocation) = allocations.get(&range.chunk_key).copied() else {
-            planned_regions.clear();
-            return false;
-        };
-        if allocation.capacity_quads < range.requested_quads {
-            planned_regions.clear();
-            return false;
+    for batch in ordered_batches {
+        for range in batch.chunk_ranges.iter() {
+            if !range.active || range.column_len == 0 {
+                continue;
+            }
+            let Some(allocation) = allocations.get(&range.chunk_key) else {
+                return false;
+            };
+            if allocation.capacity_quads < active_chunk_requested_quads(range) {
+                return false;
+            }
         }
-
-        planned_regions.push(PreparedPackedGpuGeneratedRegion {
-            key: range.key,
-            chunk_key: range.chunk_key,
-            generation: range.generation,
-            column_count: range.column_len,
-            max_output_quads: range.requested_quads,
-            arena_offset_quads: allocation.offset_quads,
-            arena_capacity_quads: allocation.capacity_quads,
-            draw_command_index,
-            bounds_min: range.bounds_min,
-            bounds_max: range.bounds_max,
-        });
-        draw_command_index = draw_command_index.saturating_add(1);
     }
     true
+}
+
+fn build_planned_gpu_generated_regions(
+    ordered_batches: &[crate::packed_quad_gpu_generation::PackedGpuGenerationBatch],
+    allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+    planned_regions: &mut Vec<PreparedPackedGpuGeneratedRegion>,
+) {
+    let active_chunk_job_count =
+        PackedGpuGenerationBatches::active_chunk_job_count(ordered_batches);
+    planned_regions.clear();
+    if planned_regions.capacity() < active_chunk_job_count {
+        planned_regions.reserve(active_chunk_job_count - planned_regions.capacity());
+    }
+
+    let mut draw_command_index = 0usize;
+    for batch in ordered_batches {
+        for range in batch.chunk_ranges.iter() {
+            if !range.active || range.column_len == 0 {
+                continue;
+            }
+            let requested_quads = active_chunk_requested_quads(range);
+            let Some(allocation) = allocations.get(&range.chunk_key).copied() else {
+                continue;
+            };
+            let (bounds_min, bounds_max) =
+                crate::packed_quad_pipeline::packed_chunk_world_bounds(range.chunk_key);
+
+            planned_regions.push(PreparedPackedGpuGeneratedRegion {
+                key: batch.key,
+                chunk_key: range.chunk_key,
+                generation: batch.generation,
+                column_count: range.column_len,
+                max_output_quads: requested_quads,
+                arena_offset_quads: allocation.offset_quads,
+                arena_capacity_quads: allocation.capacity_quads,
+                draw_command_index,
+                bounds_min,
+                bounds_max,
+            });
+            draw_command_index = draw_command_index.saturating_add(1);
+        }
+    }
 }
 
 fn prepared_structure_refresh_ready(
@@ -835,16 +717,9 @@ struct IndirectVisibilityEstimate {
 struct VisibleIndirectSelection {
     indices: Vec<usize>,
     commands: Vec<crate::packed_quad_buffer::PackedQuadDrawCommand>,
-    visible_commands: usize,
     visible_batches: usize,
     visible_quads: usize,
     considered_commands: usize,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct VisibleIndirectCollectionMode {
-    indices: bool,
-    commands: bool,
 }
 
 fn collect_visible_indirect_commands(
@@ -854,21 +729,11 @@ fn collect_visible_indirect_commands(
     view_position: Vec3,
     clip_from_world: Mat4,
     face_range_cull_enabled: bool,
-    collection_mode: VisibleIndirectCollectionMode,
 ) -> VisibleIndirectSelection {
     let mut last_visible_batch_key = None;
     let mut selection = VisibleIndirectSelection {
-        indices: if collection_mode.indices {
-            Vec::with_capacity(command_count.min(draw_commands.len()))
-        } else {
-            Vec::new()
-        },
-        commands: if collection_mode.commands {
-            Vec::with_capacity(command_count.min(draw_commands.len()))
-        } else {
-            Vec::new()
-        },
-        visible_commands: 0,
+        indices: Vec::with_capacity(command_count.min(draw_commands.len())),
+        commands: Vec::with_capacity(command_count.min(draw_commands.len())),
         visible_batches: 0,
         visible_quads: 0,
         considered_commands: 0,
@@ -901,13 +766,8 @@ fn collect_visible_indirect_commands(
             continue;
         }
 
-        if collection_mode.indices {
-            selection.indices.push(index);
-        }
-        if collection_mode.commands {
-            selection.commands.push(*draw_command);
-        }
-        selection.visible_commands += 1;
+        selection.indices.push(index);
+        selection.commands.push(*draw_command);
         selection.visible_quads += command.len_quads;
         if last_visible_batch_key != Some(command.batch_key) {
             selection.visible_batches += 1;
@@ -1096,6 +956,7 @@ fn refresh_structure_stable_gpu_generated_prepare(
     render_queue: &RenderQueue,
     generation_pipeline: &PackedQuadGenerationPipeline,
     cull_pipeline: Option<&PackedQuadCullPipeline>,
+    ordered_batches: &[crate::packed_quad_gpu_generation::PackedGpuGenerationBatch],
     batch_signature: u64,
     batch_structure_signature: u64,
     batch_summary: crate::packed_quad_gpu_generation::PackedGpuGenerationBatchSummary,
@@ -1112,16 +973,8 @@ fn refresh_structure_stable_gpu_generated_prepare(
         batch_structure_signature,
         arena.generation,
         batch_summary.total_column_count,
-    ) {
-        return false;
-    }
-
-    if !build_planned_gpu_generated_regions_if_allocations_satisfied(
-        &buffers.active_ranges,
-        &arena.allocations,
-        &mut buffers.planned_regions,
-        active_chunk_job_count,
-    ) {
+    ) || !structure_stable_gpu_allocations_satisfied(ordered_batches, &arena.allocations)
+    {
         return false;
     }
 
@@ -1134,17 +987,15 @@ fn refresh_structure_stable_gpu_generated_prepare(
         .capacity_quads
         .saturating_sub(batch_summary.total_max_output_quads);
 
-    retain_dispatched_gpu_generation_chunks(
-        &mut prepared.chunk_dispatched_generation,
-        &arena.allocations,
-    );
     collect_active_gpu_generation_jobs(
+        ordered_batches,
         &arena.allocations,
         &prepared.chunk_dispatched_generation,
         buffers,
-        active_chunk_job_count,
     );
-    move_pending_chunk_generations_to_prepared(buffers, prepared);
+    prepared
+        .pending_chunk_generations
+        .clone_from(&buffers.pending_chunk_generations);
 
     let Some(jobs_buffer) = buffers.jobs_buffer.as_ref() else {
         prepared.disable();
@@ -1194,7 +1045,7 @@ fn refresh_structure_stable_gpu_generated_prepare(
         ));
     }
 
-    move_planned_regions_to_prepared(buffers, prepared);
+    prepared.regions.clone_from(&buffers.planned_regions);
     prepared.total_column_count = batch_summary.total_column_count;
     prepared.max_column_count = batch_summary.max_column_count;
     prepared.total_max_output_quads = batch_summary.total_max_output_quads;
@@ -1204,10 +1055,9 @@ fn refresh_structure_stable_gpu_generated_prepare(
     prepared.arena_generation = arena.generation;
     prepared.batch_signature = batch_signature;
     prepared.batch_structure_signature = batch_structure_signature;
-    let (cull_metadata_signature, cull_source_signature) =
-        generated_regions_cull_signatures(&prepared.regions, prepared.arena_generation);
-    prepared.cull_metadata_signature = cull_metadata_signature;
-    prepared.cull_source_signature = cull_source_signature;
+    prepared.cull_metadata_signature = generated_regions_cull_metadata_signature(&prepared.regions);
+    prepared.cull_source_signature =
+        generated_regions_cull_source_signature(&prepared.regions, prepared.arena_generation);
     if prepared.generation_dispatch_count > 0 {
         prepared.mark_pending();
     }
@@ -1276,20 +1126,27 @@ fn prepare_packed_gpu_generated_draw(
     };
 
     let ordered_batches = extracted_batches.batches();
-    let (batch_signature, batch_structure_signature, batch_summary) =
-        if extracted_batches.batch_signature == 0
-            || extracted_batches.batch_structure_signature == 0
-        {
-            PackedGpuGenerationBatches::calculate_batch_metadata(ordered_batches)
-        } else {
-            (
-                extracted_batches.batch_signature,
-                extracted_batches.batch_structure_signature,
-                extracted_batches.summary,
-            )
-        };
-    let active_chunk_job_count = batch_summary.active_chunk_job_count;
-    let total_region_column_count = batch_summary.total_column_count;
+    let active_chunk_job_count =
+        PackedGpuGenerationBatches::active_chunk_job_count(ordered_batches);
+    let batch_signature = if extracted_batches.batch_signature == 0 {
+        PackedGpuGenerationBatches::calculate_batch_signature(ordered_batches)
+    } else {
+        extracted_batches.batch_signature
+    };
+    let batch_structure_signature = if extracted_batches.batch_structure_signature == 0 {
+        PackedGpuGenerationBatches::calculate_batch_structure_signature(ordered_batches)
+    } else {
+        extracted_batches.batch_structure_signature
+    };
+    let batch_summary = if extracted_batches.batch_signature == 0 {
+        PackedGpuGenerationBatches::summarize_batches(ordered_batches)
+    } else {
+        extracted_batches.summary
+    };
+    let total_region_column_count = ordered_batches
+        .iter()
+        .map(|batch| batch.columns.len())
+        .sum();
 
     if !batch_summary.is_renderable(ordered_batches.len()) {
         prepared.disable();
@@ -1342,18 +1199,18 @@ fn prepare_packed_gpu_generated_draw(
         return;
     }
 
-    collect_active_gpu_generation_ranges(
-        ordered_batches,
-        &mut buffers.active_ranges,
-        active_chunk_job_count,
-    );
-
-    if prepared.batch_signature != batch_signature
-        && refresh_structure_stable_gpu_generated_prepare(
+    if prepared.batch_signature != batch_signature {
+        build_planned_gpu_generated_regions(
+            ordered_batches,
+            &arena.allocations,
+            &mut buffers.planned_regions,
+        );
+        if refresh_structure_stable_gpu_generated_prepare(
             &render_device,
             &render_queue,
             generation_pipeline,
             cull_pipeline.as_deref(),
+            ordered_batches,
             batch_signature,
             batch_structure_signature,
             batch_summary,
@@ -1362,22 +1219,25 @@ fn prepare_packed_gpu_generated_draw(
             &mut buffers,
             &mut prepared,
             &mut gpu_cull,
-        )
-    {
-        return;
+        ) {
+            return;
+        }
     }
 
-    {
-        let PackedGpuGenerationBuffers {
-            active_ranges,
-            allocation_requests,
-            ..
-        } = &mut *buffers;
-        collect_gpu_generation_allocation_requests(
-            active_ranges,
-            allocation_requests,
-            active_chunk_job_count,
-        );
+    buffers.allocation_requests.clear();
+    for batch in ordered_batches {
+        for range in batch.chunk_ranges.iter() {
+            if !range.active || range.column_len == 0 {
+                continue;
+            }
+            buffers.allocation_requests.push(
+                crate::packed_quad_buffer::PackedGpuGenerationAllocationRequest {
+                    key: range.chunk_key,
+                    requested_quads: active_chunk_requested_quads(range),
+                    generation: batch.generation,
+                },
+            );
+        }
     }
     let next_free_quads = {
         let PackedGpuGenerationBuffers {
@@ -1395,20 +1255,12 @@ fn prepare_packed_gpu_generated_draw(
         )
     };
 
-    {
-        let PackedGpuGenerationBuffers {
-            active_ranges,
-            allocation_plan,
-            planned_regions,
-            ..
-        } = &mut *buffers;
-        build_planned_gpu_generated_regions(
-            active_ranges,
-            allocation_plan,
-            planned_regions,
-            active_chunk_job_count,
-        );
-    }
+    let planned_allocations = buffers.allocation_plan.clone();
+    build_planned_gpu_generated_regions(
+        ordered_batches,
+        &planned_allocations,
+        &mut buffers.planned_regions,
+    );
 
     let allocation_unchanged = crate::packed_quad_buffer::gpu_generated_allocation_maps_equivalent(
         &arena.allocations,
@@ -1438,6 +1290,7 @@ fn prepare_packed_gpu_generated_draw(
             &render_queue,
             generation_pipeline,
             cull_pipeline.as_deref(),
+            ordered_batches,
             batch_signature,
             batch_structure_signature,
             batch_summary,
@@ -1454,10 +1307,6 @@ fn prepare_packed_gpu_generated_draw(
     if !allocation_unchanged {
         std::mem::swap(&mut arena.allocations, &mut buffers.allocation_plan);
     }
-    retain_dispatched_gpu_generation_chunks(
-        &mut prepared.chunk_dispatched_generation,
-        &arena.allocations,
-    );
     arena.next_free_quads = next_free_quads;
     arena.stats.used_quads = batch_summary.total_max_output_quads;
     arena.stats.allocated_slot_quads = next_free_quads;
@@ -1571,21 +1420,30 @@ fn prepare_packed_gpu_generated_draw(
         buffers.indirect_capacity_commands = next_capacity;
     }
 
+    buffers.jobs.clear();
+    let jobs_reserve = active_chunk_job_count.saturating_sub(buffers.jobs.capacity());
+    if jobs_reserve > 0 {
+        buffers.jobs.reserve(jobs_reserve);
+    }
     buffers.columns.clear();
     let columns_reserve = total_region_column_count.saturating_sub(buffers.columns.capacity());
     if columns_reserve > 0 {
         buffers.columns.reserve(columns_reserve);
     }
     collect_active_gpu_generation_jobs(
+        ordered_batches,
         &arena.allocations,
         &prepared.chunk_dispatched_generation,
         &mut buffers,
-        active_chunk_job_count,
     );
-    move_pending_chunk_generations_to_prepared(&mut buffers, &mut prepared);
+    prepared
+        .pending_chunk_generations
+        .clone_from(&buffers.pending_chunk_generations);
 
+    let mut region_column_base = 0usize;
     for batch in ordered_batches {
         buffers.columns.extend_from_slice(batch.columns.as_slice());
+        region_column_base = region_column_base.saturating_add(batch.columns.len());
     }
 
     let Some(jobs_buffer) = buffers.jobs_buffer.as_ref() else {
@@ -1646,28 +1504,24 @@ fn prepare_packed_gpu_generated_draw(
             BindingResource::Sampler(&gpu_atlas.sampler),
         )),
     );
-    let command_count = buffers.jobs.len();
-    let generation_dispatch_count = buffers.dirty_jobs.len();
-    let indirect_buffer = indirect_buffer.clone();
 
     prepared.enabled = true;
-    move_planned_regions_to_prepared(&mut buffers, &mut prepared);
+    prepared.regions.clone_from(&buffers.planned_regions);
     prepared.total_column_count = batch_summary.total_column_count;
     prepared.max_column_count = batch_summary.max_column_count;
     prepared.total_max_output_quads = batch_summary.total_max_output_quads;
     prepared.source_chunk_count = batch_summary.source_chunk_count;
-    prepared.command_count = command_count;
-    prepared.generation_dispatch_count = generation_dispatch_count;
+    prepared.command_count = buffers.jobs.len();
+    prepared.generation_dispatch_count = buffers.dirty_jobs.len();
     prepared.arena_generation = arena.generation;
     prepared.batch_signature = batch_signature;
     prepared.batch_structure_signature = batch_structure_signature;
-    let (cull_metadata_signature, cull_source_signature) =
-        generated_regions_cull_signatures(&prepared.regions, prepared.arena_generation);
-    prepared.cull_metadata_signature = cull_metadata_signature;
-    prepared.cull_source_signature = cull_source_signature;
+    prepared.cull_metadata_signature = generated_regions_cull_metadata_signature(&prepared.regions);
+    prepared.cull_source_signature =
+        generated_regions_cull_source_signature(&prepared.regions, prepared.arena_generation);
     prepared.generation_bind_group = Some(generation_bind_group);
     prepared.render_bind_group = Some(render_bind_group);
-    prepared.indirect_buffer = Some(indirect_buffer);
+    prepared.indirect_buffer = Some(indirect_buffer.clone());
     if prepared.generation_dispatch_count > 0 {
         prepared.mark_pending();
     }
@@ -1749,48 +1603,6 @@ fn generated_regions_cull_source_signature(
         signature = update_generated_cull_signature(signature, region.draw_command_index as u64);
     }
     signature
-}
-
-fn generated_regions_cull_signatures(
-    regions: &[PreparedPackedGpuGeneratedRegion],
-    arena_generation: u64,
-) -> (u64, u64) {
-    let mut metadata_signature = PACKED_GPU_GENERATED_CULL_SIGNATURE_OFFSET;
-    let mut source_signature = PACKED_GPU_GENERATED_CULL_SIGNATURE_OFFSET;
-    metadata_signature = update_generated_cull_signature(metadata_signature, regions.len() as u64);
-    source_signature = update_generated_cull_signature(source_signature, arena_generation);
-    source_signature = update_generated_cull_signature(source_signature, regions.len() as u64);
-
-    for (index, region) in regions.iter().enumerate() {
-        metadata_signature = update_generated_cull_signature(metadata_signature, index as u64);
-        metadata_signature = update_generated_cull_signature(metadata_signature, region.key);
-        metadata_signature = update_generated_cull_signature(metadata_signature, region.chunk_key);
-        metadata_signature =
-            update_generated_cull_signature(metadata_signature, region.max_output_quads as u64);
-        for value in region.bounds_min.to_array() {
-            metadata_signature =
-                update_generated_cull_signature(metadata_signature, u64::from(value.to_bits()));
-        }
-        for value in region.bounds_max.to_array() {
-            metadata_signature =
-                update_generated_cull_signature(metadata_signature, u64::from(value.to_bits()));
-        }
-
-        source_signature = update_generated_cull_signature(source_signature, index as u64);
-        source_signature = update_generated_cull_signature(source_signature, region.key);
-        source_signature = update_generated_cull_signature(source_signature, region.chunk_key);
-        source_signature = update_generated_cull_signature(source_signature, region.generation);
-        source_signature =
-            update_generated_cull_signature(source_signature, region.max_output_quads as u64);
-        source_signature =
-            update_generated_cull_signature(source_signature, region.arena_offset_quads as u64);
-        source_signature =
-            update_generated_cull_signature(source_signature, region.arena_capacity_quads as u64);
-        source_signature =
-            update_generated_cull_signature(source_signature, region.draw_command_index as u64);
-    }
-
-    (metadata_signature, source_signature)
 }
 
 fn generated_cull_config_signature(config: crate::packed_quad_buffer::PackedQuadCullConfig) -> u64 {
@@ -2225,6 +2037,12 @@ impl render_graph::Node for PackedQuadCullNode {
         }
 
         let node_start = Instant::now();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let pipeline = world.resource::<PackedQuadCullPipeline>();
+        let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline_id)
+        else {
+            return Ok(());
+        };
         let Some(cull_source) = PackedQuadGpuCullSource::from_world(world) else {
             return Ok(());
         };
@@ -2234,6 +2052,9 @@ impl render_graph::Node for PackedQuadCullNode {
         }
 
         let view_entity = graph.view_entity();
+        let Some(view_uniform) = world.get::<PackedQuadViewUniform>(view_entity) else {
+            return Ok(());
+        };
         let Some(extracted_view) = world.get::<ExtractedView>(view_entity) else {
             return Ok(());
         };
@@ -2241,6 +2062,21 @@ impl render_graph::Node for PackedQuadCullNode {
         let clip_from_world = extracted_view.clip_from_world.unwrap_or_else(|| {
             extracted_view.clip_from_view * extracted_view.world_from_view.affine().inverse()
         });
+
+        let (
+            Some(metadata_buffer),
+            Some(output_indirect_buffer),
+            Some(config_buffer),
+            Some(count_buffer),
+        ) = (
+            gpu_cull.metadata_buffer.as_ref(),
+            gpu_cull.output_indirect_buffer.as_ref(),
+            gpu_cull.config_buffer.as_ref(),
+            gpu_cull.count_buffer.as_ref(),
+        )
+        else {
+            return Ok(());
+        };
 
         let dispatch_signature = packed_gpu_cull_dispatch_signature(
             &cull_source,
@@ -2266,29 +2102,6 @@ impl render_graph::Node for PackedQuadCullNode {
             return Ok(());
         }
 
-        let Some(view_uniform) = world.get::<PackedQuadViewUniform>(view_entity) else {
-            return Ok(());
-        };
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let pipeline = world.resource::<PackedQuadCullPipeline>();
-        let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline_id)
-        else {
-            return Ok(());
-        };
-        let (
-            Some(metadata_buffer),
-            Some(output_indirect_buffer),
-            Some(config_buffer),
-            Some(count_buffer),
-        ) = (
-            gpu_cull.metadata_buffer.as_ref(),
-            gpu_cull.output_indirect_buffer.as_ref(),
-            gpu_cull.config_buffer.as_ref(),
-            gpu_cull.count_buffer.as_ref(),
-        )
-        else {
-            return Ok(());
-        };
         let estimate = cull_source.estimate_visible(command_count, view_position, clip_from_world);
 
         let local_bind_group;
@@ -2758,50 +2571,32 @@ impl render_graph::Node for PackedQuadRenderNode {
             });
             let cpu_visible_compact_requested =
                 env_flag_default(PACKED_CPU_VISIBLE_COMPACT_ENV, true);
-            let full_cpu_multi_indirect =
-                indirect.draw_mode == "multi-indirect" && !cpu_visible_compact_requested;
-            let cpu_visible_indirect_buffer = (gpu_cull_count.is_none()
-                && cpu_visible_compact_requested)
-                .then(|| {
-                    let cpu_visible_indirect = world.get_resource::<
-                        crate::packed_quad_pipeline::PackedQuadCpuVisibleIndirectBuffer,
-                    >()?;
-                    cpu_visible_indirect
-                        .buffer
-                        .as_ref()
-                        .map(|buffer| (buffer, cpu_visible_indirect.capacity_commands))
-                })
-                .flatten();
-            let collect_visible_indices = match cpu_visible_indirect_buffer {
-                Some((_, capacity_commands)) => capacity_commands < indirect.command_count,
-                None => true,
-            };
-            let collect_visible_commands = cpu_visible_indirect_buffer.is_some();
 
-            let visible_selection =
-                (gpu_cull_count.is_none() && !full_cpu_multi_indirect).then(|| {
-                    collect_visible_indirect_commands(
-                        &indirect.command_metadata,
-                        &indirect.commands,
-                        indirect.command_count,
-                        view_position,
-                        clip_from_world,
-                        env_flag_default(
-                            PACKED_FACE_RANGE_CULL_ENV,
-                            DEFAULT_PACKED_FACE_RANGE_CULL,
-                        ),
-                        VisibleIndirectCollectionMode {
-                            indices: collect_visible_indices,
-                            commands: collect_visible_commands,
-                        },
-                    )
-                });
-
-            let cpu_compact_buffer = visible_selection.as_ref().and_then(|selection| {
-                let (buffer, capacity_commands) = cpu_visible_indirect_buffer?;
-                (!selection.commands.is_empty() && selection.commands.len() <= capacity_commands)
-                    .then_some(buffer)
+            let visible_selection = gpu_cull_count.is_none().then(|| {
+                collect_visible_indirect_commands(
+                    &indirect.command_metadata,
+                    &indirect.commands,
+                    indirect.command_count,
+                    view_position,
+                    clip_from_world,
+                    env_flag_default(PACKED_FACE_RANGE_CULL_ENV, DEFAULT_PACKED_FACE_RANGE_CULL),
+                )
             });
+
+            let cpu_compact_buffer = visible_selection
+                .as_ref()
+                .and_then(|selection| {
+                    let requested =
+                        cpu_visible_compact_requested && !selection.commands.is_empty();
+                    if !requested {
+                        return None;
+                    }
+                    let cpu_visible_indirect = world
+                        .get_resource::<crate::packed_quad_pipeline::PackedQuadCpuVisibleIndirectBuffer>()?;
+                    let buffer = cpu_visible_indirect.buffer.as_ref()?;
+                    (selection.commands.len() <= cpu_visible_indirect.capacity_commands)
+                        .then_some(buffer)
+                });
 
             if let (Some(selection), Some(buffer)) =
                 (visible_selection.as_ref(), cpu_compact_buffer)
@@ -2848,7 +2643,7 @@ impl render_graph::Node for PackedQuadRenderNode {
                 render_draw_calls = usize::from(indirect.command_count > 0);
                 render_items_considered = indirect.command_count;
                 crate::packed_quad_pipeline::record_packed_quad_cpu_visible_indirect(false, 0);
-            } else if full_cpu_multi_indirect {
+            } else if indirect.draw_mode == "multi-indirect" && !cpu_visible_compact_requested {
                 render_pass.multi_draw_indirect(indirect_buffer, 0, indirect.command_count as u32);
                 render_draw_calls = usize::from(indirect.command_count > 0);
                 render_items_considered = indirect.command_count;
@@ -2898,7 +2693,7 @@ impl render_graph::Node for PackedQuadRenderNode {
                     }
                     crate::packed_quad_pipeline::record_packed_quad_cpu_visible_indirect(
                         false,
-                        selection.visible_commands,
+                        selection.commands.len(),
                     );
                 }
             }
@@ -3364,15 +3159,7 @@ mod tests {
             }
         }
 
-        let region = test_region(7, 2048);
-        let base = generated_regions_cull_source_signature(&[region], 11);
-        let (metadata_signature, source_signature) =
-            generated_regions_cull_signatures(&[region], 11);
-        assert_eq!(
-            metadata_signature,
-            generated_regions_cull_metadata_signature(&[region])
-        );
-        assert_eq!(source_signature, base);
+        let base = generated_regions_cull_source_signature(&[test_region(7, 2048)], 11);
         assert_eq!(
             base,
             generated_regions_cull_source_signature(&[test_region(7, 2048)], 11)
@@ -3547,7 +3334,7 @@ mod tests {
     }
 
     #[test]
-    fn build_planned_gpu_generated_regions_if_allocations_satisfied_requires_active_slots() {
+    fn structure_stable_gpu_allocations_satisfied_requires_active_slots() {
         let chunk_key = 55_u64;
         let batch = crate::packed_quad_gpu_generation::PackedGpuGenerationBatch {
             key: 1,
@@ -3577,18 +3364,10 @@ mod tests {
             generation: 1,
         };
         let mut allocations = HashMap::new();
-        let mut active_ranges = Vec::new();
-        let mut planned_regions = Vec::new();
-        collect_active_gpu_generation_ranges(std::slice::from_ref(&batch), &mut active_ranges, 1);
-        assert!(
-            !build_planned_gpu_generated_regions_if_allocations_satisfied(
-                &active_ranges,
-                &allocations,
-                &mut planned_regions,
-                1,
-            )
-        );
-        assert!(planned_regions.is_empty());
+        assert!(!structure_stable_gpu_allocations_satisfied(
+            std::slice::from_ref(&batch),
+            &allocations
+        ));
         allocations.insert(
             chunk_key,
             crate::packed_quad_buffer::PackedQuadArenaAllocation {
@@ -3600,361 +3379,22 @@ mod tests {
                 generation: 1,
             },
         );
-        assert!(
-            build_planned_gpu_generated_regions_if_allocations_satisfied(
-                &active_ranges,
-                &allocations,
-                &mut planned_regions,
-                1,
-            )
-        );
-        assert_eq!(planned_regions.len(), 1);
-        assert_eq!(planned_regions[0].chunk_key, chunk_key);
-
-        allocations.get_mut(&chunk_key).unwrap().capacity_quads = 0;
-        assert!(
-            !build_planned_gpu_generated_regions_if_allocations_satisfied(
-                &active_ranges,
-                &allocations,
-                &mut planned_regions,
-                1,
-            )
-        );
-        assert!(planned_regions.is_empty());
+        assert!(structure_stable_gpu_allocations_satisfied(
+            std::slice::from_ref(&batch),
+            &allocations
+        ));
     }
 
     #[test]
     fn chunk_needs_gpu_generation_tracks_per_chunk_batch_generation() {
         let mut dispatched = HashMap::new();
-        let allocation = crate::packed_quad_buffer::PackedQuadArenaAllocation {
-            key: 10,
-            offset_quads: 16,
-            len_quads: 7,
-            capacity_quads: 32,
-            generation: 3,
-        };
-        assert!(chunk_needs_gpu_generation(10, 3, allocation, &dispatched));
-        dispatched.insert(10, PackedGpuDispatchedChunkState::new(3, allocation));
-        assert!(!chunk_needs_gpu_generation(10, 3, allocation, &dispatched));
-        assert!(chunk_needs_gpu_generation(10, 4, allocation, &dispatched));
-
-        let moved_allocation = crate::packed_quad_buffer::PackedQuadArenaAllocation {
-            offset_quads: 64,
-            ..allocation
-        };
-        assert!(chunk_needs_gpu_generation(
-            10,
-            3,
-            moved_allocation,
-            &dispatched
-        ));
-
-        let resized_allocation = crate::packed_quad_buffer::PackedQuadArenaAllocation {
-            len_quads: 8,
-            capacity_quads: 64,
-            ..allocation
-        };
-        assert!(chunk_needs_gpu_generation(
-            10,
-            3,
-            resized_allocation,
-            &dispatched
-        ));
-        assert!(chunk_needs_gpu_generation(11, 1, allocation, &dispatched));
-    }
-
-    #[test]
-    fn move_pending_chunk_generations_to_prepared_reuses_scratch_without_copy() {
-        let allocation = crate::packed_quad_buffer::PackedQuadArenaAllocation {
-            key: 10,
-            offset_quads: 16,
-            len_quads: 7,
-            capacity_quads: 32,
-            generation: 3,
-        };
-        let old_state = PackedGpuDispatchedChunkState::new(1, allocation);
-        let new_state = PackedGpuDispatchedChunkState::new(2, allocation);
-        let mut prepared = PreparedPackedGpuGeneratedDraw {
-            pending_chunk_generations: vec![(1, old_state)],
-            ..Default::default()
-        };
-        let mut buffers = PackedGpuGenerationBuffers {
-            pending_chunk_generations: vec![(10, new_state), (11, new_state)],
-            ..Default::default()
-        };
-
-        move_pending_chunk_generations_to_prepared(&mut buffers, &mut prepared);
-
-        assert_eq!(prepared.pending_chunk_generations.len(), 2);
-        assert_eq!(prepared.pending_chunk_generations[0], (10, new_state));
-        assert_eq!(prepared.pending_chunk_generations[1], (11, new_state));
-        assert!(buffers.pending_chunk_generations.is_empty());
-    }
-
-    #[test]
-    fn move_planned_regions_to_prepared_reuses_scratch_without_copy() {
-        let region = |chunk_key| PreparedPackedGpuGeneratedRegion {
-            key: chunk_key / 10,
-            chunk_key,
-            generation: 1,
-            column_count: 2,
-            max_output_quads: 3,
-            arena_offset_quads: 4,
-            arena_capacity_quads: 5,
-            draw_command_index: 6,
-            bounds_min: Vec3::ZERO,
-            bounds_max: Vec3::ONE,
-        };
-        let mut prepared = PreparedPackedGpuGeneratedDraw {
-            regions: vec![region(10)],
-            ..Default::default()
-        };
-        let mut buffers = PackedGpuGenerationBuffers {
-            planned_regions: vec![region(20), region(30)],
-            ..Default::default()
-        };
-
-        move_planned_regions_to_prepared(&mut buffers, &mut prepared);
-
-        assert_eq!(prepared.regions.len(), 2);
-        assert_eq!(prepared.regions[0].chunk_key, 20);
-        assert_eq!(prepared.regions[1].chunk_key, 30);
-        assert!(buffers.planned_regions.is_empty());
-    }
-
-    #[test]
-    fn retain_dispatched_gpu_generation_chunks_drops_evicted_or_moved_slots() {
-        let allocation = |key, offset_quads| crate::packed_quad_buffer::PackedQuadArenaAllocation {
-            key,
-            offset_quads,
-            len_quads: 7,
-            capacity_quads: 32,
-            generation: 3,
-        };
-
-        let mut dispatched = HashMap::from([
-            (
-                10,
-                PackedGpuDispatchedChunkState::new(3, allocation(10, 16)),
-            ),
-            (
-                11,
-                PackedGpuDispatchedChunkState::new(3, allocation(11, 64)),
-            ),
-            (
-                12,
-                PackedGpuDispatchedChunkState::new(3, allocation(12, 96)),
-            ),
-        ]);
-        let allocations = HashMap::from([(10, allocation(10, 16)), (11, allocation(11, 128))]);
-
-        retain_dispatched_gpu_generation_chunks(&mut dispatched, &allocations);
-
-        assert!(dispatched.contains_key(&10));
-        assert!(!dispatched.contains_key(&11));
-        assert!(!dispatched.contains_key(&12));
-    }
-
-    #[test]
-    fn packed_gpu_generation_active_ranges_feed_prepare_buffers() {
-        let batch_a = crate::packed_quad_gpu_generation::PackedGpuGenerationBatch {
-            key: 11,
-            columns: std::sync::Arc::new(vec![
-                crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
-                    [0, 0, 1, 1],
-                    [4, 4, 4, 4, 4],
-                    2,
-                ),
-                crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
-                    [1, 0, 1, 1],
-                    [5, 5, 5, 5, 5],
-                    3,
-                ),
-                crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
-                    [2, 0, 1, 1],
-                    [6, 6, 6, 6, 6],
-                    4,
-                ),
-            ]),
-            chunk_ranges: std::sync::Arc::new(vec![
-                crate::packed_quad_gpu_generation::PackedGpuChunkRange {
-                    chunk_key: 101,
-                    column_start: 0,
-                    column_len: 1,
-                    active: true,
-                },
-                crate::packed_quad_gpu_generation::PackedGpuChunkRange {
-                    chunk_key: 102,
-                    column_start: 1,
-                    column_len: 2,
-                    active: true,
-                },
-                crate::packed_quad_gpu_generation::PackedGpuChunkRange {
-                    chunk_key: 103,
-                    column_start: 2,
-                    column_len: 1,
-                    active: false,
-                },
-            ]),
-            params: crate::packed_quad_gpu_generation::PackedGpuGenerationParams::new(
-                3, 39, 0, 0, 1, 2, 3,
-            ),
-            source_chunk_count: 3,
-            max_output_quads: 39,
-            translation: Vec4::new(10.0, 20.0, 30.0, 0.0),
-            bounds_min: Vec3::ZERO,
-            bounds_max: Vec3::ONE,
-            generation: 7,
-        };
-        let batch_b = crate::packed_quad_gpu_generation::PackedGpuGenerationBatch {
-            key: 22,
-            columns: std::sync::Arc::new(vec![
-                crate::packed_quad_gpu_generation::PackedGpuSurfaceColumn::from_parts(
-                    [0, 0, 1, 1],
-                    [9, 9, 9, 9, 9],
-                    5,
-                ),
-            ]),
-            chunk_ranges: std::sync::Arc::new(vec![
-                crate::packed_quad_gpu_generation::PackedGpuChunkRange {
-                    chunk_key: 201,
-                    column_start: 0,
-                    column_len: 1,
-                    active: true,
-                },
-            ]),
-            params: crate::packed_quad_gpu_generation::PackedGpuGenerationParams::new(
-                1, 13, 0, 0, 1, 2, 3,
-            ),
-            source_chunk_count: 1,
-            max_output_quads: 13,
-            translation: Vec4::new(-10.0, 2.0, 4.0, 0.0),
-            bounds_min: Vec3::ZERO,
-            bounds_max: Vec3::ONE,
-            generation: 9,
-        };
-        let batches = vec![batch_a, batch_b];
-        let active_count = PackedGpuGenerationBatches::active_chunk_job_count(&batches);
-        let mut active_ranges = Vec::new();
-        collect_active_gpu_generation_ranges(&batches, &mut active_ranges, active_count);
-
-        assert_eq!(active_count, 3);
-        assert_eq!(active_ranges.len(), 3);
-        assert_eq!(active_ranges[0].chunk_key, 101);
-        assert_eq!(active_ranges[0].column_offset, 0);
-        assert_eq!(active_ranges[1].chunk_key, 102);
-        assert_eq!(active_ranges[1].column_offset, 1);
-        assert_eq!(active_ranges[1].params.column_count(), 2);
-        assert_eq!(
-            active_ranges[1].params.max_output_quads(),
-            2 * crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN
-        );
-        assert_eq!(active_ranges[2].chunk_key, 201);
-        assert_eq!(active_ranges[2].column_offset, 3);
-        let (third_bounds_min, third_bounds_max) =
-            crate::packed_quad_pipeline::packed_chunk_world_bounds(201);
-        assert_eq!(active_ranges[2].bounds_min, third_bounds_min);
-        assert_eq!(active_ranges[2].bounds_max, third_bounds_max);
-
-        let mut allocation_requests = Vec::new();
-        collect_gpu_generation_allocation_requests(
-            &active_ranges,
-            &mut allocation_requests,
-            active_count,
-        );
-        assert_eq!(allocation_requests.len(), 3);
-        assert_eq!(allocation_requests[1].key, 102);
-        assert_eq!(
-            allocation_requests[1].requested_quads,
-            2 * crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN
-        );
-        assert_eq!(allocation_requests[2].generation, 9);
-
-        let allocations = HashMap::from([
-            (
-                101,
-                crate::packed_quad_buffer::PackedQuadArenaAllocation {
-                    key: 101,
-                    offset_quads: 16,
-                    len_quads: crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN,
-                    capacity_quads: crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN,
-                    generation: 7,
-                },
-            ),
-            (
-                102,
-                crate::packed_quad_buffer::PackedQuadArenaAllocation {
-                    key: 102,
-                    offset_quads: 64,
-                    len_quads: 2 * crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN,
-                    capacity_quads: 2 * crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN,
-                    generation: 7,
-                },
-            ),
-            (
-                201,
-                crate::packed_quad_buffer::PackedQuadArenaAllocation {
-                    key: 201,
-                    offset_quads: 128,
-                    len_quads: crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN,
-                    capacity_quads: crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN,
-                    generation: 9,
-                },
-            ),
-        ]);
-
-        let mut planned_regions = Vec::new();
-        build_planned_gpu_generated_regions(
-            &active_ranges,
-            &allocations,
-            &mut planned_regions,
-            active_count,
-        );
-        assert_eq!(planned_regions.len(), 3);
-        assert_eq!(planned_regions[1].draw_command_index, 1);
-        assert_eq!(planned_regions[1].arena_offset_quads, 64);
-        assert_eq!(planned_regions[2].key, 22);
-        assert_eq!(planned_regions[2].bounds_min, third_bounds_min);
-        assert_eq!(planned_regions[2].bounds_max, third_bounds_max);
-
-        let mut buffers = PackedGpuGenerationBuffers {
-            active_ranges,
-            ..Default::default()
-        };
-        let dispatched = HashMap::from([(
-            101,
-            PackedGpuDispatchedChunkState::new(7, allocations.get(&101).copied().unwrap()),
-        )]);
-        collect_active_gpu_generation_jobs(&allocations, &dispatched, &mut buffers, active_count);
-
-        assert_eq!(buffers.jobs.len(), 3);
-        assert_eq!(buffers.jobs[0].source[0], 0);
-        assert_eq!(buffers.jobs[1].source[0], 1);
-        assert_eq!(buffers.jobs[1].source[1], 2);
-        assert_eq!(buffers.jobs[2].source[0], 3);
-        assert_eq!(buffers.jobs[1].output[1], 1);
-        assert_eq!(buffers.dirty_jobs.len(), 2);
-        assert_eq!(buffers.pending_chunk_generations.len(), 2);
-        assert_eq!(buffers.pending_chunk_generations[0].0, 102);
-        assert_eq!(buffers.pending_chunk_generations[0].1.generation, 7);
-        assert_eq!(
-            buffers.pending_chunk_generations[0].1.arena_offset_quads,
-            64
-        );
-        assert_eq!(buffers.pending_chunk_generations[1].0, 201);
-        assert_eq!(buffers.pending_chunk_generations[1].1.generation, 9);
-        assert_eq!(
-            buffers.pending_chunk_generations[1].1.arena_offset_quads,
-            128
-        );
-        assert_eq!(
-            buffers.draw_params[0].chunk_offset,
-            [10.0, 20.0, 30.0, 16.0]
-        );
-        assert_eq!(
-            buffers.draw_params[2].chunk_offset,
-            [-10.0, 2.0, 4.0, 128.0]
-        );
+        assert!(chunk_needs_gpu_generation(10, 3, &dispatched));
+        dispatched.insert(10, 3);
+        assert!(!chunk_needs_gpu_generation(10, 3, &dispatched));
+        assert!(chunk_needs_gpu_generation(10, 4, &dispatched));
+        assert!(chunk_needs_gpu_generation(11, 1, &dispatched));
+        dispatched.insert(11, 1);
+        assert!(!chunk_needs_gpu_generation(11, 1, &dispatched));
     }
 
     #[test]
@@ -4122,72 +3562,13 @@ mod tests {
             Vec3::new(0.0, 0.0, -2.0),
             Mat4::IDENTITY,
             false,
-            VisibleIndirectCollectionMode {
-                indices: true,
-                commands: true,
-            },
         );
 
         assert_eq!(selection.indices, vec![0, 1]);
         assert_eq!(selection.commands, vec![draw_commands[0], draw_commands[1]]);
-        assert_eq!(selection.visible_commands, 2);
         assert_eq!(selection.visible_batches, 1);
         assert_eq!(selection.visible_quads, 15);
         assert_eq!(selection.considered_commands, 3);
-
-        let compact_selection = collect_visible_indirect_commands(
-            &metadata,
-            &draw_commands,
-            metadata.len(),
-            Vec3::new(0.0, 0.0, -2.0),
-            Mat4::IDENTITY,
-            false,
-            VisibleIndirectCollectionMode {
-                indices: false,
-                commands: true,
-            },
-        );
-
-        assert!(compact_selection.indices.is_empty());
-        assert_eq!(
-            compact_selection.commands,
-            vec![draw_commands[0], draw_commands[1]]
-        );
-        assert_eq!(compact_selection.visible_batches, selection.visible_batches);
-        assert_eq!(compact_selection.visible_quads, selection.visible_quads);
-        assert_eq!(
-            compact_selection.considered_commands,
-            selection.considered_commands
-        );
-
-        let fallback_selection = collect_visible_indirect_commands(
-            &metadata,
-            &draw_commands,
-            metadata.len(),
-            Vec3::new(0.0, 0.0, -2.0),
-            Mat4::IDENTITY,
-            false,
-            VisibleIndirectCollectionMode {
-                indices: true,
-                commands: false,
-            },
-        );
-
-        assert_eq!(fallback_selection.indices, selection.indices);
-        assert!(fallback_selection.commands.is_empty());
-        assert_eq!(
-            fallback_selection.visible_commands,
-            selection.visible_commands
-        );
-        assert_eq!(
-            fallback_selection.visible_batches,
-            selection.visible_batches
-        );
-        assert_eq!(fallback_selection.visible_quads, selection.visible_quads);
-        assert_eq!(
-            fallback_selection.considered_commands,
-            selection.considered_commands
-        );
     }
 
     #[test]

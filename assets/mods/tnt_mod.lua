@@ -12,7 +12,7 @@ register_block({
 
 -- 2. Register behavior for TNT
 register_behavior("tnt", {
-    on_broken = function(x, y, z)
+    on_block_break = function(x, y, z)
         print("TNT: Exploded at coordinate: " .. x .. ", " .. y .. ", " .. z)
 
         -- Spawn 45 brilliant explosion fire embers and smoke cloud particles!
@@ -37,20 +37,17 @@ register_behavior("tnt", {
             for dy = -r, r do
                 for dz = -r, r do
                     if dx*dx + dy*dy + dz*dz <= r*r then
-                        local px = x + dx
-                        local py = y + dy
-                        local pz = z + dz
+                        local wx = x + dx
+                        local wy = y + dy
+                        local wz = z + dz
 
-                        -- Enforce boundary limits (32x32x32 chunk)
-                        if px >= 0 and px < 32 and py >= 0 and py < 32 and pz >= 0 and pz < 32 then
-                            local current = get_block(px, py, pz)
-                            if current ~= "air" then
-                                set_block(px, py, pz, "air")
+                        local current = get_block(wx, wy, wz)
+                        if current ~= "air" then
+                            set_block(wx, wy, wz, "air")
 
-                                -- Chain reaction! Trigger detonation on adjacent TNT blocks
-                                if current == "tnt" then
-                                    trigger_behavior("tnt", "on_broken", px, py, pz)
-                                end
+                            -- Chain reaction: adjacent TNT detonates
+                            if current == "tnt" then
+                                trigger_behavior("tnt", "on_block_break", wx, wy, wz)
                             end
                         end
                     end
@@ -62,6 +59,6 @@ register_behavior("tnt", {
     on_step_on = function(x, y, z)
         print("TNT: Stepped on TNT at " .. x .. ", " .. y .. ", " .. z .. " -> Detonating!")
         set_block(x, y, z, "air")
-        trigger_behavior("tnt", "on_broken", x, y, z)
+        trigger_behavior("tnt", "on_block_break", x, y, z)
     end
 })

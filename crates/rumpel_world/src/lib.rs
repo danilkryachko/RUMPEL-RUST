@@ -1,6 +1,10 @@
 pub mod chunk;
+pub mod chunk_disk;
+pub mod chunk_gen_cache;
 pub mod physics;
+pub mod surface_decor;
 pub mod voxel_runtime;
+pub mod world_blocks;
 pub mod world_gen;
 
 #[derive(bevy::prelude::Resource, Debug, Clone, Copy)]

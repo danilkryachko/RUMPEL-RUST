@@ -1,28 +1,108 @@
--- Procedural world generation for «Emerald Grove» Biome in Lua!
+-- Bounded deterministic decor pass for the Rust terrain sampler.
+-- Terrain height, biomes, water, caves, and ores are produced in Rust; this script
+-- only adds local biome details that fit inside the current chunk.
 
 local SEA_LEVEL = 12
 local CHUNK_SIZE = Chunk.size or 32
+local CHUNK_HEIGHT = Chunk.height or 320
 local CHUNK_MAX = CHUNK_SIZE - 1
+
+local function in_chunk(x, y, z)
+    return x >= 0 and x < CHUNK_SIZE
+        and y >= 0 and y < CHUNK_HEIGHT
+        and z >= 0 and z < CHUNK_SIZE
+end
+
+local function clamp(value, min_value, max_value)
+    if value < min_value then return min_value end
+    if value > max_value then return max_value end
+    return value
+end
 
 local function rand_range(salt, index, min_value, max_value)
     local span = max_value - min_value + 1
-    return min_value + math.floor(rand01(salt, index, 0) * span)
+    return min_value + math.floor(rand01(salt, index, Chunk.x + Chunk.z * 8191) * span)
 end
 
--- Helper function to spawn spherical leaf crowns
-local function spawn_leaf_sphere(cx, cy, cz, radius)
+local function is_air_or_flower(block)
+    return block == "air" or block == "flower_red" or block == "flower_yellow"
+end
+
+local function place_if_air(x, y, z, block)
+    if in_chunk(x, y, z) and get_block(x, y, z) == "air" then
+        set_block(x, y, z, block)
+        return true
+    end
+    return false
+end
+
+local function place_replaceable(x, y, z, block)
+    if in_chunk(x, y, z) and is_air_or_flower(get_block(x, y, z)) then
+        set_block(x, y, z, block)
+        return true
+    end
+    return false
+end
+
+local function sample_column(x, z)
+    if x < 0 or x >= CHUNK_SIZE or z < 0 or z >= CHUNK_SIZE then
+        return nil
+    end
+    return sample_world(x, z)
+end
+
+local function surface_y(sample)
+    return clamp((sample and sample.height or 1) - 1, 0, CHUNK_HEIGHT - 1)
+end
+
+local function has_vertical_room(sample, blocks_above)
+    local y = surface_y(sample)
+    return y > SEA_LEVEL and y + blocks_above < CHUNK_HEIGHT
+end
+
+local function ground_is(sample, names)
+    if sample == nil then return false end
+    for _, name in ipairs(names) do
+        if sample.surface_block == name then
+            return true
+        end
+    end
+    return false
+end
+
+local function slope_ok(x, z, max_delta)
+    local center = sample_column(x, z)
+    if center == nil then return false end
+    local h = center.height
+    local probes = {
+        sample_column(clamp(x - 2, 0, CHUNK_MAX), z),
+        sample_column(clamp(x + 2, 0, CHUNK_MAX), z),
+        sample_column(x, clamp(z - 2, 0, CHUNK_MAX)),
+        sample_column(x, clamp(z + 2, 0, CHUNK_MAX)),
+    }
+    for _, probe in ipairs(probes) do
+        if probe ~= nil and math.abs(probe.height - h) > max_delta then
+            return false
+        end
+    end
+    return true
+end
+
+local function leaf_sphere(cx, cy, cz, radius, looseness)
+    local radius_sq = radius * radius
     for lx = -radius, radius do
         for ly = -radius, radius do
             for lz = -radius, radius do
-                if lx*lx + ly*ly + lz*lz <= radius*radius then
+                local dist = lx * lx + ly * ly + lz * lz
+                if dist <= radius_sq + looseness then
                     local px = cx + lx
                     local py = cy + ly
                     local pz = cz + lz
-                    if px >= 0 and px < CHUNK_SIZE and py >= 0 and py < CHUNK_SIZE and pz >= 0 and pz < CHUNK_SIZE then
-                        -- Place leaves if currently air
-                        if get_block(px, py, pz) == "air" then
-                            set_block(px, py, pz, "leaves")
-                        end
+                    if in_chunk(px, py, pz)
+                        and get_block(px, py, pz) == "air"
+                        and rand01("leaf_gap", px + cy * 17, pz + radius * 31) > 0.10
+                    then
+                        set_block(px, py, pz, "leaves")
                     end
                 end
             end
@@ -30,325 +110,237 @@ local function spawn_leaf_sphere(cx, cy, cz, radius)
     end
 end
 
--- Helper function to generate Hytale-style giant branching Oak trees with organic roots
-local function spawn_organic_oak(tx, ty, tz)
-    -- 1. Grow main thick trunk
-    for y = ty, ty + 5 do
-        if y >= 0 and y < CHUNK_SIZE then
-            set_block(tx, y, tz, "wood")
+local function trunk_column(x, y, z, height)
+    for dy = 0, height - 1 do
+        if in_chunk(x, y + dy, z) then
+            set_block(x, y + dy, z, "wood")
         end
     end
+end
 
-    -- 2. Fluffy leaf sphere on top of the trunk
-    spawn_leaf_sphere(tx, ty + 6, tz, 2)
-
-    -- 3. Sprout 4 majestic diagonal branches outwards
-    local branch_dirs = {
-        { x = 1, z = 1 },
-        { x = -1, z = 1 },
-        { x = 1, z = -1 },
-        { x = -1, z = -1 },
+local function spawn_oak(x, y, z, height)
+    trunk_column(x, y, z, height)
+    leaf_sphere(x, y + height, z, 3, 2)
+    local branches = {
+        { dx = 1, dz = 0 },
+        { dx = -1, dz = 0 },
+        { dx = 0, dz = 1 },
+        { dx = 0, dz = -1 },
     }
-
-    for _, dir in ipairs(branch_dirs) do
-        -- First branch block extending diagonally
-        local bx = tx + dir.x
-        local by = ty + 4
-        local bz = tz + dir.z
-
-        if bx >= 0 and bx < CHUNK_SIZE and bz >= 0 and bz < CHUNK_SIZE and by >= 0 and by < CHUNK_SIZE then
-            set_block(bx, by, bz, "wood")
-
-            -- Extend branch further out and upwards
-            local bxx = bx + dir.x
-            local byy = by + 1
-            local bzz = bz + dir.z
-
-            if bxx >= 0 and bxx < CHUNK_SIZE and bzz >= 0 and bzz < CHUNK_SIZE and byy >= 0 and byy < CHUNK_SIZE then
-                set_block(bxx, byy, bzz, "wood")
-
-                -- Leaf sphere at the tip of the branch!
-                spawn_leaf_sphere(bxx, byy + 1, bzz, 2)
-            end
-        end
-    end
-
-    -- 4. Sprout 4 organic roots extending downwards from the trunk base (hugging soil)
-    local root_dirs = {
-        { x = 1, z = 0 },
-        { x = -1, z = 0 },
-        { x = 0, z = 1 },
-        { x = 0, z = -1 },
-    }
-    for _, rdir in ipairs(root_dirs) do
-        local rx = tx + rdir.x
-        local ry = ty
-        local rz = tz + rdir.z
-
-        if rx >= 0 and rx < CHUNK_SIZE and rz >= 0 and rz < CHUNK_SIZE and ry >= 0 and ry < CHUNK_SIZE then
-            set_block(rx, ry, rz, "wood")
-
-            -- Anchor root underground
-            local rxx = rx + rdir.x
-            local ryy = ry - 1
-            local rzz = rz + rdir.z
-            if rxx >= 0 and rxx < CHUNK_SIZE and rzz >= 0 and rzz < CHUNK_SIZE and ryy >= 0 and ryy < CHUNK_SIZE then
-                set_block(rxx, ryy, rzz, "wood")
+    for i, dir in ipairs(branches) do
+        if rand01("oak_branch", x + i * 11, z + height * 23) < 0.78 then
+            local bx = x + dir.dx
+            local bz = z + dir.dz
+            local by = y + math.max(2, height - 2)
+            if in_chunk(bx, by, bz) then set_block(bx, by, bz, "wood") end
+            if in_chunk(bx + dir.dx, by + 1, bz + dir.dz) then
+                set_block(bx + dir.dx, by + 1, bz + dir.dz, "wood")
+                leaf_sphere(bx + dir.dx, by + 2, bz + dir.dz, 2, 1)
             end
         end
     end
 end
 
-
--- 1. Fill valleys up to Sea Level with water (Lakes & Streams)
-for x = 0, CHUNK_MAX do
-    for z = 0, CHUNK_MAX do
-        for y = 0, SEA_LEVEL do
-            if get_block(x, y, z) == "air" then
-                set_block(x, y, z, "water")
+local function spawn_pine(x, y, z, height)
+    trunk_column(x, y, z, height)
+    local start_y = y + math.floor(height * 0.38)
+    for layer_y = start_y, y + height do
+        local t = (layer_y - start_y) / math.max(1, (y + height) - start_y)
+        local radius = math.max(1, math.floor(3 - t * 2.2))
+        for dx = -radius, radius do
+            for dz = -radius, radius do
+                if math.abs(dx) + math.abs(dz) <= radius + 1 then
+                    place_if_air(x + dx, layer_y, z + dz, "leaves")
+                end
             end
         end
     end
+    place_if_air(x, y + height + 1, z, "leaves")
 end
 
--- 2. Generate mountain waterfalls
-local waterfall_count = 0
-for x = 4, 27 do
-    for z = 4, 27 do
-        local h_curr = get_height(x, z)
-        local h_next = get_height(x + 2, z)
-
-        -- Check for a steep drop of 4+ blocks
-        if h_curr >= 20 and h_curr > h_next + 4 then
-            set_block(x, h_curr, z, "water")
-            waterfall_count = waterfall_count + 1
-            if waterfall_count >= 2 then
-                break
-            end
-        end
+local function spawn_wetland_tree(x, y, z)
+    trunk_column(x, y, z, 4)
+    leaf_sphere(x, y + 4, z, 3, 3)
+    for dy = 1, 3 do
+        place_if_air(x + 2, y + dy, z, "leaves")
+        place_if_air(x - 2, y + dy, z, "leaves")
+        place_if_air(x, y + dy, z + 2, "leaves")
+        place_if_air(x, y + dy, z - 2, "leaves")
     end
 end
 
--- 3. Spawn giant Oak trees procedurally across grass surfaces
-for x = 2, 29, 4 do
-    for z = 2, 29, 4 do
-        -- Skip well/cabin spots to avoid collisions
-        if not (x >= 8 and x <= 12 and z >= 8 and z <= 12) and
-           not (x >= 20 and x <= 24 and z >= 20 and z <= 24) then
+-- One marker voxel per shrub; surface_decor renders it as a grass-bush billboard
+-- instead of a multi-block leaves cluster with tree-crown LOD billboards.
+local function spawn_shrub(x, y, z)
+    place_replaceable(x, y, z, "leaves")
+end
 
-            local h = get_height(x, z)
-            if h > SEA_LEVEL and h < 24 then
-                -- 60% chance to grow a tree at this grid coordinate
-                if chance("emerald_tree", x, z, 0.6) then
-                    spawn_organic_oak(x, h + 1, z)
+local function spawn_dry_shrub(x, y, z)
+    place_replaceable(x, y, z, "wood")
+    if rand01("dry_shrub_a", x, z) < 0.42 then place_replaceable(x + 1, y, z, "wood") end
+    if rand01("dry_shrub_b", x, z) < 0.42 then place_replaceable(x - 1, y, z, "wood") end
+    if rand01("dry_shrub_c", x, z) < 0.42 then place_replaceable(x, y, z + 1, "wood") end
+    if rand01("dry_shrub_d", x, z) < 0.42 then place_replaceable(x, y, z - 1, "wood") end
+end
+
+local function spawn_rock_cluster(x, y, z, material)
+    local radius = rand01("rock_radius", x, z) < 0.35 and 2 or 1
+    for dx = -radius, radius do
+        for dz = -radius, radius do
+            local dist = math.abs(dx) + math.abs(dz)
+            if dist <= radius + 1 and rand01("rock_cell", x + dx, z + dz) < 0.68 then
+                local h = 1 + math.floor(rand01("rock_height", x + dx, z + dz) * 2)
+                for dy = 0, h - 1 do
+                    place_replaceable(x + dx, y + dy, z + dz, material)
                 end
             end
         end
     end
 end
 
--- 3.5 Spawn Forest Floor Details (Fallen mossy logs & bushy leafy undergrowth)
--- Spawn 4 poваленные бревна on grass
-for k = 1, 4 do
-    local lx = rand_range("fallen_log_x", k, 3, 28)
-    local lz = rand_range("fallen_log_z", k, 3, 28)
-    local lh = get_height(lx, lz)
-    if lh > SEA_LEVEL and lh < 28 then
-        if get_block(lx, lh, lz) == "grass" then
-            -- Place 3 horizontal logs on the ground
-            set_block(lx, lh + 1, lz, "wood")
-            if lx + 1 < CHUNK_SIZE then set_block(lx + 1, lh + 1, lz, "wood") end
-            if lx - 1 >= 0 then set_block(lx - 1, lh + 1, lz, "wood") end
+local function spawn_flower_patch(x, y, z, density)
+    for dx = -2, 2 do
+        for dz = -2, 2 do
+            if in_chunk(x + dx, y, z + dz) and rand01("flower_patch", x + dx, z + dz) < density then
+                local flower = rand01("flower_color", x + dx, z + dz) < 0.52 and "flower_yellow" or "flower_red"
+                place_replaceable(x + dx, y, z + dz, flower)
+            end
         end
     end
 end
 
--- Spawn 6 small organic leafy bushes
-for k = 1, 6 do
-    local bx = rand_range("bush_x", k, 3, 28)
-    local bz = rand_range("bush_z", k, 3, 28)
-    local bh = get_height(bx, bz)
-    if bh > SEA_LEVEL and bh < 28 then
-        if get_block(bx, bh, bz) == "grass" then
-            set_block(bx, bh + 1, bz, "leaves")
-            set_block(bx + 1, bh + 1, bz, "leaves")
-            set_block(bx - 1, bh + 1, bz, "leaves")
-            set_block(bx, bh + 1, bz + 1, "leaves")
-            set_block(bx, bh + 1, bz - 1, "leaves")
-            set_block(bx, bh + 2, bz, "leaves")
+local function decor_density(sample)
+    local biome = sample.biome
+    if biome == "forest" then return 0.72 end
+    if biome == "autumn_forest" then return 0.62 end
+    if biome == "taiga" then return 0.56 end
+    if biome == "wetlands" then return 0.42 end
+    if biome == "plains" then return 0.22 end
+    if biome == "mountains" then return 0.18 end
+    if biome == "snow" then return 0.16 end
+    if biome == "desert" or biome == "canyon" then return 0.08 end
+    return 0.04
+end
+
+for x = 2, CHUNK_MAX - 2, 4 do
+    for z = 2, CHUNK_MAX - 2, 4 do
+        local sample = sample_column(x, z)
+        if sample ~= nil and has_vertical_room(sample, 12) and slope_ok(x, z, 5) then
+            local y = surface_y(sample) + 1
+            local density = decor_density(sample)
+            local roll = rand01("major_decor", x, z)
+            if roll < density and ground_is(sample, { "grass", "snow", "sand", "clay", "gravel" }) then
+                if sample.biome == "forest" or sample.biome == "autumn_forest" then
+                    spawn_oak(x, y, z, rand_range("oak_height", x + z * 37, 5, 8))
+                elseif sample.biome == "taiga" or sample.biome == "snow" then
+                    spawn_pine(x, y, z, rand_range("pine_height", x + z * 41, 7, 11))
+                elseif sample.biome == "wetlands" then
+                    spawn_wetland_tree(x, y, z)
+                elseif sample.biome == "mountains" then
+                    spawn_pine(x, y, z, rand_range("mountain_pine_height", x + z * 43, 5, 8))
+                elseif sample.biome == "desert" or sample.biome == "canyon" then
+                    spawn_dry_shrub(x, y, z)
+                elseif sample.biome == "plains" then
+                    if rand01("plains_tree_vs_shrub", x, z) < 0.32 then
+                        spawn_oak(x, y, z, rand_range("plains_oak_height", x + z * 47, 4, 6))
+                    else
+                        spawn_shrub(x, y, z)
+                    end
+                end
+            elseif roll < density + 0.18 and ground_is(sample, { "grass", "snow", "sand", "gravel", "stone" }) then
+                if sample.biome == "mountains" or sample.biome == "canyon" or sample.biome == "snow" then
+                    spawn_rock_cluster(x, y, z, sample.biome == "snow" and "snow" or "stone")
+                elseif sample.biome == "desert" then
+                    spawn_rock_cluster(x, y, z, "sand")
+                elseif sample.biome ~= "river" and sample.biome ~= "beach" then
+                    spawn_shrub(x, y, z)
+                end
+            end
         end
     end
 end
 
+for x = 1, CHUNK_MAX - 1 do
+    for z = 1, CHUNK_MAX - 1 do
+        local sample = sample_column(x, z)
+        if sample ~= nil and has_vertical_room(sample, 2) then
+            local y = surface_y(sample) + 1
+            if sample.surface_block == "grass" and sample.biome ~= "mountains" then
+                local patch_density = sample.biome == "plains" and 0.020 or 0.010
+                if sample.biome == "forest" or sample.biome == "autumn_forest" then
+                    patch_density = 0.014
+                elseif sample.biome == "wetlands" then
+                    patch_density = 0.006
+                end
+                if rand01("flower_seed", x, z) < patch_density then
+                    spawn_flower_patch(x, y, z, sample.biome == "plains" and 0.34 or 0.18)
+                end
+            elseif sample.surface_block == "sand"
+                and (sample.biome == "desert" or sample.biome == "canyon")
+                and rand01("desert_detail", x, z) < 0.012
+            then
+                spawn_dry_shrub(x, y, z)
+            end
+        end
+    end
+end
 
--- 4. Build a Cozy Wooden Forest Cabin at coordinate (10, h, 10)
-local cx, cz = 10, 10
-local ch = get_height(cx, cz)
-if ch > SEA_LEVEL and ch < 26 then
-    print("WORLD_GEN: Erecting Cozy Wooden Forest Cabin...")
-    -- Spawn outline walls
+local function flat_area(cx, cz, radius, max_delta, allowed_blocks)
+    local center = sample_column(cx, cz)
+    if center == nil or not has_vertical_room(center, 7) then return nil end
+    local base = center.height
+    for x = cx - radius, cx + radius do
+        for z = cz - radius, cz + radius do
+            local s = sample_column(x, z)
+            if s == nil or math.abs(s.height - base) > max_delta or not ground_is(s, allowed_blocks) then
+                return nil
+            end
+        end
+    end
+    return center
+end
+
+local function spawn_ruin(cx, y, cz)
     for x = cx - 2, cx + 2 do
         for z = cz - 2, cz + 2 do
-            for y = ch, ch + 3 do
-                local is_corner = (x == cx - 2 or x == cx + 2) and (z == cz - 2 or z == cz + 2)
-                if x == cx - 2 or x == cx + 2 or z == cz - 2 or z == cz + 2 then
-                    if y == ch + 3 then
-                        -- Stone roof trim
-                        set_block(x, y, z, "cobblestone")
-                    elseif is_corner then
-                        -- Corner logs
-                        set_block(x, y, z, "wood")
-                    else
-                        -- Oak plank walls
-                        set_block(x, y, z, "oak_planks")
-                    end
-                else
-                    -- Hollow out inside
-                    set_block(x, y, z, "air")
+            if x == cx - 2 or x == cx + 2 or z == cz - 2 or z == cz + 2 then
+                place_replaceable(x, y, z, "cobblestone")
+                if rand01("ruin_wall", x, z) < 0.44 then
+                    place_replaceable(x, y + 1, z, "cobblestone")
                 end
             end
         end
     end
-
-    -- Insert glass windows
-    set_block(cx - 2, ch + 1, cz, "glass")
-    set_block(cx + 2, ch + 1, cz, "glass")
-
-    -- Open doorway on front
-    set_block(cx, ch, cz - 2, "air")
-    set_block(cx, ch + 1, cz - 2, "air")
-
-    -- Solid cobblestone ceiling roof
-    for x = cx - 2, cx + 2 do
-        for z = cz - 2, cz + 2 do
-            set_block(x, ch + 3, z, "cobblestone")
-        end
-    end
-
-    -- Stone brick chimney on right wall
-    set_block(cx + 2, ch, cz + 1, "stone_bricks")
-    set_block(cx + 2, ch + 1, cz + 1, "stone_bricks")
-    set_block(cx + 2, ch + 2, cz + 1, "stone_bricks")
-    set_block(cx + 2, ch + 3, cz + 1, "stone_bricks")
-    set_block(cx + 2, ch + 4, cz + 1, "stone_bricks")
-
-    -- 4.5 Add Cozy Cabin Interior Furniture & Magical Lighting
-    -- Oak planks dining table in center
-    set_block(cx, ch, cz, "oak_planks")
-    -- Cozy bookshelf in the corner
-    set_block(cx - 1, ch, cz + 1, "bookshelf")
-    -- Magical glowing crystal lantern on a stone pedestal in the opposite corner
-    set_block(cx - 1, ch, cz - 1, "stone")
-    set_block(cx - 1, ch + 1, cz - 1, "crystal_ore")
-end
-
--- 5. Build Cobblestone Forest Well at coordinate (22, hw, 22)
-local wx, wz = 22, 22
-local wh = get_height(wx, wz)
-if wh > SEA_LEVEL and wh < 26 then
-    print("WORLD_GEN: Erecting Cobblestone Forest Well...")
-    -- 3x3 circular base
-    for x = wx - 1, wx + 1 do
-        for z = wz - 1, wz + 1 do
-            if x == wx and z == wz then
-                -- Water shaft down
-                for y = wh - 4, wh do
-                    set_block(x, y, z, "water")
-                end
-            else
-                -- Cobblestone borders
-                set_block(x, wh, z, "cobblestone")
-            end
-        end
-    end
-
-    -- Wood pillars going up 3 blocks
-    for y = wh + 1, wh + 3 do
-        set_block(wx - 1, y, wz, "wood")
-        set_block(wx + 1, y, wz, "wood")
-    end
-
-    -- Cobblestone well roof cap
-    for x = wx - 1, wx + 1 do
-        for z = wz - 1, wz + 1 do
-            set_block(x, wh + 4, z, "cobblestone")
-        end
+    place_replaceable(cx, y, cz, "stone_bricks")
+    if rand01("ruin_crystal", cx, cz) < 0.38 then
+        place_replaceable(cx, y + 1, cz, "crystal_ore")
     end
 end
 
--- 6. Generate Subterranean Glowing Crystal Caves (Grottos)
-for c = 1, 4 do
-    local kx = rand_range("cave_x", c, 4, 27)
-    local kz = rand_range("cave_z", c, 4, 27)
-    local ky = rand_range("cave_y", c, 3, 9)
+if chance("chunk_ruin", 0, 0, 0.035) then
+    local cx = rand_range("ruin_x", 1, 8, 23)
+    local cz = rand_range("ruin_z", 2, 8, 23)
+    local sample = flat_area(cx, cz, 3, 2, { "grass", "sand", "gravel", "stone" })
+    if sample ~= nil and (sample.biome == "plains"
+        or sample.biome == "forest"
+        or sample.biome == "autumn_forest"
+        or sample.biome == "desert"
+        or sample.biome == "canyon")
+    then
+        spawn_ruin(cx, surface_y(sample) + 1, cz)
+    end
+end
 
-    -- Carve out a pocket inside stone
-    for dx = -1, 1 do
-        for dy = -1, 1 do
-            for dz = -1, 1 do
-                local px = kx + dx
-                local py = ky + dy
-                local pz = kz + dz
-                if px >= 0 and px < CHUNK_SIZE and py >= 0 and py < CHUNK_SIZE and pz >= 0 and pz < CHUNK_SIZE then
-                    if dx*dx + dy*dy + dz*dz <= 1 then
-                        set_block(px, py, pz, "air")
-                    else
-                        -- Lined walls with glowing crystal blocks
-                        if chance("crystal_cave_" .. c, px, pz + py * CHUNK_SIZE, 0.35) then
-                            set_block(px, py, pz, "crystal_ore")
-                        end
-                    end
-                end
-            end
+local mob_roll = rand01("ambient_mob_chunk", Chunk.x, Chunk.z)
+if mob_roll < 0.10 then
+    local x = rand_range("mob_x", 1, 4, 27)
+    local z = rand_range("mob_z", 1, 4, 27)
+    local sample = sample_column(x, z)
+    if sample ~= nil and has_vertical_room(sample, 4) and sample.surface_block == "grass" then
+        if sample.biome == "plains" or sample.biome == "wetlands" then
+            spawn_mob("slime", x, surface_y(sample) + 2, z)
+        elseif sample.biome == "forest" or sample.biome == "autumn_forest" then
+            spawn_mob("butterfly", x, surface_y(sample) + 3, z)
         end
-    end
-end
-
--- 7. Scatter lush fields of Wildflowers (roses & dandelions)
-for x = 0, CHUNK_MAX do
-    for z = 0, CHUNK_MAX do
-        local h = get_height(x, z)
-        if h > SEA_LEVEL and h < CHUNK_MAX then
-            if get_block(x, h, z) == "grass" then
-                local rand = rand01("emerald_flower", x, z)
-                if rand < 0.04 then
-                    -- Red rose flower
-                    set_block(x, h + 1, z, "flower_red")
-                elseif rand < 0.08 then
-                    -- Yellow dandelion flower
-                    set_block(x, h + 1, z, "flower_yellow")
-                end
-            end
-        end
-    end
-end
-
--- 8. Spawn procedural Slime mobs on top of grass surfaces
-local slime_spots = {
-    { x = 5, z = 5 },
-    { x = 15, z = 15 },
-    { x = 27, z = 27 },
-}
-
-for _, spot in ipairs(slime_spots) do
-    local h = get_height(spot.x, spot.z)
-    if h > SEA_LEVEL and h < 28 then
-        spawn_mob("slime", spot.x, h + 2, spot.z)
-    end
-end
-
--- 9. Spawn beautiful ambient butterflies near wildflower meadows
-local butterfly_spots = {
-    { x = 7, z = 12 },
-    { x = 11, z = 24 },
-    { x = 20, z = 6 },
-    { x = 25, z = 18 },
-    { x = 16, z = 29 },
-}
-
-for _, spot in ipairs(butterfly_spots) do
-    local h = get_height(spot.x, spot.z)
-    if h > SEA_LEVEL and h < 28 then
-        spawn_mob("butterfly", spot.x, h + 2, spot.z)
     end
 end

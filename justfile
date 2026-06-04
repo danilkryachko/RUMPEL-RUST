@@ -24,34 +24,37 @@ test:
 verify: fmt-check check clippy test
 
 dev:
-    cargo run -p rumpel_client
+    RUMPEL_RENDER_MODE=packed RUMPEL_CAMERA_LOCK=0 cargo run -p rumpel_client
 
 dev-cached:
-    CARGO_INCREMENTAL=0 cargo run -p rumpel_client
+    RUMPEL_RENDER_MODE=packed RUMPEL_CAMERA_LOCK=0 CARGO_INCREMENTAL=0 cargo run -p rumpel_client
+
+dev-gui:
+    RUMPEL_RENDER_MODE=packed RUMPEL_CAMERA_LOCK=0 ./scripts/run_client_macos_gui.sh packed
 
 macos-app:
     ./scripts/prepare_client_macos_app.sh
 
-profile-client:
-    RUST_LOG=wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=surface RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PROFILE_SECONDS=8 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=1 RUMPEL_PROFILE_LOG_INTERVAL=2 RUMPEL_CAMERA_LOCK=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh surface
+# Legacy surface/compute render modes (disabled in RumpelRenderPlugin).
+# profile-client:
+#     RUMPEL_RENDER_MODE=surface ... ./scripts/run_client_macos_gui.sh surface
+# dev-gpu-compute:
+#     RUMPEL_RENDER_MODE=compute ...
+# profile-gpu-compute:
+#     ...
+# profile-gpu-compute-stress:
+#     ...
 
-dev-gpu-compute:
-    RUMPEL_RENDER_MODE=compute RUMPEL_GPU_COUNTERS=1 RUMPEL_CAMERA_LOCK=1 cargo run -p rumpel_client
-
-profile-gpu-compute:
-    RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=compute RUMPEL_GPU_COUNTERS=1 RUMPEL_GPU_COMPUTE_QUEUE_RADIUS=0 RUMPEL_GPU_COMPUTE_MAX_JOBS_PER_FRAME=1 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PROFILE_SECONDS=10 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=0 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=1 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh compute
-
-profile-gpu-compute-stress:
-    RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=compute RUMPEL_GPU_COUNTERS=${RUMPEL_GPU_COUNTERS:-0} RUMPEL_GPU_COMPUTE_QUEUE_RADIUS=${RUMPEL_GPU_COMPUTE_QUEUE_RADIUS:-2} RUMPEL_GPU_COMPUTE_MAX_JOBS_PER_FRAME=${RUMPEL_GPU_COMPUTE_MAX_JOBS_PER_FRAME:-8} RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PROFILE_SECONDS=14 RUMPEL_PROFILE_WARMUP_SECONDS=8 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=0 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=1 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh compute
+profile-client: profile-packed
 
 dev-packed:
     RUMPEL_RENDER_MODE=packed cargo run -p rumpel_client
 
-dev-surface-gui:
-    RUMPEL_RENDER_MODE=surface RUMPEL_CAMERA_LOCK=1 ./scripts/run_client_macos_gui.sh surface
+# dev-surface-gui:
+#     RUMPEL_RENDER_MODE=surface ...
 
 dev-packed-gui:
-    RUMPEL_RENDER_MODE=packed RUMPEL_CAMERA_LOCK=1 ./scripts/run_client_macos_gui.sh packed
+    RUMPEL_RENDER_MODE=packed RUMPEL_CAMERA_LOCK=0 ./scripts/run_client_macos_gui.sh packed
 
 dev-packed-gpu-generated:
     RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_GPU_GENERATION=1 RUMPEL_PACKED_GPU_CULL=1 RUMPEL_CAMERA_LOCK=0 ./scripts/run_client_macos_gui.sh packed
@@ -59,22 +62,22 @@ dev-packed-gpu-generated:
 dev-packed-gpu-generated-gui:
     RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_GPU_GENERATION=1 RUMPEL_PACKED_GPU_CULL=1 RUMPEL_CAMERA_LOCK=1 ./scripts/run_client_macos_gui.sh packed
 
-dev-packed-material-gui:
-    RUMPEL_RENDER_MODE=packed_material RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_CAMERA_LOCK=1 RUMPEL_CAMERA_CLEARANCE=56 RUMPEL_CAMERA_PITCH_RADIANS=-0.36 RUMPEL_CAMERA_YAW_RADIANS=0 ./scripts/run_client_macos_gui.sh packed_material
+# dev-packed-material-gui:
+#     RUMPEL_RENDER_MODE=packed_material ...
 
-capture-surface-gui:
-    RUMPEL_RENDER_MODE=surface RUMPEL_CAMERA_LOCK=1 RUMPEL_CAMERA_CLEARANCE=56 RUMPEL_CAMERA_PITCH_RADIANS=-0.36 RUMPEL_CAMERA_YAW_RADIANS=0 RUMPEL_GUI_CAPTURE=1 RUMPEL_GUI_CAPTURE_DELAY=15 ./scripts/run_client_macos_gui.sh surface
+# capture-surface-gui:
+#     RUMPEL_RENDER_MODE=surface ...
 
 capture-packed-gui:
     RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_CAMERA_LOCK=1 RUMPEL_CAMERA_CLEARANCE=56 RUMPEL_CAMERA_PITCH_RADIANS=-0.36 RUMPEL_CAMERA_YAW_RADIANS=0 RUMPEL_GUI_CAPTURE=1 RUMPEL_GUI_CAPTURE_DELAY=22 ./scripts/run_client_macos_gui.sh packed
 
-capture-packed-material-gui:
-    RUMPEL_RENDER_MODE=packed_material RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_CAMERA_LOCK=1 RUMPEL_CAMERA_CLEARANCE=56 RUMPEL_CAMERA_PITCH_RADIANS=-0.36 RUMPEL_CAMERA_YAW_RADIANS=0 RUMPEL_GUI_CAPTURE=1 RUMPEL_GUI_CAPTURE_DELAY=22 ./scripts/run_client_macos_gui.sh packed_material
+# capture-packed-material-gui:
+#     RUMPEL_RENDER_MODE=packed_material ...
 
-capture-compute-gui:
-    RUMPEL_RENDER_MODE=compute RUMPEL_GPU_COUNTERS=0 RUMPEL_GPU_COMPUTE_QUEUE_RADIUS=${RUMPEL_GPU_COMPUTE_QUEUE_RADIUS:-2} RUMPEL_GPU_COMPUTE_MAX_JOBS_PER_FRAME=${RUMPEL_GPU_COMPUTE_MAX_JOBS_PER_FRAME:-8} RUMPEL_CAMERA_LOCK=1 RUMPEL_CAMERA_CLEARANCE=56 RUMPEL_CAMERA_PITCH_RADIANS=-0.36 RUMPEL_CAMERA_YAW_RADIANS=0 RUMPEL_GUI_CAPTURE=1 RUMPEL_GUI_CAPTURE_DELAY=18 ./scripts/run_client_macos_gui.sh compute
+# capture-compute-gui:
+#     RUMPEL_RENDER_MODE=compute ...
 
-capture-render-baseline-gui: capture-surface-gui capture-packed-gui capture-packed-material-gui capture-compute-gui
+capture-render-baseline-gui: capture-packed-gui
 
 profile-packed:
     RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PROFILE_SECONDS=10 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=1 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh packed
@@ -82,10 +85,10 @@ profile-packed:
 profile-packed-stationary:
     RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PROFILE_SECONDS=10 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=0 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=1 RUMPEL_CAMERA_CLEARANCE=56 RUMPEL_CAMERA_PITCH_RADIANS=-0.36 RUMPEL_CAMERA_YAW_RADIANS=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh packed
 
-profile-packed-material:
-    RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=packed_material RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PROFILE_SECONDS=10 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=1 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh packed_material
+# profile-packed-material:
+#     RUMPEL_RENDER_MODE=packed_material ...
 
-profile-render-baseline: profile-client profile-packed profile-packed-material profile-gpu-compute-stress
+profile-render-baseline: profile-packed
 
 profile-packed-low-latency:
     RUST_LOG=info,wgpu=error,bevy_asset=error RUMPEL_CLIENT_BUILD_PROFILE=${RUMPEL_CLIENT_BUILD_PROFILE:-release} RUMPEL_RENDER_MODE=packed RUMPEL_PACKED_VIEW_RADIUS=16 RUMPEL_PRESENT_MODE=immediate RUMPEL_FRAME_LATENCY=1 RUMPEL_PROFILE_SECONDS=10 RUMPEL_PROFILE_WARMUP_SECONDS=4 RUMPEL_PROFILE_READY_GATE=1 RUMPEL_PROFILE_AUTOPILOT=1 RUMPEL_PROFILE_LOG_INTERVAL=1 RUMPEL_CAMERA_LOCK=0 RUMPEL_GUI_WAIT=1 RUMPEL_GUI_TERMINAL_AUTO_CLOSE=1 ./scripts/run_client_macos_gui.sh packed
@@ -172,7 +175,7 @@ sccache-stats:
     sccache --show-stats
 
 release:
-    cargo run -p rumpel_client --release
+    RUMPEL_RENDER_MODE=packed RUMPEL_CAMERA_LOCK=0 cargo run -p rumpel_client --release
 
 deny:
     cargo deny check

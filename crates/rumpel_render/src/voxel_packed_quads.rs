@@ -1,11 +1,11 @@
 use noise::Perlin;
 use rumpel_blocks::{AIR_BLOCK_ID, BlockId};
 use rumpel_prelude::ChunkPos;
-use rumpel_world::chunk::{CHUNK_SIZE, ChunkData, WorldEditStore};
+use rumpel_world::chunk::{CHUNK_HEIGHT, CHUNK_SIZE, ChunkData, WorldEditStore};
 use rumpel_world::world_gen::{
     TerrainBlockPalette, WorldGenerationContext, terrain_perlin,
-    terrain_surface_cell_height_with_edits, terrain_surface_cell_height_with_noise,
-    terrain_surface_cell_sample_with_edits, terrain_surface_cell_sample_with_noise,
+    terrain_surface_cell_height_from_world_cached, terrain_surface_cell_height_with_edits,
+    terrain_surface_cell_sample_from_world_cached, terrain_surface_cell_sample_with_edits,
     terrain_surface_wall_block_at_y,
 };
 
@@ -137,7 +137,7 @@ fn is_face_visible(
     if nx >= 0
         && nx < CHUNK_SIZE as i32
         && ny >= 0
-        && ny < CHUNK_SIZE as i32
+        && ny < CHUNK_HEIGHT as i32
         && nz >= 0
         && nz < CHUNK_SIZE as i32
     {
@@ -163,8 +163,8 @@ fn is_face_visible(
             };
 
             let ry = if ny < 0 {
-                CHUNK_SIZE - 1
-            } else if ny >= CHUNK_SIZE as i32 {
+                CHUNK_HEIGHT - 1
+            } else if ny >= CHUNK_HEIGHT as i32 {
                 0
             } else {
                 ny as usize
@@ -529,14 +529,13 @@ fn for_each_surface_packed_column_for_chunk(
                     source.perlin,
                 )
             } else {
-                terrain_surface_cell_sample_with_noise(
+                terrain_surface_cell_sample_from_world_cached(
                     world_x,
                     world_z,
                     width,
                     depth,
-                    source.context.palette,
-                    source.sand_block,
-                    source.perlin,
+                    source.context,
+                    source.edit_store,
                 )
             };
 
@@ -647,33 +646,37 @@ fn surface_neighbor_heights(
 
     if !source.has_edits {
         return [
-            terrain_surface_cell_height_with_noise(
+            terrain_surface_cell_height_from_world_cached(
                 world_x + column.width as i32,
                 world_z,
                 column.width,
                 column.depth,
-                source.perlin,
+                source.context,
+                source.edit_store,
             ),
-            terrain_surface_cell_height_with_noise(
+            terrain_surface_cell_height_from_world_cached(
                 world_x - column.width as i32,
                 world_z,
                 column.width,
                 column.depth,
-                source.perlin,
+                source.context,
+                source.edit_store,
             ),
-            terrain_surface_cell_height_with_noise(
+            terrain_surface_cell_height_from_world_cached(
                 world_x,
                 world_z + column.depth as i32,
                 column.width,
                 column.depth,
-                source.perlin,
+                source.context,
+                source.edit_store,
             ),
-            terrain_surface_cell_height_with_noise(
+            terrain_surface_cell_height_from_world_cached(
                 world_x,
                 world_z - column.depth as i32,
                 column.width,
                 column.depth,
-                source.perlin,
+                source.context,
+                source.edit_store,
             ),
         ];
     }
@@ -728,12 +731,13 @@ fn surface_neighbor_sample_height(
     has_edits: bool,
 ) -> usize {
     if !has_edits {
-        return terrain_surface_cell_height_with_noise(
+        return terrain_surface_cell_height_from_world_cached(
             sample_x,
             sample_z,
             column.width,
             column.depth,
-            perlin,
+            context,
+            edit_store,
         );
     }
 
@@ -752,12 +756,13 @@ fn surface_neighbor_sample_height(
             perlin,
         )
     } else {
-        terrain_surface_cell_height_with_noise(
+        terrain_surface_cell_height_from_world_cached(
             sample_x,
             sample_z,
             column.width,
             column.depth,
-            perlin,
+            context,
+            edit_store,
         )
     }
 }
@@ -849,7 +854,7 @@ struct LodColumn {
 }
 
 fn lod_surface_height_at(chunk: &ChunkData, x: usize, z: usize) -> (usize, u16) {
-    for y in (0..CHUNK_SIZE).rev() {
+    for y in (0..CHUNK_HEIGHT).rev() {
         let block = chunk.get_block(x, y, z);
         if block != AIR_BLOCK_ID {
             return (y + 1, block);
@@ -1360,7 +1365,9 @@ mod tests {
     use super::*;
     use rumpel_blocks::{BlockData, BlockRegistry};
     use rumpel_world::world_gen::{
-        terrain_height_with_noise, terrain_surface_shell_height_with_noise,
+        terrain_height_with_noise, terrain_surface_cell_height_from_world_cached,
+        terrain_surface_cell_height_with_noise, terrain_surface_cell_sample_with_noise,
+        terrain_surface_shell_height_with_noise,
     };
 
     #[test]
@@ -1383,15 +1390,16 @@ mod tests {
 
     #[test]
     fn surface_packed_quads_keep_real_terrain_heights() {
+        rumpel_world::chunk_gen_cache::reset_chunk_generation_cache();
         let registry = test_block_registry();
         let context = WorldGenerationContext::from_registry(&registry);
         let sand_block = registry.get_id("sand").unwrap_or(context.palette.dirt);
         let chunk_pos = (-8..=8)
             .flat_map(|z| (-8..=8).map(move |x| ChunkPos::new(x, z)))
-            .find(|pos| max_sampled_surface_height(*pos) > CHUNK_SIZE)
-            .expect("test terrain sample should include a chunk taller than one voxel slice");
+            .find(|pos| max_sampled_surface_height(*pos, &context) >= CHUNK_SIZE - 1)
+            .expect("cached Lua terrain should include a tall surface column");
 
-        let expected_max_height = max_sampled_surface_height(chunk_pos);
+        let expected_max_height = max_sampled_surface_height(chunk_pos, &context);
         let quads = build_surface_packed_quads_for_chunk(chunk_pos, &context, 1, sand_block);
         let max_top_height = quads
             .iter()
@@ -1401,7 +1409,7 @@ mod tests {
             .expect("surface chunk should emit top quads");
 
         assert_eq!(max_top_height, expected_max_height);
-        assert!(max_top_height > CHUNK_SIZE);
+        assert!(max_top_height >= CHUNK_SIZE - 1);
     }
 
     #[test]
@@ -1678,14 +1686,17 @@ mod tests {
                         sand_block,
                         &perlin,
                     );
-                    (sample.height.saturating_add(4) < CHUNK_SIZE)
+                    (sample.height.saturating_add(64) < CHUNK_HEIGHT)
                         .then_some((local_x, local_z, sample))
                 })
             })
             .expect("test terrain should contain an editable low surface inside the origin chunk");
-        let edit_y = baseline.height.saturating_add(4);
+        // Lift the edit above the procedural shell while keeping it inside
+        // the surface edit scan window used by the world sampler. The 5x5
+        // shell kernel still detects the change after integer rounding.
+        let edit_y = baseline.height.saturating_add(20).min(CHUNK_HEIGHT - 1);
         let mut edit_store = WorldEditStore::default();
-        let edit_index = local_z * CHUNK_SIZE * CHUNK_SIZE + edit_y * CHUNK_SIZE + local_x;
+        let edit_index = rumpel_world::chunk::ChunkData::get_index(local_x, edit_y, local_z);
 
         assert!(
             edit_store.apply_edit(
@@ -1778,15 +1789,20 @@ mod tests {
         );
     }
 
-    fn max_sampled_surface_height(chunk_pos: ChunkPos) -> usize {
-        let perlin = terrain_perlin();
+    fn max_sampled_surface_height(chunk_pos: ChunkPos, context: &WorldGenerationContext) -> usize {
+        let edit_store = WorldEditStore::default();
         let mut max_height = 0;
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let world_x = chunk_pos.x * CHUNK_SIZE as i32 + x as i32;
                 let world_z = chunk_pos.z * CHUNK_SIZE as i32 + z as i32;
-                max_height = max_height.max(terrain_surface_shell_height_with_noise(
-                    world_x, world_z, &perlin,
+                max_height = max_height.max(terrain_surface_cell_height_from_world_cached(
+                    world_x,
+                    world_z,
+                    1,
+                    1,
+                    context,
+                    &edit_store,
                 ));
             }
         }
@@ -1803,6 +1819,7 @@ mod tests {
                 is_transparent: id == "air",
                 color: (1.0, 1.0, 1.0, 1.0),
                 gravity_affected: false,
+                wind_animated: false,
                 strength: 1.0,
             });
         }

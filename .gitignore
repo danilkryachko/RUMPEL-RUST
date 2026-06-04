@@ -1,6 +1,7 @@
 /.DS_Store
 /target/
 /data/state_store.db/
+/saves/
 
 # Local agent/editor runtime configuration. Keep shareable examples in docs/dev/mcp/.
 /.codex/config.toml
