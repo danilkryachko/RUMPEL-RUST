@@ -1236,6 +1236,12 @@ fn prepare_packed_gpu_generated_draw(
     }
 
     buffers.allocation_requests.clear();
+    let allocation_requests_capacity = buffers.allocation_requests.capacity();
+    if allocation_requests_capacity < active_chunk_job_count {
+        buffers
+            .allocation_requests
+            .reserve(active_chunk_job_count - allocation_requests_capacity);
+    }
     for batch in ordered_batches {
         for range in batch.chunk_ranges.iter() {
             if !range.active || range.column_len == 0 {
