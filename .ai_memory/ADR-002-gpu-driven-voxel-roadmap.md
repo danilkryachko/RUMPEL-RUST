@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated planned-region staging now receives `PackedGpuGenerationBatchSummary::active_chunk_job_count` as the reserve hint, removing another active chunk-range count pass before building prepared region metadata. Verified with focused generated prepare/summary tests and full `just verify`.
 - 2026-06-04: GPU-generated render prepare now passes `PackedGpuGenerationBatchSummary::active_chunk_job_count` into generation job collection as the reserve hint, removing the extra active chunk-range scan that existed only to size staging buffers. Verified with focused generated prepare/summary tests and full `just verify`.
 - 2026-06-04: CPU visible indirect selection now separates index and command collection through an explicit collection mode. Draw-indirect fallback keeps visible indices/metrics without building draw-command copies, while CPU-visible compact still collects commands for buffer upload. Verified with focused selection tests and full `just verify`.
 - 2026-06-04: CPU indirect render path now skips CPU visible selection entirely for full `multi_draw_indirect` frames when CPU-visible compact is disabled; that mode draws the full indirect buffer and retains its metadata-only visible metrics pass. Verified with focused selection tests and full `just verify`.

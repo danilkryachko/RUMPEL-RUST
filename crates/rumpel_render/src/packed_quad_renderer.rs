@@ -382,9 +382,8 @@ fn build_planned_gpu_generated_regions(
     ordered_batches: &[crate::packed_quad_gpu_generation::PackedGpuGenerationBatch],
     allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
     planned_regions: &mut Vec<PreparedPackedGpuGeneratedRegion>,
+    active_chunk_job_count: usize,
 ) {
-    let active_chunk_job_count =
-        PackedGpuGenerationBatches::active_chunk_job_count(ordered_batches);
     planned_regions.clear();
     if planned_regions.capacity() < active_chunk_job_count {
         planned_regions.reserve(active_chunk_job_count - planned_regions.capacity());
@@ -1215,6 +1214,7 @@ fn prepare_packed_gpu_generated_draw(
             ordered_batches,
             &arena.allocations,
             &mut buffers.planned_regions,
+            active_chunk_job_count,
         );
         if refresh_structure_stable_gpu_generated_prepare(
             &render_device,
@@ -1272,7 +1272,12 @@ fn prepare_packed_gpu_generated_draw(
             planned_regions,
             ..
         } = &mut *buffers;
-        build_planned_gpu_generated_regions(ordered_batches, allocation_plan, planned_regions);
+        build_planned_gpu_generated_regions(
+            ordered_batches,
+            allocation_plan,
+            planned_regions,
+            active_chunk_job_count,
+        );
     }
 
     let allocation_unchanged = crate::packed_quad_buffer::gpu_generated_allocation_maps_equivalent(
