@@ -1255,12 +1255,14 @@ fn prepare_packed_gpu_generated_draw(
         )
     };
 
-    let planned_allocations = buffers.allocation_plan.clone();
-    build_planned_gpu_generated_regions(
-        ordered_batches,
-        &planned_allocations,
-        &mut buffers.planned_regions,
-    );
+    {
+        let PackedGpuGenerationBuffers {
+            allocation_plan,
+            planned_regions,
+            ..
+        } = &mut *buffers;
+        build_planned_gpu_generated_regions(ordered_batches, allocation_plan, planned_regions);
+    }
 
     let allocation_unchanged = crate::packed_quad_buffer::gpu_generated_allocation_maps_equivalent(
         &arena.allocations,
