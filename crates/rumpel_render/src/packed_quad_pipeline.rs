@@ -24,8 +24,8 @@ use rumpel_world::world_gen::{WorldGenerationContext, terrain_surface_contract_v
 
 use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuChunkRange, PackedGpuGenerationBatch,
-    PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationParams,
-    PackedGpuGenerationTarget, fill_active_gpu_generation_chunk_keys,
+    PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationKeySignature,
+    PackedGpuGenerationParams, PackedGpuGenerationTarget, fill_active_gpu_generation_chunk_keys,
     order_loaded_regions_for_prefetch, packed_gpu_generation_columns_per_chunk,
     packed_gpu_generation_lod_for_cell_size, packed_gpu_generation_max_synchronous_builds_from_env,
     packed_gpu_generation_prefetch_budget_from_env,
@@ -3946,6 +3946,7 @@ pub fn update_packed_gpu_generation_regions(
             .reserve(loaded_region_capacity - scratch.active_region_keys.capacity());
     }
 
+    let mut active_region_signature = PackedGpuGenerationKeySignature::default();
     for region_z in -region_radius..=region_radius {
         for region_x in -region_radius..=region_radius {
             let region_origin_x = center_origin_x + region_x * region_size;
@@ -3967,19 +3968,14 @@ pub fn update_packed_gpu_generation_regions(
                     .active_regions
                     .push((region_origin_x, region_origin_z, region_key));
                 scratch.active_region_keys.push(region_key);
+                active_region_signature.push(region_key);
             }
         }
     }
     scratch.loaded_region_keys.sort_unstable();
     scratch.active_region_keys.sort_unstable();
     let loaded_regions = scratch.loaded_region_keys.len();
-    let (active_region_count, active_region_hash) =
-        PackedGpuGenerationTarget::active_region_signature(
-            scratch
-                .active_regions
-                .iter()
-                .map(|(_, _, region_key)| *region_key),
-        );
+    let (active_region_count, active_region_hash) = active_region_signature.finish();
     let target = PackedGpuGenerationTarget::new(
         camera_chunk_x,
         camera_chunk_z,

@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated active-region signature now uses `PackedGpuGenerationKeySignature` during the existing region scan, removing the extra iterator pass over `active_regions` while preserving order-sensitive cache-key semantics. Verified with focused signature/target tests and full `just verify`.
 - 2026-06-04: GPU-generated active-region pending prune now reuses sorted `active_region_keys` with binary search instead of allocating a temporary `HashSet` on sliding shifts. Verified with focused active-prune/target tests and full `just verify`.
 - 2026-06-04: GPU-generated steady loaded-region pending prune now reuses sorted `loaded_region_keys` with binary search instead of allocating a temporary `HashSet` each prune pass. Verified with focused prune/cache tests and full `just verify`.
 - 2026-06-04: GPU-generated loaded-region prefetch now derives the sliding-window expanded budget from the already-built missing-region candidate list. This removes the separate loaded-region pre-scan while keeping steady prefetch on its pending-build budget path. Verified with focused prefetch/target tests and full `just verify`.

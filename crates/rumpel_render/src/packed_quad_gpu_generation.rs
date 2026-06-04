@@ -192,6 +192,33 @@ impl PackedGpuGenerationBatchSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedGpuGenerationKeySignature {
+    count: usize,
+    hash: u64,
+}
+
+impl Default for PackedGpuGenerationKeySignature {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            hash: FNV64_OFFSET,
+        }
+    }
+}
+
+impl PackedGpuGenerationKeySignature {
+    pub fn push(&mut self, key: u64) {
+        self.count = self.count.saturating_add(1);
+        self.hash = fnv64(self.hash, key);
+    }
+
+    #[must_use]
+    pub fn finish(self) -> (usize, u64) {
+        (self.count, self.hash)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackedGpuChunkRange {
     pub chunk_key: u64,
     pub column_start: usize,
@@ -280,13 +307,11 @@ impl PackedGpuGenerationTarget {
     where
         I: IntoIterator<Item = u64>,
     {
-        let mut count = 0usize;
-        let mut hash = FNV64_OFFSET;
+        let mut signature = PackedGpuGenerationKeySignature::default();
         for key in active_region_keys {
-            count = count.saturating_add(1);
-            hash = fnv64(hash, key);
+            signature.push(key);
         }
-        (count, hash)
+        signature.finish()
     }
 
     #[must_use]
@@ -294,13 +319,11 @@ impl PackedGpuGenerationTarget {
     where
         I: IntoIterator<Item = u64>,
     {
-        let mut count = 0usize;
-        let mut hash = FNV64_OFFSET;
+        let mut signature = PackedGpuGenerationKeySignature::default();
         for key in active_chunk_keys {
-            count = count.saturating_add(1);
-            hash = fnv64(hash, key);
+            signature.push(key);
         }
-        (count, hash)
+        signature.finish()
     }
 
     #[must_use]
@@ -1107,6 +1130,18 @@ mod tests {
         assert_eq!(quad.block_id, 7);
         assert_eq!(quad.face(), PackedVoxelFace::PlusY as u8);
         assert_eq!(quad.lod(), 2);
+    }
+
+    #[test]
+    fn packed_gpu_generation_key_signature_matches_iterator_signature() {
+        let keys = [3, 1, 4, 1, 5];
+        let expected = PackedGpuGenerationTarget::active_region_signature(keys);
+        let mut signature = PackedGpuGenerationKeySignature::default();
+        for key in keys {
+            signature.push(key);
+        }
+
+        assert_eq!(signature.finish(), expected);
     }
 
     #[test]
