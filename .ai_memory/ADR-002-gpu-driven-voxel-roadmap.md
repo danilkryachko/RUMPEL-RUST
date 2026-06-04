@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated dispatch tracking now stores per-chunk arena slot state alongside source generation, forcing regeneration when a chunk returns in a different reused arena slot even if its world generation is unchanged. Verified with focused dispatch/prepare tests and full `just verify`.
 - 2026-06-04: Packed/generated batch ordering now uses unstable key sorting for unique batch/region key paths, avoiding stable-sort overhead in arena packing, sorted batch order staging, sliding generated batches, and generated batch assembly. Verified with focused packing/order tests and full `just verify`.
 - 2026-06-04: GPU-generated active-range scratch now carries finalized job params and chunk bounds, so generation job collection and planned-region staging reuse that metadata instead of rewriting params and decoding bounds later. Verified with the focused active-range prepare test and full `just verify`.
 - 2026-06-04: GPU-generated render prepare now builds a single reusable active-range scratch and feeds allocation requests, planned regions, generation jobs, draw params, and dirty-generation tracking from it, removing repeated active chunk-range walks while preserving the GPU buffer ABI. Verified with focused active-range/prepare tests and full `just verify`.

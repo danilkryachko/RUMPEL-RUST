@@ -127,8 +127,8 @@ pub struct PreparedPackedGpuGeneratedDraw {
     pub cull_metadata_signature: u64,
     pub cull_source_signature: u64,
     dispatched: AtomicBool,
-    chunk_dispatched_generation: HashMap<u64, u64>,
-    pending_chunk_generations: Vec<(u64, u64)>,
+    chunk_dispatched_generation: HashMap<u64, PackedGpuDispatchedChunkState>,
+    pending_chunk_generations: Vec<(u64, PackedGpuDispatchedChunkState)>,
 }
 
 #[derive(Clone, Copy)]
@@ -252,7 +252,29 @@ struct PackedGpuGenerationBuffers {
     columns: Vec<PackedGpuSurfaceColumn>,
     draw_params: Vec<crate::packed_quad_buffer::PackedQuadDrawParams>,
     dirty_jobs: Vec<PackedGpuGenerationJob>,
-    pending_chunk_generations: Vec<(u64, u64)>,
+    pending_chunk_generations: Vec<(u64, PackedGpuDispatchedChunkState)>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PackedGpuDispatchedChunkState {
+    generation: u64,
+    arena_offset_quads: usize,
+    arena_len_quads: usize,
+    arena_capacity_quads: usize,
+}
+
+impl PackedGpuDispatchedChunkState {
+    fn new(
+        generation: u64,
+        allocation: crate::packed_quad_buffer::PackedQuadArenaAllocation,
+    ) -> Self {
+        Self {
+            generation,
+            arena_offset_quads: allocation.offset_quads,
+            arena_len_quads: allocation.len_quads,
+            arena_capacity_quads: allocation.capacity_quads,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -279,9 +301,14 @@ fn reserve_vec_for_len<T>(values: &mut Vec<T>, len: usize) {
 fn chunk_needs_gpu_generation(
     chunk_key: u64,
     batch_generation: u64,
-    dispatched: &HashMap<u64, u64>,
+    allocation: crate::packed_quad_buffer::PackedQuadArenaAllocation,
+    dispatched: &HashMap<u64, PackedGpuDispatchedChunkState>,
 ) -> bool {
-    dispatched.get(&chunk_key).copied().unwrap_or(0) < batch_generation
+    dispatched.get(&chunk_key).copied()
+        != Some(PackedGpuDispatchedChunkState::new(
+            batch_generation,
+            allocation,
+        ))
 }
 
 fn collect_active_gpu_generation_ranges(
@@ -339,7 +366,7 @@ fn collect_gpu_generation_allocation_requests(
 
 fn collect_active_gpu_generation_jobs(
     allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
-    dispatched: &HashMap<u64, u64>,
+    dispatched: &HashMap<u64, PackedGpuDispatchedChunkState>,
     buffers: &mut PackedGpuGenerationBuffers,
     active_chunk_job_count: usize,
 ) {
@@ -378,9 +405,10 @@ fn collect_active_gpu_generation_jobs(
             draw_command_index,
         );
         jobs.push(job);
-        if chunk_needs_gpu_generation(range.chunk_key, range.generation, dispatched) {
+        let dispatched_state = PackedGpuDispatchedChunkState::new(range.generation, allocation);
+        if chunk_needs_gpu_generation(range.chunk_key, range.generation, allocation, dispatched) {
             dirty_jobs.push(job);
-            pending_chunk_generations.push((range.chunk_key, range.generation));
+            pending_chunk_generations.push((range.chunk_key, dispatched_state));
         }
 
         let mut translation = range.translation;
@@ -393,10 +421,10 @@ fn collect_active_gpu_generation_jobs(
 }
 
 fn record_dispatched_chunk_generations(prepared: &mut PreparedPackedGpuGeneratedDraw) {
-    for (chunk_key, generation) in prepared.pending_chunk_generations.drain(..) {
+    for (chunk_key, dispatched_state) in prepared.pending_chunk_generations.drain(..) {
         prepared
             .chunk_dispatched_generation
-            .insert(chunk_key, generation);
+            .insert(chunk_key, dispatched_state);
     }
 }
 
@@ -3506,13 +3534,41 @@ mod tests {
     #[test]
     fn chunk_needs_gpu_generation_tracks_per_chunk_batch_generation() {
         let mut dispatched = HashMap::new();
-        assert!(chunk_needs_gpu_generation(10, 3, &dispatched));
-        dispatched.insert(10, 3);
-        assert!(!chunk_needs_gpu_generation(10, 3, &dispatched));
-        assert!(chunk_needs_gpu_generation(10, 4, &dispatched));
-        assert!(chunk_needs_gpu_generation(11, 1, &dispatched));
-        dispatched.insert(11, 1);
-        assert!(!chunk_needs_gpu_generation(11, 1, &dispatched));
+        let allocation = crate::packed_quad_buffer::PackedQuadArenaAllocation {
+            key: 10,
+            offset_quads: 16,
+            len_quads: 7,
+            capacity_quads: 32,
+            generation: 3,
+        };
+        assert!(chunk_needs_gpu_generation(10, 3, allocation, &dispatched));
+        dispatched.insert(10, PackedGpuDispatchedChunkState::new(3, allocation));
+        assert!(!chunk_needs_gpu_generation(10, 3, allocation, &dispatched));
+        assert!(chunk_needs_gpu_generation(10, 4, allocation, &dispatched));
+
+        let moved_allocation = crate::packed_quad_buffer::PackedQuadArenaAllocation {
+            offset_quads: 64,
+            ..allocation
+        };
+        assert!(chunk_needs_gpu_generation(
+            10,
+            3,
+            moved_allocation,
+            &dispatched
+        ));
+
+        let resized_allocation = crate::packed_quad_buffer::PackedQuadArenaAllocation {
+            len_quads: 8,
+            capacity_quads: 64,
+            ..allocation
+        };
+        assert!(chunk_needs_gpu_generation(
+            10,
+            3,
+            resized_allocation,
+            &dispatched
+        ));
+        assert!(chunk_needs_gpu_generation(11, 1, allocation, &dispatched));
     }
 
     #[test]
@@ -3681,7 +3737,10 @@ mod tests {
             active_ranges,
             ..Default::default()
         };
-        let dispatched = HashMap::from([(101, 7)]);
+        let dispatched = HashMap::from([(
+            101,
+            PackedGpuDispatchedChunkState::new(7, allocations.get(&101).copied().unwrap()),
+        )]);
         collect_active_gpu_generation_jobs(&allocations, &dispatched, &mut buffers, active_count);
 
         assert_eq!(buffers.jobs.len(), 3);
@@ -3691,7 +3750,19 @@ mod tests {
         assert_eq!(buffers.jobs[2].source[0], 3);
         assert_eq!(buffers.jobs[1].output[1], 1);
         assert_eq!(buffers.dirty_jobs.len(), 2);
-        assert_eq!(buffers.pending_chunk_generations, vec![(102, 7), (201, 9)]);
+        assert_eq!(buffers.pending_chunk_generations.len(), 2);
+        assert_eq!(buffers.pending_chunk_generations[0].0, 102);
+        assert_eq!(buffers.pending_chunk_generations[0].1.generation, 7);
+        assert_eq!(
+            buffers.pending_chunk_generations[0].1.arena_offset_quads,
+            64
+        );
+        assert_eq!(buffers.pending_chunk_generations[1].0, 201);
+        assert_eq!(buffers.pending_chunk_generations[1].1.generation, 9);
+        assert_eq!(
+            buffers.pending_chunk_generations[1].1.arena_offset_quads,
+            128
+        );
         assert_eq!(
             buffers.draw_params[0].chunk_offset,
             [10.0, 20.0, 30.0, 16.0]
