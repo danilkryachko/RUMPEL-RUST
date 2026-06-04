@@ -2573,6 +2573,8 @@ impl render_graph::Node for PackedQuadRenderNode {
             });
             let cpu_visible_compact_requested =
                 env_flag_default(PACKED_CPU_VISIBLE_COMPACT_ENV, true);
+            let full_cpu_multi_indirect =
+                indirect.draw_mode == "multi-indirect" && !cpu_visible_compact_requested;
             let cpu_visible_indirect_buffer = (gpu_cull_count.is_none()
                 && cpu_visible_compact_requested)
                 .then(|| {
@@ -2590,17 +2592,21 @@ impl render_graph::Node for PackedQuadRenderNode {
                 None => true,
             };
 
-            let visible_selection = gpu_cull_count.is_none().then(|| {
-                collect_visible_indirect_commands(
-                    &indirect.command_metadata,
-                    &indirect.commands,
-                    indirect.command_count,
-                    view_position,
-                    clip_from_world,
-                    env_flag_default(PACKED_FACE_RANGE_CULL_ENV, DEFAULT_PACKED_FACE_RANGE_CULL),
-                    collect_visible_indices,
-                )
-            });
+            let visible_selection =
+                (gpu_cull_count.is_none() && !full_cpu_multi_indirect).then(|| {
+                    collect_visible_indirect_commands(
+                        &indirect.command_metadata,
+                        &indirect.commands,
+                        indirect.command_count,
+                        view_position,
+                        clip_from_world,
+                        env_flag_default(
+                            PACKED_FACE_RANGE_CULL_ENV,
+                            DEFAULT_PACKED_FACE_RANGE_CULL,
+                        ),
+                        collect_visible_indices,
+                    )
+                });
 
             let cpu_compact_buffer = visible_selection.as_ref().and_then(|selection| {
                 let (buffer, capacity_commands) = cpu_visible_indirect_buffer?;
@@ -2653,7 +2659,7 @@ impl render_graph::Node for PackedQuadRenderNode {
                 render_draw_calls = usize::from(indirect.command_count > 0);
                 render_items_considered = indirect.command_count;
                 crate::packed_quad_pipeline::record_packed_quad_cpu_visible_indirect(false, 0);
-            } else if indirect.draw_mode == "multi-indirect" && !cpu_visible_compact_requested {
+            } else if full_cpu_multi_indirect {
                 render_pass.multi_draw_indirect(indirect_buffer, 0, indirect.command_count as u32);
                 render_draw_calls = usize::from(indirect.command_count > 0);
                 render_items_considered = indirect.command_count;

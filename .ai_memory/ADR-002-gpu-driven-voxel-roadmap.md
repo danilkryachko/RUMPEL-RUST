@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: CPU indirect render path now skips CPU visible selection entirely for full `multi_draw_indirect` frames when CPU-visible compact is disabled; that mode draws the full indirect buffer and retains its metadata-only visible metrics pass. Verified with focused selection tests and full `just verify`.
 - 2026-06-04: CPU-visible indirect compact fallback now skips visible draw-index collection when the compact command buffer is available; indices are collected only for the draw-indirect fallback, while commands and visibility metrics stay intact. Verified with focused selection tests and full `just verify`.
 - 2026-06-04: GPU-generated cull dispatch reuse now exits before compute pipeline, view uniform, and cull buffer lookups; stable reused frames only compute the source/view dispatch signature and publish cached visible metrics. Verified with focused cull tests and full `just verify`.
 - 2026-06-04: GPU-generated rebuild column staging no longer maintains the unused `region_column_base` counter while copying columns into the upload scratch buffer. Verified with focused render checks and full `just verify`.
