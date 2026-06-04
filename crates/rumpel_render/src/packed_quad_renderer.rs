@@ -1438,10 +1438,8 @@ fn prepare_packed_gpu_generated_draw(
         .pending_chunk_generations
         .clone_from(&buffers.pending_chunk_generations);
 
-    let mut region_column_base = 0usize;
     for batch in ordered_batches {
         buffers.columns.extend_from_slice(batch.columns.as_slice());
-        region_column_base = region_column_base.saturating_add(batch.columns.len());
     }
 
     let Some(jobs_buffer) = buffers.jobs_buffer.as_ref() else {
