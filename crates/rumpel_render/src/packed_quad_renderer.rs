@@ -1126,8 +1126,6 @@ fn prepare_packed_gpu_generated_draw(
     };
 
     let ordered_batches = extracted_batches.batches();
-    let active_chunk_job_count =
-        PackedGpuGenerationBatches::active_chunk_job_count(ordered_batches);
     let batch_signature = if extracted_batches.batch_signature == 0 {
         PackedGpuGenerationBatches::calculate_batch_signature(ordered_batches)
     } else {
@@ -1143,6 +1141,7 @@ fn prepare_packed_gpu_generated_draw(
     } else {
         extracted_batches.summary
     };
+    let active_chunk_job_count = batch_summary.active_chunk_job_count;
     let total_region_column_count = batch_summary.total_column_count;
 
     if !batch_summary.is_renderable(ordered_batches.len()) {
