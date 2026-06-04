@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated loaded-region prefetch ordering now skips distance sort for 0/1-region candidate lists, preserving existing nearest-first behavior for longer lists while avoiding no-op sort overhead on tiny pending/prefetch windows. Verified with focused ordering tests and full `just verify`.
 - 2026-06-04: GPU-generated region update now reserves `GeneratedRegionCache.entries` to the loaded-window region capacity before cache insert/reuse work, avoiding rehash spikes when generated view windows grow. Verified with focused cache-capacity test and full `just verify`.
 - 2026-06-04: GPU-generated sliding-shift carry map now uses `fill_carried_generated_batches` with HashMap capacity reuse before cloning active batches into `carried_batches`, reducing realloc/rehash risk on window shifts. Verified with focused carry-map/target tests and full `just verify`.
 - 2026-06-04: GPU-generated active-region signature now uses `PackedGpuGenerationKeySignature` during the existing region scan, removing the extra iterator pass over `active_regions` while preserving order-sensitive cache-key semantics. Verified with focused signature/target tests and full `just verify`.

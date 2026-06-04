@@ -831,6 +831,9 @@ pub fn order_loaded_regions_for_prefetch(
     camera_chunk_z: i32,
     region_size: i32,
 ) {
+    if regions.len() <= 1 {
+        return;
+    }
     regions.sort_by_key(|region| {
         loaded_region_prefetch_distance_key(*region, camera_chunk_x, camera_chunk_z, region_size)
     });
@@ -1492,6 +1495,13 @@ mod tests {
         assert_eq!(regions[0].2, 1);
         assert_eq!(regions[1].2, 2);
         assert_eq!(regions[2].2, 3);
+    }
+
+    #[test]
+    fn order_loaded_regions_for_prefetch_keeps_single_region() {
+        let mut regions = [(8, 0, 1_u64)];
+        order_loaded_regions_for_prefetch(&mut regions, 128, -64, 4);
+        assert_eq!(regions, [(8, 0, 1_u64)]);
     }
 
     #[test]
