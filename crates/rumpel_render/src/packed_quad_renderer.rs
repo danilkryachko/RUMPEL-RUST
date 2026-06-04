@@ -459,6 +459,14 @@ fn move_pending_chunk_generations_to_prepared(
     buffers.pending_chunk_generations.clear();
 }
 
+fn move_planned_regions_to_prepared(
+    buffers: &mut PackedGpuGenerationBuffers,
+    prepared: &mut PreparedPackedGpuGeneratedDraw,
+) {
+    std::mem::swap(&mut prepared.regions, &mut buffers.planned_regions);
+    buffers.planned_regions.clear();
+}
+
 fn active_chunk_requested_quads(
     range: &crate::packed_quad_gpu_generation::PackedGpuChunkRange,
 ) -> usize {
@@ -1186,7 +1194,7 @@ fn refresh_structure_stable_gpu_generated_prepare(
         ));
     }
 
-    prepared.regions.clone_from(&buffers.planned_regions);
+    move_planned_regions_to_prepared(buffers, prepared);
     prepared.total_column_count = batch_summary.total_column_count;
     prepared.max_column_count = batch_summary.max_column_count;
     prepared.total_max_output_quads = batch_summary.total_max_output_quads;
@@ -1638,15 +1646,18 @@ fn prepare_packed_gpu_generated_draw(
             BindingResource::Sampler(&gpu_atlas.sampler),
         )),
     );
+    let command_count = buffers.jobs.len();
+    let generation_dispatch_count = buffers.dirty_jobs.len();
+    let indirect_buffer = indirect_buffer.clone();
 
     prepared.enabled = true;
-    prepared.regions.clone_from(&buffers.planned_regions);
+    move_planned_regions_to_prepared(&mut buffers, &mut prepared);
     prepared.total_column_count = batch_summary.total_column_count;
     prepared.max_column_count = batch_summary.max_column_count;
     prepared.total_max_output_quads = batch_summary.total_max_output_quads;
     prepared.source_chunk_count = batch_summary.source_chunk_count;
-    prepared.command_count = buffers.jobs.len();
-    prepared.generation_dispatch_count = buffers.dirty_jobs.len();
+    prepared.command_count = command_count;
+    prepared.generation_dispatch_count = generation_dispatch_count;
     prepared.arena_generation = arena.generation;
     prepared.batch_signature = batch_signature;
     prepared.batch_structure_signature = batch_structure_signature;
@@ -1656,7 +1667,7 @@ fn prepare_packed_gpu_generated_draw(
     prepared.cull_source_signature = cull_source_signature;
     prepared.generation_bind_group = Some(generation_bind_group);
     prepared.render_bind_group = Some(render_bind_group);
-    prepared.indirect_buffer = Some(indirect_buffer.clone());
+    prepared.indirect_buffer = Some(indirect_buffer);
     if prepared.generation_dispatch_count > 0 {
         prepared.mark_pending();
     }
@@ -3678,6 +3689,37 @@ mod tests {
         assert_eq!(prepared.pending_chunk_generations[0], (10, new_state));
         assert_eq!(prepared.pending_chunk_generations[1], (11, new_state));
         assert!(buffers.pending_chunk_generations.is_empty());
+    }
+
+    #[test]
+    fn move_planned_regions_to_prepared_reuses_scratch_without_copy() {
+        let region = |chunk_key| PreparedPackedGpuGeneratedRegion {
+            key: chunk_key / 10,
+            chunk_key,
+            generation: 1,
+            column_count: 2,
+            max_output_quads: 3,
+            arena_offset_quads: 4,
+            arena_capacity_quads: 5,
+            draw_command_index: 6,
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::ONE,
+        };
+        let mut prepared = PreparedPackedGpuGeneratedDraw {
+            regions: vec![region(10)],
+            ..Default::default()
+        };
+        let mut buffers = PackedGpuGenerationBuffers {
+            planned_regions: vec![region(20), region(30)],
+            ..Default::default()
+        };
+
+        move_planned_regions_to_prepared(&mut buffers, &mut prepared);
+
+        assert_eq!(prepared.regions.len(), 2);
+        assert_eq!(prepared.regions[0].chunk_key, 20);
+        assert_eq!(prepared.regions[1].chunk_key, 30);
+        assert!(buffers.planned_regions.is_empty());
     }
 
     #[test]
