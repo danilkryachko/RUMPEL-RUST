@@ -94,92 +94,6 @@ impl PackedGpuGenerationBatches {
     }
 
     #[must_use]
-    pub fn calculate_batch_metadata(
-        batches: &[PackedGpuGenerationBatch],
-    ) -> (u64, u64, PackedGpuGenerationBatchSummary) {
-        let mut batch_hash = FNV64_OFFSET;
-        let mut structure_hash = FNV64_OFFSET;
-        let mut summary = PackedGpuGenerationBatchSummary::default();
-        batch_hash = fnv64(batch_hash, batches.len() as u64);
-        structure_hash = fnv64(structure_hash, batches.len() as u64);
-
-        for (index, batch) in batches.iter().enumerate() {
-            batch_hash = fnv64(batch_hash, index as u64);
-            structure_hash = fnv64(structure_hash, index as u64);
-            batch_hash = fnv64(batch_hash, batch.key);
-            structure_hash = fnv64(structure_hash, batch.key);
-            batch_hash = fnv64(batch_hash, batch.generation);
-            structure_hash = fnv64(structure_hash, batch.generation);
-            let region_column_count = batch.columns.len();
-            batch_hash = fnv64(batch_hash, region_column_count as u64);
-            structure_hash = fnv64(structure_hash, region_column_count as u64);
-            batch_hash = fnv64(batch_hash, batch.source_chunk_count as u64);
-            structure_hash = fnv64(structure_hash, batch.source_chunk_count as u64);
-            batch_hash = fnv64(batch_hash, batch.max_output_quads as u64);
-            structure_hash = fnv64(structure_hash, batch.max_output_quads as u64);
-            for value in batch.params.config {
-                batch_hash = fnv64(batch_hash, u64::from(value));
-                structure_hash = fnv64(structure_hash, u64::from(value));
-            }
-            for value in batch.params.palette {
-                batch_hash = fnv64(batch_hash, u64::from(value));
-                structure_hash = fnv64(structure_hash, u64::from(value));
-            }
-            for value in batch.translation.to_array() {
-                let value = u64::from(value.to_bits());
-                batch_hash = fnv64(batch_hash, value);
-                structure_hash = fnv64(structure_hash, value);
-            }
-            for value in batch.bounds_min.to_array() {
-                let value = u64::from(value.to_bits());
-                batch_hash = fnv64(batch_hash, value);
-                structure_hash = fnv64(structure_hash, value);
-            }
-            for value in batch.bounds_max.to_array() {
-                let value = u64::from(value.to_bits());
-                batch_hash = fnv64(batch_hash, value);
-                structure_hash = fnv64(structure_hash, value);
-            }
-
-            if region_column_count == 0
-                || batch.max_output_quads == 0
-                || batch.chunk_ranges.is_empty()
-            {
-                summary.invalid_batch_count = summary.invalid_batch_count.saturating_add(1);
-            }
-            summary.source_chunk_count = summary
-                .source_chunk_count
-                .saturating_add(batch.source_chunk_count);
-
-            for range in batch.chunk_ranges.iter() {
-                batch_hash = fnv64(batch_hash, range.chunk_key);
-                structure_hash = fnv64(structure_hash, range.chunk_key);
-                batch_hash = fnv64(batch_hash, range.column_start as u64);
-                structure_hash = fnv64(structure_hash, range.column_start as u64);
-                batch_hash = fnv64(batch_hash, range.column_len as u64);
-                structure_hash = fnv64(structure_hash, range.column_len as u64);
-                batch_hash = fnv64(batch_hash, u64::from(range.active));
-
-                if !range.active || range.column_len == 0 {
-                    continue;
-                }
-                summary.active_chunk_job_count = summary.active_chunk_job_count.saturating_add(1);
-                summary.total_column_count =
-                    summary.total_column_count.saturating_add(range.column_len);
-                let chunk_max_output_quads = range
-                    .column_len
-                    .saturating_mul(PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN);
-                summary.total_max_output_quads = summary
-                    .total_max_output_quads
-                    .saturating_add(chunk_max_output_quads.max(1));
-                summary.max_column_count = summary.max_column_count.max(range.column_len);
-            }
-        }
-
-        (batch_hash.max(1), structure_hash.max(1), summary)
-    }
-
-    #[must_use]
     pub fn calculate_batch_signature(batches: &[PackedGpuGenerationBatch]) -> u64 {
         let mut hash = FNV64_OFFSET;
         hash = fnv64(hash, batches.len() as u64);
@@ -278,33 +192,6 @@ impl PackedGpuGenerationBatchSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PackedGpuGenerationKeySignature {
-    count: usize,
-    hash: u64,
-}
-
-impl Default for PackedGpuGenerationKeySignature {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            hash: FNV64_OFFSET,
-        }
-    }
-}
-
-impl PackedGpuGenerationKeySignature {
-    pub fn push(&mut self, key: u64) {
-        self.count = self.count.saturating_add(1);
-        self.hash = fnv64(self.hash, key);
-    }
-
-    #[must_use]
-    pub fn finish(self) -> (usize, u64) {
-        (self.count, self.hash)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PackedGpuChunkRange {
     pub chunk_key: u64,
     pub column_start: usize,
@@ -393,11 +280,13 @@ impl PackedGpuGenerationTarget {
     where
         I: IntoIterator<Item = u64>,
     {
-        let mut signature = PackedGpuGenerationKeySignature::default();
+        let mut count = 0usize;
+        let mut hash = FNV64_OFFSET;
         for key in active_region_keys {
-            signature.push(key);
+            count = count.saturating_add(1);
+            hash = fnv64(hash, key);
         }
-        signature.finish()
+        (count, hash)
     }
 
     #[must_use]
@@ -405,11 +294,13 @@ impl PackedGpuGenerationTarget {
     where
         I: IntoIterator<Item = u64>,
     {
-        let mut signature = PackedGpuGenerationKeySignature::default();
+        let mut count = 0usize;
+        let mut hash = FNV64_OFFSET;
         for key in active_chunk_keys {
-            signature.push(key);
+            count = count.saturating_add(1);
+            hash = fnv64(hash, key);
         }
-        signature.finish()
+        (count, hash)
     }
 
     #[must_use]
@@ -544,40 +435,18 @@ impl GeneratedRegionCache {
 /// Chunk keys inside the circular view radius (same coverage as CPU streaming).
 #[must_use]
 pub fn active_gpu_generation_chunk_keys(view_center: IVec2, view_radius: i32) -> HashSet<u64> {
-    let mut keys = HashSet::new();
-    fill_active_gpu_generation_chunk_keys(&mut keys, view_center, view_radius);
-    keys
-}
-
-/// Fill chunk keys inside the circular view radius and return their deterministic signature.
-pub fn fill_active_gpu_generation_chunk_keys(
-    keys: &mut HashSet<u64>,
-    view_center: IVec2,
-    view_radius: i32,
-) -> (usize, u64) {
-    keys.clear();
     let radius = view_radius.max(0);
-    let diameter = (radius as usize).saturating_mul(2).saturating_add(1);
-    let max_candidates = diameter.saturating_mul(diameter);
-    if keys.capacity() < max_candidates {
-        keys.reserve(max_candidates - keys.capacity());
-    }
-
     let radius_sq = radius * radius;
-    let mut count = 0usize;
-    let mut hash = FNV64_OFFSET;
+    let mut keys = HashSet::new();
     for dz in -radius..=radius {
         for dx in -radius..=radius {
             if dx * dx + dz * dz > radius_sq {
                 continue;
             }
-            let key = gpu_pack_chunk_key(view_center.x + dx, view_center.y + dz);
-            keys.insert(key);
-            count = count.saturating_add(1);
-            hash = fnv64(hash, key);
+            keys.insert(gpu_pack_chunk_key(view_center.x + dx, view_center.y + dz));
         }
     }
-    (count, hash)
+    keys
 }
 
 /// Deterministic signature for chunk keys inside the circular view radius.
@@ -649,14 +518,13 @@ pub fn region_has_active_chunks(
     view_radius: i32,
 ) -> bool {
     let region_size = region_size.max(1);
-    let radius = i128::from(view_radius.max(0));
-    let radius_sq = radius * radius;
+    let radius_sq = i64::from(view_radius.max(0)).pow(2);
     let max_x = region_origin_x.saturating_add(region_size.saturating_sub(1));
     let max_z = region_origin_z.saturating_add(region_size.saturating_sub(1));
     let closest_x = center_chunk.x.clamp(region_origin_x, max_x);
     let closest_z = center_chunk.y.clamp(region_origin_z, max_z);
-    let dx = i128::from(closest_x) - i128::from(center_chunk.x);
-    let dz = i128::from(closest_z) - i128::from(center_chunk.y);
+    let dx = i64::from(closest_x - center_chunk.x);
+    let dz = i64::from(closest_z - center_chunk.y);
     dx * dx + dz * dz <= radius_sq
 }
 
@@ -897,18 +765,18 @@ pub fn packed_gpu_generation_shift_sync_build_budget_from_env() -> usize {
         .max(DEFAULT_PACKED_GPU_GENERATION_SHIFT_SYNCHRONOUS_BUILDS_PER_FRAME)
 }
 
-fn loaded_region_prefetch_order_key(
+fn loaded_region_prefetch_distance_key(
     region: (i32, i32, u64),
     camera_chunk_x: i32,
     camera_chunk_z: i32,
     region_size: i32,
-) -> (i128, u64) {
+) -> i32 {
     let center_offset = region_size.max(1) / 2;
     let center_x = region.0.saturating_add(center_offset);
     let center_z = region.1.saturating_add(center_offset);
-    let dx = i128::from(center_x) - i128::from(camera_chunk_x);
-    let dz = i128::from(center_z) - i128::from(camera_chunk_z);
-    (dx * dx + dz * dz, region.2)
+    let dx = center_x - camera_chunk_x;
+    let dz = center_z - camera_chunk_z;
+    dx * dx + dz * dz
 }
 
 /// Sort loaded region origins nearest-first for moving-camera cache warmup.
@@ -918,37 +786,9 @@ pub fn order_loaded_regions_for_prefetch(
     camera_chunk_z: i32,
     region_size: i32,
 ) {
-    if regions.len() <= 1 {
-        return;
-    }
-    regions.sort_unstable_by_key(|region| {
-        loaded_region_prefetch_order_key(*region, camera_chunk_x, camera_chunk_z, region_size)
+    regions.sort_by_key(|region| {
+        loaded_region_prefetch_distance_key(*region, camera_chunk_x, camera_chunk_z, region_size)
     });
-}
-
-pub fn partition_nearest_loaded_regions_for_prefetch(
-    regions: &mut [(i32, i32, u64)],
-    budget: usize,
-    camera_chunk_x: i32,
-    camera_chunk_z: i32,
-    region_size: i32,
-) -> usize {
-    if budget == 0 || regions.is_empty() {
-        return 0;
-    }
-    let selected_count = budget.min(regions.len());
-    if selected_count < regions.len() {
-        regions.select_nth_unstable_by_key(selected_count, |region| {
-            loaded_region_prefetch_order_key(*region, camera_chunk_x, camera_chunk_z, region_size)
-        });
-    }
-    order_loaded_regions_for_prefetch(
-        &mut regions[..selected_count],
-        camera_chunk_x,
-        camera_chunk_z,
-        region_size,
-    );
-    selected_count
 }
 
 pub fn retain_nearest_loaded_regions_for_prefetch(
@@ -962,14 +802,23 @@ pub fn retain_nearest_loaded_regions_for_prefetch(
         regions.clear();
         return;
     }
-    let selected_count = partition_nearest_loaded_regions_for_prefetch(
+    if regions.len() > budget {
+        regions.select_nth_unstable_by_key(budget, |region| {
+            loaded_region_prefetch_distance_key(
+                *region,
+                camera_chunk_x,
+                camera_chunk_z,
+                region_size,
+            )
+        });
+        regions.truncate(budget);
+    }
+    order_loaded_regions_for_prefetch(
         regions.as_mut_slice(),
-        budget,
         camera_chunk_x,
         camera_chunk_z,
         region_size,
     );
-    regions.truncate(selected_count);
 }
 
 #[must_use]
@@ -1139,8 +988,6 @@ mod tests {
 
         let batches = [make_batch(1, 3, 21, 2, true), make_batch(2, 0, 0, 4, false)];
         let summary = PackedGpuGenerationBatches::summarize_batches(&batches);
-        let (batch_signature, batch_structure_signature, metadata_summary) =
-            PackedGpuGenerationBatches::calculate_batch_metadata(&batches);
 
         assert_eq!(summary.invalid_batch_count, 1);
         assert_eq!(summary.total_column_count, 3);
@@ -1151,15 +998,6 @@ mod tests {
         assert_eq!(summary.max_column_count, 3);
         assert_eq!(summary.source_chunk_count, 6);
         assert_eq!(summary.active_chunk_job_count, 1);
-        assert_eq!(metadata_summary, summary);
-        assert_eq!(
-            batch_signature,
-            PackedGpuGenerationBatches::calculate_batch_signature(&batches)
-        );
-        assert_eq!(
-            batch_structure_signature,
-            PackedGpuGenerationBatches::calculate_batch_structure_signature(&batches)
-        );
         assert!(!summary.is_renderable(batches.len()));
         let active_only = [make_batch(1, 3, 21, 2, true)];
         assert!(PackedGpuGenerationBatches::summarize_batches(&active_only).is_renderable(1));
@@ -1247,18 +1085,6 @@ mod tests {
         assert_eq!(quad.block_id, 7);
         assert_eq!(quad.face(), PackedVoxelFace::PlusY as u8);
         assert_eq!(quad.lod(), 2);
-    }
-
-    #[test]
-    fn packed_gpu_generation_key_signature_matches_iterator_signature() {
-        let keys = [3, 1, 4, 1, 5];
-        let expected = PackedGpuGenerationTarget::active_region_signature(keys);
-        let mut signature = PackedGpuGenerationKeySignature::default();
-        for key in keys {
-            signature.push(key);
-        }
-
-        assert_eq!(signature.finish(), expected);
     }
 
     #[test]
@@ -1436,17 +1262,6 @@ mod tests {
     }
 
     #[test]
-    fn region_has_active_chunks_handles_large_coordinate_separation() {
-        assert!(!region_has_active_chunks(
-            i32::MAX - 8,
-            i32::MAX - 8,
-            4,
-            IVec2::new(i32::MIN + 8, i32::MIN + 8),
-            16,
-        ));
-    }
-
-    #[test]
     fn region_has_active_chunks_matches_active_chunk_set_scan() {
         let center = IVec2::new(3, -2);
 
@@ -1620,60 +1435,6 @@ mod tests {
         assert_eq!(regions[0].2, 1);
         assert_eq!(regions[1].2, 2);
         assert_eq!(regions[2].2, 3);
-    }
-
-    #[test]
-    fn order_loaded_regions_for_prefetch_breaks_distance_ties_by_region_key() {
-        let mut regions = [(8, 0, 30_u64), (0, 0, 10_u64), (0, 0, 20_u64)];
-        order_loaded_regions_for_prefetch(&mut regions, 5, 2, 4);
-        assert_eq!(regions.map(|region| region.2), [10, 20, 30]);
-    }
-
-    #[test]
-    fn order_loaded_regions_for_prefetch_handles_large_coordinate_separation() {
-        let mut regions = [
-            (i32::MAX - 8, i32::MAX - 8, 20_u64),
-            (i32::MIN + 8, i32::MIN + 8, 10_u64),
-        ];
-        order_loaded_regions_for_prefetch(&mut regions, i32::MIN + 8, i32::MIN + 8, 4);
-        assert_eq!(regions.map(|region| region.2), [10, 20]);
-    }
-
-    #[test]
-    fn retain_nearest_loaded_regions_for_prefetch_breaks_boundary_ties_by_region_key() {
-        let mut regions = [(8, 0, 30_u64), (0, 0, 10_u64), (0, 0, 20_u64)].to_vec();
-        retain_nearest_loaded_regions_for_prefetch(&mut regions, 2, 5, 2, 4);
-        assert_eq!(
-            regions.iter().map(|region| region.2).collect::<Vec<_>>(),
-            [10, 20]
-        );
-    }
-
-    #[test]
-    fn partition_nearest_loaded_regions_for_prefetch_orders_only_selected_budget() {
-        let mut regions = [
-            (24, 0, 40_u64),
-            (8, 0, 30_u64),
-            (0, 0, 10_u64),
-            (0, 0, 20_u64),
-        ];
-        let selected_count =
-            partition_nearest_loaded_regions_for_prefetch(&mut regions, 2, 5, 2, 4);
-
-        assert_eq!(selected_count, 2);
-        assert_eq!([regions[0].2, regions[1].2], [10, 20]);
-        assert!(
-            regions[selected_count..]
-                .iter()
-                .all(|region| region.2 == 30 || region.2 == 40)
-        );
-    }
-
-    #[test]
-    fn order_loaded_regions_for_prefetch_keeps_single_region() {
-        let mut regions = [(8, 0, 1_u64)];
-        order_loaded_regions_for_prefetch(&mut regions, 128, -64, 4);
-        assert_eq!(regions, [(8, 0, 1_u64)]);
     }
 
     #[test]

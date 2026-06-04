@@ -24,13 +24,12 @@ use rumpel_world::world_gen::{WorldGenerationContext, terrain_surface_contract_v
 
 use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuChunkRange, PackedGpuGenerationBatch,
-    PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationKeySignature,
-    PackedGpuGenerationParams, PackedGpuGenerationTarget, fill_active_gpu_generation_chunk_keys,
-    packed_gpu_generation_columns_per_chunk, packed_gpu_generation_lod_for_cell_size,
-    packed_gpu_generation_max_synchronous_builds_from_env,
+    PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationParams,
+    PackedGpuGenerationTarget, active_gpu_generation_chunk_signature,
+    order_loaded_regions_for_prefetch, packed_gpu_generation_columns_per_chunk,
+    packed_gpu_generation_lod_for_cell_size, packed_gpu_generation_max_synchronous_builds_from_env,
     packed_gpu_generation_prefetch_budget_from_env,
-    packed_gpu_generation_shift_sync_build_budget_from_env,
-    partition_nearest_loaded_regions_for_prefetch, region_has_active_chunks,
+    packed_gpu_generation_shift_sync_build_budget_from_env, region_has_active_chunks,
     retain_nearest_loaded_regions_for_prefetch, sync_gpu_chunk_range_active_flags,
 };
 use crate::voxel_material::load_block_atlas;
@@ -158,7 +157,6 @@ pub struct PackedGpuGenerationRegionScratch {
     loaded_region_keys: Vec<u64>,
     loaded_regions: Vec<(i32, i32, u64)>,
     active_regions: Vec<(i32, i32, u64)>,
-    active_region_keys: Vec<u64>,
     prefetch_candidates: Vec<(i32, i32, u64)>,
     active_chunk_keys: HashSet<u64>,
     generated_batches: Vec<PackedGpuGenerationBatch>,
@@ -910,6 +908,28 @@ pub fn packed_chunk_count_for_radius(view_radius: i32) -> usize {
     count
 }
 
+fn fill_active_gpu_generation_chunk_keys(
+    keys: &mut HashSet<u64>,
+    view_center: IVec2,
+    view_radius: i32,
+) {
+    keys.clear();
+    let radius = view_radius.max(0);
+    let diameter = (radius as usize).saturating_mul(2).saturating_add(1);
+    let max_candidates = diameter.saturating_mul(diameter);
+    reserve_hash_set_capacity(keys, max_candidates);
+
+    let radius_sq = radius * radius;
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx * dx + dz * dz > radius_sq {
+                continue;
+            }
+            keys.insert(pack_chunk_key(view_center.x + dx, view_center.y + dz));
+        }
+    }
+}
+
 pub fn packed_region_count_for_radius(view_radius: i32, region_size: i32) -> usize {
     let radius = view_radius.max(0);
     let size = region_size.max(1);
@@ -1245,6 +1265,11 @@ fn push_packed_chunk_range_indirect_commands(
     );
 }
 
+#[must_use]
+pub fn packed_view_radius_chunks() -> i32 {
+    packed_view_radius_from_env()
+}
+
 fn packed_view_radius_from_env() -> i32 {
     std::env::var(PACKED_VIEW_RADIUS_ENV)
         .ok()
@@ -1486,7 +1511,7 @@ pub fn pack_arena_allocations(
     usize,
 ) {
     let mut sorted_batches = batches.iter().collect::<Vec<_>>();
-    sorted_batches.sort_unstable_by_key(|batch| batch.key);
+    sorted_batches.sort_by_key(|batch| batch.key);
 
     let total_quads: usize = sorted_batches.iter().map(|batch| batch.quads.len()).sum();
     let mut staging = Vec::with_capacity(total_quads);
@@ -1526,7 +1551,7 @@ fn sort_packed_batch_order(batch_order: &mut Vec<usize>, batches: &[PackedQuadBa
         batch_order.reserve(batches.len() - batch_order_capacity);
     }
     batch_order.extend(0..batches.len());
-    batch_order.sort_unstable_by_key(|batch_index| batches[*batch_index].key);
+    batch_order.sort_by_key(|batch_index| batches[*batch_index].key);
 }
 
 fn reserve_vec_capacity<T>(items: &mut Vec<T>, capacity: usize) {
@@ -1537,6 +1562,13 @@ fn reserve_vec_capacity<T>(items: &mut Vec<T>, capacity: usize) {
 }
 
 fn reserve_hash_map_capacity<K: Eq + Hash, V>(items: &mut HashMap<K, V>, capacity: usize) {
+    let current_capacity = items.capacity();
+    if current_capacity < capacity {
+        items.reserve(capacity - current_capacity);
+    }
+}
+
+fn reserve_hash_set_capacity<T: Eq + Hash>(items: &mut HashSet<T>, capacity: usize) {
     let current_capacity = items.capacity();
     if current_capacity < capacity {
         items.reserve(capacity - current_capacity);
@@ -3350,13 +3382,6 @@ fn loaded_region_cache_is_warm(
             .all(|(_, _, key)| region_cache.entries.contains_key(key))
 }
 
-fn reserve_generated_region_cache_capacity(
-    region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
-    loaded_region_capacity: usize,
-) {
-    reserve_hash_map_capacity(&mut region_cache.entries, loaded_region_capacity);
-}
-
 fn maybe_process_steady_loaded_region_prefetch(
     scratch: &mut PackedGpuGenerationRegionScratch,
     region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
@@ -3384,13 +3409,13 @@ fn maybe_process_steady_loaded_region_prefetch(
 
 fn prune_stale_pending_loaded_region_builds(
     pending: &mut Vec<(i32, i32, u64)>,
-    sorted_loaded_region_keys: &[u64],
+    loaded_region_keys: &[u64],
 ) {
     if pending.is_empty() {
         return;
     }
-    pending
-        .retain(|(_, _, region_key)| sorted_loaded_region_keys.binary_search(region_key).is_ok());
+    let loaded_keys: HashSet<u64> = loaded_region_keys.iter().copied().collect();
+    pending.retain(|(_, _, region_key)| loaded_keys.contains(region_key));
 }
 
 fn enqueue_missing_loaded_region_prefetch_builds(
@@ -3440,11 +3465,20 @@ fn process_steady_loaded_region_prefetch(
     )
 }
 
-fn loaded_region_prefetch_budget(base_budget: usize, missing_loaded: usize) -> usize {
+fn sliding_window_prefetch_budget(
+    scratch: &PackedGpuGenerationRegionScratch,
+    region_cache: &crate::packed_quad_gpu_generation::GeneratedRegionCache,
+) -> usize {
+    let normal = packed_gpu_generation_prefetch_budget_from_env();
+    let missing_loaded = scratch
+        .loaded_regions
+        .iter()
+        .filter(|(_, _, key)| !region_cache.entries.contains_key(key))
+        .count();
     if missing_loaded == 0 {
-        return 0;
+        return normal;
     }
-    base_budget
+    normal
         .max(missing_loaded)
         .min(SLIDING_WINDOW_PREFETCH_BUDGET_CAP)
 }
@@ -3457,6 +3491,10 @@ fn prefetch_loaded_generated_regions_with_budget(
     build: &GeneratedRegionCacheBuildContext<'_>,
     budget: usize,
 ) -> usize {
+    if budget == 0 {
+        return 0;
+    }
+
     scratch.prefetch_candidates.clear();
     if scratch.prefetch_candidates.capacity() < scratch.loaded_regions.len() {
         scratch
@@ -3474,10 +3512,6 @@ fn prefetch_loaded_generated_regions_with_budget(
     }
 
     if scratch.prefetch_candidates.is_empty() {
-        return 0;
-    }
-    let budget = loaded_region_prefetch_budget(budget, scratch.prefetch_candidates.len());
-    if budget == 0 {
         return 0;
     }
 
@@ -3535,19 +3569,16 @@ fn prefetch_active_generated_regions_with_budget(
         return 0;
     }
 
-    let selected_count = partition_nearest_loaded_regions_for_prefetch(
+    order_loaded_regions_for_prefetch(
         scratch.prefetch_candidates.as_mut_slice(),
-        budget,
         camera_chunk_x,
         camera_chunk_z,
         region_size,
     );
 
     let mut prefetched = 0usize;
-    for (region_origin_x, region_origin_z, region_key) in scratch.prefetch_candidates
-        [..selected_count]
-        .iter()
-        .copied()
+    for (region_origin_x, region_origin_z, region_key) in
+        scratch.prefetch_candidates.iter().copied().take(budget)
     {
         let entry =
             build_generated_region_cache_entry(region_origin_x, region_origin_z, region_key, build);
@@ -3560,13 +3591,16 @@ fn prefetch_active_generated_regions_with_budget(
 
 fn prune_stale_pending_active_region_builds(
     pending: &mut Vec<(i32, i32, u64)>,
-    sorted_active_region_keys: &[u64],
+    active_regions: &[(i32, i32, u64)],
 ) {
     if pending.is_empty() {
         return;
     }
-    pending
-        .retain(|(_, _, region_key)| sorted_active_region_keys.binary_search(region_key).is_ok());
+    let active_keys: HashSet<u64> = active_regions
+        .iter()
+        .map(|(_, _, region_key)| *region_key)
+        .collect();
+    pending.retain(|(_, _, region_key)| active_keys.contains(region_key));
 }
 
 fn queue_pending_active_region_build(
@@ -3597,28 +3631,31 @@ fn process_pending_generated_region_builds(
         return 0;
     }
 
-    pending.retain(|(_, _, region_key)| !region_cache.entries.contains_key(region_key));
-    if pending.is_empty() {
-        return 0;
-    }
-
-    let selected_count = partition_nearest_loaded_regions_for_prefetch(
+    order_loaded_regions_for_prefetch(
         pending.as_mut_slice(),
-        budget,
         camera_chunk_x,
         camera_chunk_z,
         region_size,
     );
 
     let mut built = 0usize;
-    for (region_origin_x, region_origin_z, region_key) in pending[..selected_count].iter().copied()
-    {
-        let entry =
-            build_generated_region_cache_entry(region_origin_x, region_origin_z, region_key, build);
-        region_cache.entries.insert(region_key, entry);
+    pending.retain(|(region_origin_x, region_origin_z, region_key)| {
+        if built >= budget {
+            return true;
+        }
+        if region_cache.entries.contains_key(region_key) {
+            return false;
+        }
+        let entry = build_generated_region_cache_entry(
+            *region_origin_x,
+            *region_origin_z,
+            *region_key,
+            build,
+        );
+        region_cache.entries.insert(*region_key, entry);
         built = built.saturating_add(1);
-    }
-    pending.drain(..selected_count);
+        false
+    });
     built
 }
 
@@ -3636,15 +3673,6 @@ fn sliding_shift_can_update_batches_in_place(
         })
 }
 
-fn fill_carried_generated_batches(
-    carried_batches: &mut HashMap<u64, PackedGpuGenerationBatch>,
-    batches: &[PackedGpuGenerationBatch],
-) {
-    carried_batches.clear();
-    reserve_hash_map_capacity(carried_batches, batches.len());
-    carried_batches.extend(batches.iter().cloned().map(|batch| (batch.key, batch)));
-}
-
 fn apply_sliding_generated_batches_in_place(
     gpu_batches: &mut PackedGpuGenerationBatches,
     carried_batches: &mut HashMap<u64, PackedGpuGenerationBatch>,
@@ -3659,9 +3687,11 @@ fn apply_sliding_generated_batches_in_place(
         sync_gpu_chunk_range_active_flags(&mut batch, active_chunk_keys);
         batches.push(batch);
     }
-    batches.sort_unstable_by_key(|batch| batch.key);
-    let (batch_signature, batch_structure_signature, batch_summary) =
-        PackedGpuGenerationBatches::calculate_batch_metadata(&batches);
+    batches.sort_by_key(|batch| batch.key);
+    let batch_signature = PackedGpuGenerationBatches::calculate_batch_signature(&batches);
+    let batch_structure_signature =
+        PackedGpuGenerationBatches::calculate_batch_structure_signature(&batches);
+    let batch_summary = PackedGpuGenerationBatches::summarize_batches(&batches);
     gpu_batches.batch_signature = batch_signature;
     gpu_batches.batch_structure_signature = batch_structure_signature;
     gpu_batches.summary = batch_summary;
@@ -3778,9 +3808,7 @@ fn assemble_generated_batches_for_active_regions(
         synchronous_builds = synchronous_builds.saturating_add(1);
     }
 
-    scratch
-        .generated_batches
-        .sort_unstable_by_key(|batch| batch.key);
+    scratch.generated_batches.sort_by_key(|batch| batch.key);
     stats
 }
 
@@ -3802,8 +3830,11 @@ fn finalize_generated_batch_update(
         context.prefetched,
     );
 
-    let (batch_signature, batch_structure_signature, batch_summary) =
-        PackedGpuGenerationBatches::calculate_batch_metadata(&scratch.generated_batches);
+    let batch_signature =
+        PackedGpuGenerationBatches::calculate_batch_signature(&scratch.generated_batches);
+    let batch_structure_signature =
+        PackedGpuGenerationBatches::calculate_batch_structure_signature(&scratch.generated_batches);
+    let batch_summary = PackedGpuGenerationBatches::summarize_batches(&scratch.generated_batches);
     let changed = gpu_batches.batch_signature != batch_signature;
 
     gpu_batches.target = Some(context.target);
@@ -3929,13 +3960,8 @@ pub fn update_packed_gpu_generation_regions(
     let view_radius = packed_view_radius_from_env();
     let generated_region_side = region_radius.saturating_mul(2).saturating_add(1).max(1) as usize;
     let loaded_region_capacity = generated_region_side.saturating_mul(generated_region_side);
-    reserve_generated_region_cache_capacity(&mut region_cache, loaded_region_capacity);
     let scratch = &mut *region_scratch;
-    let (active_chunk_count, active_chunk_hash) = fill_active_gpu_generation_chunk_keys(
-        &mut scratch.active_chunk_keys,
-        view_center,
-        view_radius,
-    );
+    fill_active_gpu_generation_chunk_keys(&mut scratch.active_chunk_keys, view_center, view_radius);
     scratch.loaded_region_keys.clear();
     scratch.loaded_regions.clear();
     if scratch.loaded_region_keys.capacity() < loaded_region_capacity {
@@ -3949,19 +3975,12 @@ pub fn update_packed_gpu_generation_regions(
             .reserve(loaded_region_capacity - scratch.loaded_regions.capacity());
     }
     scratch.active_regions.clear();
-    scratch.active_region_keys.clear();
     if scratch.active_regions.capacity() < loaded_region_capacity {
         scratch
             .active_regions
             .reserve(loaded_region_capacity - scratch.active_regions.capacity());
     }
-    if scratch.active_region_keys.capacity() < loaded_region_capacity {
-        scratch
-            .active_region_keys
-            .reserve(loaded_region_capacity - scratch.active_region_keys.capacity());
-    }
 
-    let mut active_region_signature = PackedGpuGenerationKeySignature::default();
     for region_z in -region_radius..=region_radius {
         for region_x in -region_radius..=region_radius {
             let region_origin_x = center_origin_x + region_x * region_size;
@@ -3982,15 +4001,19 @@ pub fn update_packed_gpu_generation_regions(
                 scratch
                     .active_regions
                     .push((region_origin_x, region_origin_z, region_key));
-                scratch.active_region_keys.push(region_key);
-                active_region_signature.push(region_key);
             }
         }
     }
-    scratch.loaded_region_keys.sort_unstable();
-    scratch.active_region_keys.sort_unstable();
     let loaded_regions = scratch.loaded_region_keys.len();
-    let (active_region_count, active_region_hash) = active_region_signature.finish();
+    let (active_region_count, active_region_hash) =
+        PackedGpuGenerationTarget::active_region_signature(
+            scratch
+                .active_regions
+                .iter()
+                .map(|(_, _, region_key)| *region_key),
+        );
+    let (active_chunk_count, active_chunk_hash) =
+        active_gpu_generation_chunk_signature(view_center, view_radius);
     let target = PackedGpuGenerationTarget::new(
         camera_chunk_x,
         camera_chunk_z,
@@ -4037,7 +4060,11 @@ pub fn update_packed_gpu_generation_regions(
             for batch in batches.iter_mut() {
                 sync_gpu_chunk_range_active_flags(batch, &scratch.active_chunk_keys);
             }
-            PackedGpuGenerationBatches::calculate_batch_metadata(batches)
+            (
+                PackedGpuGenerationBatches::calculate_batch_signature(batches),
+                PackedGpuGenerationBatches::calculate_batch_structure_signature(batches),
+                PackedGpuGenerationBatches::summarize_batches(batches),
+            )
         };
         if gpu_batches.batch_signature != batch_signature {
             gpu_batches.batch_signature = batch_signature;
@@ -4071,12 +4098,19 @@ pub fn update_packed_gpu_generation_regions(
     let sync_build_budget = packed_gpu_generation_max_synchronous_builds_from_env();
 
     if sliding_shift {
-        fill_carried_generated_batches(&mut scratch.carried_batches, gpu_batches.batches());
+        scratch.carried_batches.clear();
+        scratch.carried_batches.extend(
+            gpu_batches
+                .batches()
+                .iter()
+                .cloned()
+                .map(|batch| (batch.key, batch)),
+        );
 
         let shift_sync_build_budget = packed_gpu_generation_shift_sync_build_budget_from_env();
         prune_stale_pending_active_region_builds(
             &mut scratch.pending_active_region_builds,
-            scratch.active_region_keys.as_slice(),
+            scratch.active_regions.as_slice(),
         );
         // Warm the new active edge before draining stale pending work so shift frames do not
         // publish incomplete batch sets and trigger multi-frame render-prepare cascades.
@@ -4175,13 +4209,14 @@ pub fn update_packed_gpu_generation_regions(
         return;
     }
 
+    let prefetch_budget = sliding_window_prefetch_budget(scratch, &region_cache);
     let prefetched = prefetch_loaded_generated_regions_with_budget(
         scratch,
         &mut region_cache,
         camera_chunk_x,
         camera_chunk_z,
         &cache_build,
-        packed_gpu_generation_prefetch_budget_from_env(),
+        prefetch_budget,
     );
     let pending_built = process_pending_generated_region_builds(
         &mut scratch.pending_active_region_builds,
@@ -5429,21 +5464,6 @@ mod tests {
         registry
     }
 
-    fn test_gpu_generation_batch(key: u64) -> PackedGpuGenerationBatch {
-        PackedGpuGenerationBatch {
-            key,
-            columns: Arc::new(Vec::new()),
-            chunk_ranges: Arc::new(Vec::new()),
-            params: PackedGpuGenerationParams::new(0, 0, 0, 0, 1, 2, 3),
-            source_chunk_count: 0,
-            max_output_quads: 0,
-            translation: Vec4::ZERO,
-            bounds_min: Vec3::ZERO,
-            bounds_max: Vec3::ZERO,
-            generation: 1,
-        }
-    }
-
     #[test]
     fn packed_quad_block_texture_palette_extract_shares_tiles() {
         let source = PackedQuadBlockTexturePalette::default();
@@ -5623,72 +5643,6 @@ mod tests {
         assert!(cache.entries.contains_key(&loaded_b));
         assert!(!cache.entries.contains_key(&evicted));
         assert_eq!(loaded_region_keys, expected_loaded_region_keys);
-    }
-
-    #[test]
-    fn test_prune_stale_pending_loaded_region_builds_uses_sorted_keys() {
-        let loaded_a = pack_chunk_key(0, 0);
-        let loaded_b = pack_chunk_key(8, 0);
-        let evicted = pack_chunk_key(16, 0);
-        let loaded_region_keys = [loaded_a, loaded_b];
-        let mut pending = vec![(0, 0, loaded_a), (16, 0, evicted), (8, 0, loaded_b)];
-
-        prune_stale_pending_loaded_region_builds(&mut pending, &loaded_region_keys);
-
-        assert_eq!(pending, vec![(0, 0, loaded_a), (8, 0, loaded_b)]);
-    }
-
-    #[test]
-    fn test_prune_stale_pending_active_region_builds_uses_sorted_keys() {
-        let active_a = pack_chunk_key(0, 0);
-        let active_b = pack_chunk_key(8, 0);
-        let inactive = pack_chunk_key(16, 0);
-        let active_region_keys = [active_a, active_b];
-        let mut pending = vec![(16, 0, inactive), (0, 0, active_a), (8, 0, active_b)];
-
-        prune_stale_pending_active_region_builds(&mut pending, &active_region_keys);
-
-        assert_eq!(pending, vec![(0, 0, active_a), (8, 0, active_b)]);
-    }
-
-    #[test]
-    fn test_fill_carried_generated_batches_reuses_capacity() {
-        let mut carried = HashMap::with_capacity(8);
-        let reserved_capacity = carried.capacity();
-        let batches = vec![
-            test_gpu_generation_batch(10),
-            test_gpu_generation_batch(20),
-            test_gpu_generation_batch(30),
-        ];
-
-        fill_carried_generated_batches(&mut carried, &batches);
-
-        assert_eq!(carried.len(), 3);
-        assert_eq!(carried[&10].key, 10);
-        assert_eq!(carried[&20].key, 20);
-        assert_eq!(carried[&30].key, 30);
-        assert_eq!(carried.capacity(), reserved_capacity);
-
-        fill_carried_generated_batches(&mut carried, &[test_gpu_generation_batch(40)]);
-
-        assert_eq!(carried.len(), 1);
-        assert!(carried.contains_key(&40));
-        assert!(!carried.contains_key(&10));
-        assert_eq!(carried.capacity(), reserved_capacity);
-    }
-
-    #[test]
-    fn test_reserve_generated_region_cache_capacity_does_not_shrink() {
-        let mut cache = crate::packed_quad_gpu_generation::GeneratedRegionCache::default();
-
-        reserve_generated_region_cache_capacity(&mut cache, 8);
-        let reserved_capacity = cache.entries.capacity();
-
-        assert!(reserved_capacity >= 8);
-
-        reserve_generated_region_cache_capacity(&mut cache, 1);
-
-        assert_eq!(cache.entries.capacity(), reserved_capacity);
     }
 
     #[test]
@@ -6000,48 +5954,21 @@ mod tests {
     fn test_fill_active_gpu_generation_chunk_keys_reuses_capacity() {
         let mut keys = HashSet::with_capacity(32);
 
-        let radius_two_signature =
-            fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 2);
+        fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 2);
 
         assert_eq!(keys.len(), 13);
-        assert_eq!(
-            radius_two_signature,
-            crate::packed_quad_gpu_generation::active_gpu_generation_chunk_signature(
-                IVec2::new(10, -4),
-                2
-            )
-        );
         assert!(keys.contains(&pack_chunk_key(10, -4)));
         assert!(keys.contains(&pack_chunk_key(12, -4)));
         assert!(!keys.contains(&pack_chunk_key(13, -4)));
 
         let capacity_after_radius_two = keys.capacity();
-        let radius_one_signature =
-            fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 1);
+        fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 1);
 
         assert_eq!(keys.len(), 5);
-        assert_eq!(
-            radius_one_signature,
-            crate::packed_quad_gpu_generation::active_gpu_generation_chunk_signature(
-                IVec2::new(10, -4),
-                1
-            )
-        );
         assert_eq!(keys.capacity(), capacity_after_radius_two);
         assert!(keys.contains(&pack_chunk_key(10, -4)));
         assert!(keys.contains(&pack_chunk_key(11, -4)));
         assert!(!keys.contains(&pack_chunk_key(12, -4)));
-    }
-
-    #[test]
-    fn test_loaded_region_prefetch_budget_expands_to_missing_regions() {
-        assert_eq!(loaded_region_prefetch_budget(1, 3), 3);
-        assert_eq!(loaded_region_prefetch_budget(0, 3), 3);
-        assert_eq!(
-            loaded_region_prefetch_budget(2, SLIDING_WINDOW_PREFETCH_BUDGET_CAP + 8),
-            SLIDING_WINDOW_PREFETCH_BUDGET_CAP
-        );
-        assert_eq!(loaded_region_prefetch_budget(2, 0), 0);
     }
 
     #[test]

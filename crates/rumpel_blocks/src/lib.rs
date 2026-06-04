@@ -137,6 +137,12 @@ impl BlockRegistry {
         id
     }
 
+    pub fn set_texture_mapping(&self, block_id: BlockId, mapping: [u32; 3]) {
+        if let Ok(mut mappings) = self.texture_mappings.write() {
+            mappings.insert(block_id, mapping);
+        }
+    }
+
     #[must_use]
     pub fn material_contract_version(&self) -> u64 {
         let mut block_ids = self.id_to_data.keys().copied().collect::<Vec<_>>();

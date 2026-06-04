@@ -26,7 +26,6 @@ const SURFACE_SHELL_HEIGHT_RADIUS: i32 = 2;
 const SURFACE_EDIT_SCAN_HEADROOM: usize = 24;
 const SURFACE_EDIT_SCAN_MAX_Y: usize = 96;
 const WORLD_GEN_SCRIPT_PATH: &str = "assets/mods/world_gen.lua";
-const LUA_WORLD_GEN_CHUNK: ChunkPos = ChunkPos { x: 0, z: 0 };
 const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
 
 #[must_use]
@@ -38,6 +37,11 @@ pub fn terrain_generation_contract_version() -> u64 {
     hash = fnv64(hash, TERRAIN_HEIGHT_RANGE.to_bits());
     hash = fnv64(hash, DIRT_DEPTH as u64);
     hash = fnv64(hash, CHUNK_SIZE as u64);
+    if let Ok(bytes) = fs::read(WORLD_GEN_SCRIPT_PATH) {
+        for byte in bytes {
+            hash = fnv64(hash, u64::from(byte));
+        }
+    }
     hash.max(1)
 }
 
@@ -529,6 +533,121 @@ pub fn terrain_block_at_height(
     }
 }
 
+#[must_use]
+pub fn is_terrain_shell_block(block: BlockId, palette: TerrainBlockPalette, sand: BlockId) -> bool {
+    block == palette.stone || block == palette.dirt || block == palette.grass || block == sand
+}
+
+#[must_use]
+pub fn terrain_column_top_in_chunk(
+    chunk: &ChunkData,
+    local_x: usize,
+    local_z: usize,
+    palette: TerrainBlockPalette,
+    sand: BlockId,
+) -> TerrainSurfaceSample {
+    for y in (0..CHUNK_SIZE).rev() {
+        let block = chunk.get_block(local_x, y, local_z);
+        if block == palette.air {
+            continue;
+        }
+        if is_terrain_shell_block(block, palette, sand) {
+            return TerrainSurfaceSample {
+                height: y + 1,
+                top_block: block,
+            };
+        }
+    }
+    TerrainSurfaceSample {
+        height: 0,
+        top_block: palette.air,
+    }
+}
+
+#[must_use]
+pub fn terrain_surface_cell_sample_from_chunk_local(
+    chunk: &ChunkData,
+    local_x: usize,
+    local_z: usize,
+    width: usize,
+    depth: usize,
+    palette: TerrainBlockPalette,
+    sand: BlockId,
+) -> TerrainSurfaceSample {
+    let mut height_sum = 0usize;
+    let mut sample_count = 0usize;
+
+    for dz in 0..depth {
+        for dx in 0..width {
+            let x = local_x + dx;
+            let z = local_z + dz;
+            if x >= CHUNK_SIZE || z >= CHUNK_SIZE {
+                continue;
+            }
+            height_sum += terrain_column_top_in_chunk(chunk, x, z, palette, sand).height;
+            sample_count += 1;
+        }
+    }
+
+    if sample_count == 0 {
+        return TerrainSurfaceSample {
+            height: 0,
+            top_block: palette.air,
+        };
+    }
+
+    let height = (height_sum + sample_count / 2) / sample_count;
+    let center_x = (local_x + width / 2).min(CHUNK_SIZE - 1);
+    let center_z = (local_z + depth / 2).min(CHUNK_SIZE - 1);
+    let mut top_block =
+        terrain_column_top_in_chunk(chunk, center_x, center_z, palette, sand).top_block;
+    if top_block == palette.air && height > 0 {
+        top_block = chunk.get_block(center_x, height - 1, center_z);
+    }
+
+    TerrainSurfaceSample { height, top_block }
+}
+
+#[must_use]
+pub fn terrain_surface_cell_sample_from_world_cached(
+    world_x: i32,
+    world_z: i32,
+    width: usize,
+    depth: usize,
+    context: &WorldGenerationContext,
+) -> TerrainSurfaceSample {
+    let chunk_x = world_x.div_euclid(CHUNK_SIZE as i32);
+    let chunk_z = world_z.div_euclid(CHUNK_SIZE as i32);
+    let local_x = usize::try_from(world_x.rem_euclid(CHUNK_SIZE as i32)).unwrap_or(0);
+    let local_z = usize::try_from(world_z.rem_euclid(CHUNK_SIZE as i32)).unwrap_or(0);
+    let sand = context.block_id("sand");
+    let generated =
+        crate::chunk_gen_cache::cached_chunk(ChunkPos::new(chunk_x, chunk_z), context);
+    let sample = terrain_surface_cell_sample_from_chunk_local(
+        &generated.chunk,
+        local_x,
+        local_z,
+        width,
+        depth,
+        context.palette,
+        sand,
+    );
+    if sample.height > 0 {
+        return sample;
+    }
+
+    let perlin = terrain_perlin();
+    terrain_surface_cell_sample_with_noise(
+        world_x,
+        world_z,
+        width,
+        depth,
+        context.palette,
+        sand,
+        &perlin,
+    )
+}
+
 pub fn generate_chunk(pos: ChunkPos, registry: &BlockRegistry) -> ChunkData {
     let context = WorldGenerationContext::from_registry(registry);
     generate_chunk_with_context(pos, &context)
@@ -559,11 +678,32 @@ pub fn generate_chunk_with_context(pos: ChunkPos, context: &WorldGenerationConte
     chunk
 }
 
-fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGenerationContext) {
-    if pos != LUA_WORLD_GEN_CHUNK {
-        return;
-    }
+#[derive(Clone)]
+pub struct GeneratedChunk {
+    pub chunk: ChunkData,
+    pub decor: crate::surface_decor::ChunkDecorOutput,
+}
 
+#[must_use]
+pub fn generate_chunk_uncached(pos: ChunkPos, context: &WorldGenerationContext) -> GeneratedChunk {
+    GeneratedChunk {
+        chunk: generate_chunk_with_context(pos, context),
+        decor: crate::surface_decor::ChunkDecorOutput::default(),
+    }
+}
+
+#[must_use]
+pub fn terrain_surface_cell_height_from_world_cached(
+    world_x: i32,
+    world_z: i32,
+    width: usize,
+    depth: usize,
+    context: &WorldGenerationContext,
+) -> usize {
+    terrain_surface_cell_sample_from_world_cached(world_x, world_z, width, depth, context).height
+}
+
+fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGenerationContext) {
     let Ok(script) = fs::read_to_string(WORLD_GEN_SCRIPT_PATH) else {
         return;
     };

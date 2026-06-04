@@ -10,7 +10,9 @@ use bevy::{
     winit::{WinitPlugin, WinitSettings},
 };
 use profiling::RumpelClientProfilingPlugin;
-use rumpel_player::{Player, PlayerCamera, RumpelPlayerPlugin};
+use rumpel_player::{
+    PLAYER_EYE_HEIGHT, PLAYER_FEET_SURFACE_EPSILON, Player, PlayerCamera, RumpelPlayerPlugin,
+};
 use rumpel_prelude::*;
 use std::{num::NonZeroU32, time::Duration};
 
@@ -38,10 +40,6 @@ const CAMERA_PITCH_RADIANS_ENV: &str = "RUMPEL_CAMERA_PITCH_RADIANS";
 const CAMERA_YAW_RADIANS_ENV: &str = "RUMPEL_CAMERA_YAW_RADIANS";
 const START_PLAYER_X: f32 = 8.0;
 const START_PLAYER_Z: f32 = 24.0;
-const START_PLAYER_CLEARANCE: f32 = 8.0;
-const START_CAMERA_PITCH_RADIANS: f32 = -0.65;
-const COMPUTE_START_PLAYER_CLEARANCE: f32 = 18.0;
-const COMPUTE_START_CAMERA_PITCH_RADIANS: f32 = -0.42;
 const PACKED_START_PLAYER_CLEARANCE: f32 = 56.0;
 const PACKED_START_CAMERA_PITCH_RADIANS: f32 = -0.36;
 const DEFAULT_PRESENT_MODE: PresentMode = PresentMode::Immediate;
@@ -341,29 +339,22 @@ fn setup_camera_and_light(
         );
     }
 
-    let (default_clearance, default_pitch) = if render_mode_value
-        .is_some_and(|mode| mode == rumpel_render::RumpelRenderMode::ComputePrototype)
-    {
-        (
-            COMPUTE_START_PLAYER_CLEARANCE,
-            COMPUTE_START_CAMERA_PITCH_RADIANS,
-        )
-    } else if render_mode_value
-        .is_some_and(|mode| mode == rumpel_render::RumpelRenderMode::PackedPrototype)
-    {
-        (
-            PACKED_START_PLAYER_CLEARANCE,
-            PACKED_START_CAMERA_PITCH_RADIANS,
-        )
-    } else {
-        (START_PLAYER_CLEARANCE, START_CAMERA_PITCH_RADIANS)
-    };
+    let (default_clearance, default_pitch) = (
+        PACKED_START_PLAYER_CLEARANCE,
+        PACKED_START_CAMERA_PITCH_RADIANS,
+    );
     let start_x = env_f32(CAMERA_START_X_ENV).unwrap_or(START_PLAYER_X);
     let start_z = env_f32(CAMERA_START_Z_ENV).unwrap_or(START_PLAYER_Z);
     let start_clearance = env_f32(CAMERA_CLEARANCE_ENV).unwrap_or(default_clearance);
     let camera_pitch = env_f32(CAMERA_PITCH_RADIANS_ENV).unwrap_or(default_pitch);
     let camera_yaw = env_f32(CAMERA_YAW_RADIANS_ENV).unwrap_or(0.0);
-    let start_y = terrain_height_at(start_x as i32, start_z as i32) as f32 + start_clearance;
+    let surface_y = terrain_height_at(start_x as i32, start_z as i32) as f32;
+    // Legacy profile env treats clearance as eye height above terrain; gameplay uses feet on surface.
+    let start_y = if start_clearance > 1.0 {
+        surface_y + start_clearance - PLAYER_EYE_HEIGHT
+    } else {
+        surface_y + start_clearance.max(PLAYER_FEET_SURFACE_EPSILON)
+    };
     let camera_rotation = Quat::from_rotation_y(camera_yaw) * Quat::from_rotation_x(camera_pitch);
     let headless_render_target =
         headless_render_enabled().then(|| create_headless_render_target(&mut images));
@@ -380,7 +371,11 @@ fn setup_camera_and_light(
         .with_children(|parent| {
             let mut camera = parent.spawn((
                 Camera3d::default(),
-                Transform::from_xyz(0.0, 0.5, 0.0).with_rotation(camera_rotation),
+                Projection::Perspective(PerspectiveProjection {
+                    fov: 80.0_f32.to_radians(),
+                    ..default()
+                }),
+                Transform::from_xyz(0.0, PLAYER_EYE_HEIGHT, 0.0).with_rotation(camera_rotation),
                 GlobalTransform::default(),
                 Visibility::default(),
                 InheritedVisibility::default(),

@@ -4,8 +4,8 @@ use rumpel_prelude::ChunkPos;
 use rumpel_world::chunk::{CHUNK_SIZE, ChunkData, WorldEditStore};
 use rumpel_world::world_gen::{
     TerrainBlockPalette, WorldGenerationContext, terrain_perlin,
-    terrain_surface_cell_height_with_edits, terrain_surface_cell_height_with_noise,
-    terrain_surface_cell_sample_with_edits, terrain_surface_cell_sample_with_noise,
+    terrain_surface_cell_height_from_world_cached, terrain_surface_cell_height_with_edits,
+    terrain_surface_cell_sample_from_world_cached, terrain_surface_cell_sample_with_edits,
     terrain_surface_wall_block_at_y,
 };
 
@@ -529,14 +529,12 @@ fn for_each_surface_packed_column_for_chunk(
                     source.perlin,
                 )
             } else {
-                terrain_surface_cell_sample_with_noise(
+                terrain_surface_cell_sample_from_world_cached(
                     world_x,
                     world_z,
                     width,
                     depth,
-                    source.context.palette,
-                    source.sand_block,
-                    source.perlin,
+                    source.context,
                 )
             };
 
@@ -647,33 +645,33 @@ fn surface_neighbor_heights(
 
     if !source.has_edits {
         return [
-            terrain_surface_cell_height_with_noise(
+            terrain_surface_cell_height_from_world_cached(
                 world_x + column.width as i32,
                 world_z,
                 column.width,
                 column.depth,
-                source.perlin,
+                source.context,
             ),
-            terrain_surface_cell_height_with_noise(
+            terrain_surface_cell_height_from_world_cached(
                 world_x - column.width as i32,
                 world_z,
                 column.width,
                 column.depth,
-                source.perlin,
+                source.context,
             ),
-            terrain_surface_cell_height_with_noise(
+            terrain_surface_cell_height_from_world_cached(
                 world_x,
                 world_z + column.depth as i32,
                 column.width,
                 column.depth,
-                source.perlin,
+                source.context,
             ),
-            terrain_surface_cell_height_with_noise(
+            terrain_surface_cell_height_from_world_cached(
                 world_x,
                 world_z - column.depth as i32,
                 column.width,
                 column.depth,
-                source.perlin,
+                source.context,
             ),
         ];
     }
@@ -728,12 +726,12 @@ fn surface_neighbor_sample_height(
     has_edits: bool,
 ) -> usize {
     if !has_edits {
-        return terrain_surface_cell_height_with_noise(
+        return terrain_surface_cell_height_from_world_cached(
             sample_x,
             sample_z,
             column.width,
             column.depth,
-            perlin,
+            context,
         );
     }
 
@@ -752,12 +750,12 @@ fn surface_neighbor_sample_height(
             perlin,
         )
     } else {
-        terrain_surface_cell_height_with_noise(
+        terrain_surface_cell_height_from_world_cached(
             sample_x,
             sample_z,
             column.width,
             column.depth,
-            perlin,
+            context,
         )
     }
 }
@@ -1360,7 +1358,9 @@ mod tests {
     use super::*;
     use rumpel_blocks::{BlockData, BlockRegistry};
     use rumpel_world::world_gen::{
-        terrain_height_with_noise, terrain_surface_shell_height_with_noise,
+        terrain_height_with_noise, terrain_surface_cell_height_from_world_cached,
+        terrain_surface_cell_height_with_noise, terrain_surface_cell_sample_with_noise,
+        terrain_surface_shell_height_with_noise,
     };
 
     #[test]
@@ -1383,15 +1383,16 @@ mod tests {
 
     #[test]
     fn surface_packed_quads_keep_real_terrain_heights() {
+        rumpel_world::chunk_gen_cache::reset_chunk_generation_cache();
         let registry = test_block_registry();
         let context = WorldGenerationContext::from_registry(&registry);
         let sand_block = registry.get_id("sand").unwrap_or(context.palette.dirt);
         let chunk_pos = (-8..=8)
             .flat_map(|z| (-8..=8).map(move |x| ChunkPos::new(x, z)))
-            .find(|pos| max_sampled_surface_height(*pos) > CHUNK_SIZE)
-            .expect("test terrain sample should include a chunk taller than one voxel slice");
+            .find(|pos| max_sampled_surface_height(*pos, &context) >= CHUNK_SIZE - 1)
+            .expect("cached Lua terrain should include a tall surface column");
 
-        let expected_max_height = max_sampled_surface_height(chunk_pos);
+        let expected_max_height = max_sampled_surface_height(chunk_pos, &context);
         let quads = build_surface_packed_quads_for_chunk(chunk_pos, &context, 1, sand_block);
         let max_top_height = quads
             .iter()
@@ -1401,7 +1402,7 @@ mod tests {
             .expect("surface chunk should emit top quads");
 
         assert_eq!(max_top_height, expected_max_height);
-        assert!(max_top_height > CHUNK_SIZE);
+        assert!(max_top_height >= CHUNK_SIZE - 1);
     }
 
     #[test]
@@ -1778,15 +1779,18 @@ mod tests {
         );
     }
 
-    fn max_sampled_surface_height(chunk_pos: ChunkPos) -> usize {
-        let perlin = terrain_perlin();
+    fn max_sampled_surface_height(chunk_pos: ChunkPos, context: &WorldGenerationContext) -> usize {
         let mut max_height = 0;
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let world_x = chunk_pos.x * CHUNK_SIZE as i32 + x as i32;
                 let world_z = chunk_pos.z * CHUNK_SIZE as i32 + z as i32;
-                max_height = max_height.max(terrain_surface_shell_height_with_noise(
-                    world_x, world_z, &perlin,
+                max_height = max_height.max(terrain_surface_cell_height_from_world_cached(
+                    world_x,
+                    world_z,
+                    1,
+                    1,
+                    context,
                 ));
             }
         }

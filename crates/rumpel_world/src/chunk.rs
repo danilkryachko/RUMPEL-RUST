@@ -206,6 +206,7 @@ impl WorldBlockEditKey {
 }
 
 #[derive(Resource, Default)]
+#[derive(Clone)]
 pub struct WorldEditStore {
     edits: HashMap<WorldBlockEditKey, BlockId>,
     generation: u64,
@@ -298,6 +299,28 @@ impl WorldEditStore {
             let Ok(y) = usize::try_from(world_y - y_base) else {
                 continue;
             };
+            let x = usize::from(key.local_pos.x);
+            let z = usize::from(key.local_pos.z);
+            chunk.set_block(x, y, z, block);
+            applied += 1;
+        }
+
+        applied
+    }
+
+    pub fn apply_all_edits_to_chunk(&self, chunk_pos: ChunkPos, chunk: &mut ChunkData) -> usize {
+        let mut applied = 0;
+
+        for (&key, &block) in &self.edits {
+            if key.chunk_pos != chunk_pos {
+                continue;
+            }
+
+            let y = usize::from(key.local_pos.y);
+            if y >= CHUNK_SIZE {
+                continue;
+            }
+
             let x = usize::from(key.local_pos.x);
             let z = usize::from(key.local_pos.z);
             chunk.set_block(x, y, z, block);

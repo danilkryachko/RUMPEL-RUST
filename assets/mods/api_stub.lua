@@ -1,5 +1,10 @@
 ---@meta
 
+---@class BlockTextures
+---@field top integer
+---@field side integer
+---@field bottom integer
+
 ---@class BlockDefinition
 ---@field id string
 ---@field name string
@@ -8,6 +13,7 @@
 ---@field color number[]
 ---@field gravity_affected? boolean
 ---@field strength? number
+---@field textures? BlockTextures|integer[] # atlas tile indices: {top=N,side=N,bottom=N} or {N,N,N}
 
 ---@class StructureBlock
 ---@field dx integer

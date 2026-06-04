@@ -8,7 +8,13 @@ use std::path::Path;
 use std::rc::Rc;
 
 const MODS_DIR: &str = "assets/mods";
-const NON_STARTUP_LUA_FILES: &[&str] = &["api_stub.lua", "world_gen.lua"];
+const NON_STARTUP_LUA_FILES: &[&str] = &[
+    "api_stub.lua",
+    "world_gen.lua",
+    "biomes.lua",
+    "terrain.lua",
+    "decor.lua",
+];
 
 #[derive(Debug, Clone)]
 pub struct LuaBlockDefinition {
@@ -19,6 +25,9 @@ pub struct LuaBlockDefinition {
     pub color: (f32, f32, f32, f32),
     pub gravity_affected: Option<bool>,
     pub strength: Option<f32>,
+    /// Atlas tile indices [top, side, bottom]. When present, overrides the
+    /// hardcoded match in `BlockRegistry::register_block`.
+    pub textures: Option<[u32; 3]>,
 }
 
 impl From<LuaBlockDefinition> for BlockData {
@@ -97,8 +106,21 @@ pub fn load_lua_mods(mut commands: Commands, mut block_registry: ResMut<BlockReg
         end
         function trigger_behavior(block_id, event_name, ...)
             local callbacks = Behaviors[block_id]
-            if callbacks and callbacks[event_name] then
-                callbacks[event_name](...)
+            if not callbacks then
+                return
+            end
+            local handler = callbacks[event_name]
+            if not handler and event_name == "on_broken" then
+                handler = callbacks.on_block_break
+            elseif not handler and event_name == "on_block_break" then
+                handler = callbacks.on_broken
+            elseif not handler and event_name == "on_placed" then
+                handler = callbacks.on_block_place
+            elseif not handler and event_name == "on_block_place" then
+                handler = callbacks.on_placed
+            end
+            if handler then
+                handler(...)
             end
         end
 
@@ -196,6 +218,13 @@ pub fn load_lua_mods(mut commands: Commands, mut block_registry: ResMut<BlockReg
     let register_block_blocks = Rc::clone(&registered_blocks);
     let register_block = lua.create_function(move |_, table: Table| {
         let color_table: Table = table.get("color")?;
+        let textures: Option<[u32; 3]> =
+            table.get::<Table>("textures").ok().and_then(|t| {
+                let top = t.get::<u32>("top").or_else(|_| t.get::<u32>(1)).ok()?;
+                let side = t.get::<u32>("side").or_else(|_| t.get::<u32>(2)).ok()?;
+                let bottom = t.get::<u32>("bottom").or_else(|_| t.get::<u32>(3)).ok()?;
+                Some([top, side, bottom])
+            });
         let block = LuaBlockDefinition {
             id: table.get("id")?,
             name: table.get("name")?,
@@ -209,6 +238,7 @@ pub fn load_lua_mods(mut commands: Commands, mut block_registry: ResMut<BlockReg
             ),
             gravity_affected: table.get("gravity_affected").ok(),
             strength: table.get("strength").ok(),
+            textures,
         };
 
         register_block_blocks.borrow_mut().push(block);
@@ -265,11 +295,16 @@ pub fn load_lua_mods(mut commands: Commands, mut block_registry: ResMut<BlockReg
     if Path::new(mods_dir).exists()
         && let Ok(entries) = fs::read_dir(mods_dir)
     {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if is_startup_lua_mod(&path)
-                && let Ok(script) = fs::read_to_string(&path)
-            {
+        let mut paths: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| is_startup_lua_mod(p))
+            .collect();
+        paths.sort_unstable_by(|a, b| {
+            a.file_name().cmp(&b.file_name())
+        });
+        for path in paths {
+            if let Ok(script) = fs::read_to_string(&path) {
                 if let Err(e) = lua.load(&script).exec() {
                     error!("MODS: Error running mod script {}: {:?}", path.display(), e);
                 } else {
@@ -282,7 +317,11 @@ pub fn load_lua_mods(mut commands: Commands, mut block_registry: ResMut<BlockReg
 
     // 5. Register mod-defined blocks into Rumpel's core BlockRegistry
     for block in registered_blocks.borrow_mut().drain(..) {
+        let textures = block.textures;
         let id = block_registry.register_block(block.into());
+        if let Some(mapping) = textures {
+            block_registry.set_texture_mapping(id, mapping);
+        }
         info!("MODS: Registered mod block with numeric id {id}");
     }
 
@@ -314,13 +353,14 @@ pub fn load_lua_mod_directory(
     let entries = fs::read_dir(mods_dir)
         .map_err(|error| format!("could not read {}: {error}", mods_dir.display()))?;
 
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("could not read mod entry: {error}"))?;
-        let path = entry.path();
-        if !is_startup_lua_mod(&path) {
-            continue;
-        }
+    let mut paths: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| is_startup_lua_mod(p))
+        .collect();
+    paths.sort_unstable_by(|a, b| a.file_name().cmp(&b.file_name()));
 
+    for path in paths {
         let script = fs::read_to_string(&path)
             .map_err(|error| format!("could not read {}: {error}", path.display()))?;
         run_lua_mod(&script, registry).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -339,6 +379,13 @@ pub fn run_lua_mod(script: &str, registry: &mut ModRegistry) -> mlua::Result<()>
     let register_block_blocks = Rc::clone(&registered_blocks);
     let register_block = lua.create_function(move |_, table: Table| {
         let color_table: Table = table.get("color")?;
+        let textures: Option<[u32; 3]> =
+            table.get::<Table>("textures").ok().and_then(|t| {
+                let top = t.get::<u32>("top").or_else(|_| t.get::<u32>(1)).ok()?;
+                let side = t.get::<u32>("side").or_else(|_| t.get::<u32>(2)).ok()?;
+                let bottom = t.get::<u32>("bottom").or_else(|_| t.get::<u32>(3)).ok()?;
+                Some([top, side, bottom])
+            });
         let block = LuaBlockDefinition {
             id: table.get("id")?,
             name: table.get("name")?,
@@ -352,6 +399,7 @@ pub fn run_lua_mod(script: &str, registry: &mut ModRegistry) -> mlua::Result<()>
             ),
             gravity_affected: table.get("gravity_affected").ok(),
             strength: table.get("strength").ok(),
+            textures,
         };
 
         register_block_blocks.borrow_mut().push(block);
@@ -419,6 +467,128 @@ fn is_startup_lua_mod(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// Minimal prelude that sets up Behaviors and trigger_behavior with aliasing.
+    const MINI_PRELUDE: &str = r#"
+        Behaviors = {}
+        function register_behavior(block_id, callbacks)
+            Behaviors[block_id] = callbacks
+        end
+        function trigger_behavior(block_id, event_name, ...)
+            local callbacks = Behaviors[block_id]
+            if not callbacks then return end
+            local handler = callbacks[event_name]
+            if not handler and event_name == "on_broken" then
+                handler = callbacks.on_block_break
+            elseif not handler and event_name == "on_block_break" then
+                handler = callbacks.on_broken
+            elseif not handler and event_name == "on_placed" then
+                handler = callbacks.on_block_place
+            elseif not handler and event_name == "on_block_place" then
+                handler = callbacks.on_placed
+            end
+            if handler then handler(...) end
+        end
+        function spawn_particle(...) end
+    "#;
+
+    #[test]
+    fn trigger_behavior_calls_on_block_break_handler() {
+        let lua = Lua::new();
+        lua.load(MINI_PRELUDE).exec().unwrap();
+        lua.load(
+            r#"
+            _LastPos = nil
+            register_behavior("test_ore", {
+                on_block_break = function(x, y, z)
+                    _LastPos = { x = x, y = y, z = z }
+                end
+            })
+            trigger_behavior("test_ore", "on_block_break", 5, 10, 15)
+        "#,
+        )
+        .exec()
+        .expect("trigger_behavior must call the handler");
+
+        let pos: mlua::Table = lua
+            .globals()
+            .get("_LastPos")
+            .expect("on_block_break handler must have set _LastPos");
+        assert_eq!(pos.get::<i32>("x").unwrap(), 5);
+        assert_eq!(pos.get::<i32>("y").unwrap(), 10);
+        assert_eq!(pos.get::<i32>("z").unwrap(), 15);
+    }
+
+    #[test]
+    fn trigger_behavior_aliases_on_broken_to_on_block_break() {
+        let lua = Lua::new();
+        lua.load(MINI_PRELUDE).exec().unwrap();
+        lua.load(
+            r#"
+            _AliasWorked = false
+            register_behavior("legacy_block", {
+                on_broken = function(x, y, z)
+                    _AliasWorked = true
+                end
+            })
+            -- Rust fires "on_block_break"; legacy mod only defines "on_broken".
+            trigger_behavior("legacy_block", "on_block_break", 0, 0, 0)
+        "#,
+        )
+        .exec()
+        .expect("alias test should succeed");
+
+        let alias_worked: bool = lua.globals().get("_AliasWorked").unwrap();
+        assert!(alias_worked, "on_broken must be called when on_block_break is triggered");
+    }
+
+    #[test]
+    fn trigger_behavior_aliases_on_placed_to_on_block_place() {
+        let lua = Lua::new();
+        lua.load(MINI_PRELUDE).exec().unwrap();
+        lua.load(
+            r#"
+            _PlaceWorked = false
+            register_behavior("legacy_block", {
+                on_placed = function(x, y, z)
+                    _PlaceWorked = true
+                end
+            })
+            trigger_behavior("legacy_block", "on_block_place", 0, 0, 0)
+        "#,
+        )
+        .exec()
+        .expect("place alias test should succeed");
+
+        let worked: bool = lua.globals().get("_PlaceWorked").unwrap();
+        assert!(worked, "on_placed must be called when on_block_place is triggered");
+    }
+
+    #[test]
+    fn trigger_behavior_chain_reaction_lua_side() {
+        let lua = Lua::new();
+        lua.load(MINI_PRELUDE).exec().unwrap();
+        lua.load(
+            r#"
+            _ChainCount = 0
+            register_behavior("chain_block", {
+                on_block_break = function(x, y, z)
+                    _ChainCount = _ChainCount + 1
+                    -- Trigger one nested chain call (stops at depth 1 to avoid infinite loop)
+                    if _ChainCount == 1 then
+                        trigger_behavior("chain_block", "on_block_break", x + 1, y, z)
+                    end
+                end
+            })
+            trigger_behavior("chain_block", "on_block_break", 10, 5, 10)
+        "#,
+        )
+        .exec()
+        .expect("chain reaction test should succeed");
+
+        let count: i32 = lua.globals().get("_ChainCount").unwrap();
+        assert_eq!(count, 2, "chain reaction must call handler twice (initial + one nested)");
+    }
+
     #[test]
     fn lua_mod_can_register_block_definition() {
         let mut registry = ModRegistry::default();
@@ -444,6 +614,53 @@ mod tests {
         assert_eq!(blocks[0].id, "ruby_ore");
         assert_eq!(blocks[0].color, (0.9, 0.05, 0.12, 1.0));
         assert_eq!(blocks[0].strength, Some(3.5));
+        assert_eq!(blocks[0].textures, None);
+    }
+
+    #[test]
+    fn lua_mod_can_register_block_with_named_textures() {
+        let mut registry = ModRegistry::default();
+
+        run_lua_mod(
+            r#"
+            register_block({
+                id = "emerald_ore",
+                name = "Emerald Ore",
+                is_solid = true,
+                is_transparent = false,
+                color = { 0.1, 0.9, 0.4, 1.0 },
+                textures = { top = 13, side = 13, bottom = 13 },
+            })
+            "#,
+            &mut registry,
+        )
+        .expect("Lua mod should register a block with named textures");
+
+        let blocks: Vec<_> = registry.drain_blocks().collect();
+        assert_eq!(blocks[0].textures, Some([13, 13, 13]));
+    }
+
+    #[test]
+    fn lua_mod_can_register_block_with_array_textures() {
+        let mut registry = ModRegistry::default();
+
+        run_lua_mod(
+            r#"
+            register_block({
+                id = "grass",
+                name = "Grass",
+                is_solid = true,
+                is_transparent = false,
+                color = { 0.2, 0.8, 0.2, 1.0 },
+                textures = { 0, 1, 2 },
+            })
+            "#,
+            &mut registry,
+        )
+        .expect("Lua mod should register a block with array textures");
+
+        let blocks: Vec<_> = registry.drain_blocks().collect();
+        assert_eq!(blocks[0].textures, Some([0, 1, 2]));
     }
 
     #[test]
