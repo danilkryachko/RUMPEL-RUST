@@ -275,6 +275,15 @@ impl PackedGpuDispatchedChunkState {
             arena_capacity_quads: allocation.capacity_quads,
         }
     }
+
+    fn matches_allocation(
+        self,
+        allocation: crate::packed_quad_buffer::PackedQuadArenaAllocation,
+    ) -> bool {
+        self.arena_offset_quads == allocation.offset_quads
+            && self.arena_len_quads == allocation.len_quads
+            && self.arena_capacity_quads == allocation.capacity_quads
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -309,6 +318,17 @@ fn chunk_needs_gpu_generation(
             batch_generation,
             allocation,
         ))
+}
+
+fn retain_dispatched_gpu_generation_chunks(
+    dispatched: &mut HashMap<u64, PackedGpuDispatchedChunkState>,
+    allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+) {
+    dispatched.retain(|chunk_key, dispatched_state| {
+        allocations
+            .get(chunk_key)
+            .is_some_and(|allocation| dispatched_state.matches_allocation(*allocation))
+    });
 }
 
 fn collect_active_gpu_generation_ranges(
@@ -1072,6 +1092,10 @@ fn refresh_structure_stable_gpu_generated_prepare(
         .capacity_quads
         .saturating_sub(batch_summary.total_max_output_quads);
 
+    retain_dispatched_gpu_generation_chunks(
+        &mut prepared.chunk_dispatched_generation,
+        &arena.allocations,
+    );
     collect_active_gpu_generation_jobs(
         &arena.allocations,
         &prepared.chunk_dispatched_generation,
@@ -1390,6 +1414,10 @@ fn prepare_packed_gpu_generated_draw(
     if !allocation_unchanged {
         std::mem::swap(&mut arena.allocations, &mut buffers.allocation_plan);
     }
+    retain_dispatched_gpu_generation_chunks(
+        &mut prepared.chunk_dispatched_generation,
+        &arena.allocations,
+    );
     arena.next_free_quads = next_free_quads;
     arena.stats.used_quads = batch_summary.total_max_output_quads;
     arena.stats.allocated_slot_quads = next_free_quads;
@@ -3569,6 +3597,39 @@ mod tests {
             &dispatched
         ));
         assert!(chunk_needs_gpu_generation(11, 1, allocation, &dispatched));
+    }
+
+    #[test]
+    fn retain_dispatched_gpu_generation_chunks_drops_evicted_or_moved_slots() {
+        let allocation = |key, offset_quads| crate::packed_quad_buffer::PackedQuadArenaAllocation {
+            key,
+            offset_quads,
+            len_quads: 7,
+            capacity_quads: 32,
+            generation: 3,
+        };
+
+        let mut dispatched = HashMap::from([
+            (
+                10,
+                PackedGpuDispatchedChunkState::new(3, allocation(10, 16)),
+            ),
+            (
+                11,
+                PackedGpuDispatchedChunkState::new(3, allocation(11, 64)),
+            ),
+            (
+                12,
+                PackedGpuDispatchedChunkState::new(3, allocation(12, 96)),
+            ),
+        ]);
+        let allocations = HashMap::from([(10, allocation(10, 16)), (11, allocation(11, 128))]);
+
+        retain_dispatched_gpu_generation_chunks(&mut dispatched, &allocations);
+
+        assert!(dispatched.contains_key(&10));
+        assert!(!dispatched.contains_key(&11));
+        assert!(!dispatched.contains_key(&12));
     }
 
     #[test]
