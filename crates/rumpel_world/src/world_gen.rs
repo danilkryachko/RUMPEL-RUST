@@ -885,10 +885,14 @@ pub fn generate_chunk_with_context(pos: ChunkPos, context: &WorldGenerationConte
             let height = terrain_height_with_noise(global_x, global_z, &perlin);
             let biome = terrain_biome_at(global_x, global_z);
             let surface_block = terrain_biome_surface_block(biome, height, surface_blocks);
+            // Clamp the surface row to the chunk ceiling so canyon mesas and
+            // mountain columns whose computed height > CHUNK_SIZE still receive
+            // a biome surface block instead of bare stone at the top.
+            let surface_y = height.saturating_sub(1).min(CHUNK_SIZE - 1);
 
             for y in 0..CHUNK_SIZE {
                 let mut block_id = terrain_block_at_height(y, height, context.palette);
-                if block_id == context.palette.grass && y + 1 == height {
+                if y == surface_y && y < height {
                     block_id = surface_block;
                 }
                 if block_id != context.palette.air {
