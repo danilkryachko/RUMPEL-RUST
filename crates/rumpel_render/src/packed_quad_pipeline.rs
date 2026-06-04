@@ -3349,6 +3349,13 @@ fn loaded_region_cache_is_warm(
             .all(|(_, _, key)| region_cache.entries.contains_key(key))
 }
 
+fn reserve_generated_region_cache_capacity(
+    region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
+    loaded_region_capacity: usize,
+) {
+    reserve_hash_map_capacity(&mut region_cache.entries, loaded_region_capacity);
+}
+
 fn maybe_process_steady_loaded_region_prefetch(
     scratch: &mut PackedGpuGenerationRegionScratch,
     region_cache: &mut crate::packed_quad_gpu_generation::GeneratedRegionCache,
@@ -3924,6 +3931,7 @@ pub fn update_packed_gpu_generation_regions(
     let view_radius = packed_view_radius_from_env();
     let generated_region_side = region_radius.saturating_mul(2).saturating_add(1).max(1) as usize;
     let loaded_region_capacity = generated_region_side.saturating_mul(generated_region_side);
+    reserve_generated_region_cache_capacity(&mut region_cache, loaded_region_capacity);
     let scratch = &mut *region_scratch;
     let (active_chunk_count, active_chunk_hash) = fill_active_gpu_generation_chunk_keys(
         &mut scratch.active_chunk_keys,
@@ -5673,6 +5681,20 @@ mod tests {
         assert!(carried.contains_key(&40));
         assert!(!carried.contains_key(&10));
         assert_eq!(carried.capacity(), reserved_capacity);
+    }
+
+    #[test]
+    fn test_reserve_generated_region_cache_capacity_does_not_shrink() {
+        let mut cache = crate::packed_quad_gpu_generation::GeneratedRegionCache::default();
+
+        reserve_generated_region_cache_capacity(&mut cache, 8);
+        let reserved_capacity = cache.entries.capacity();
+
+        assert!(reserved_capacity >= 8);
+
+        reserve_generated_region_cache_capacity(&mut cache, 1);
+
+        assert_eq!(cache.entries.capacity(), reserved_capacity);
     }
 
     #[test]
