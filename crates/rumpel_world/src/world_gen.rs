@@ -1,5 +1,8 @@
 use crate::chunk::{CHUNK_SIZE, ChunkData, WorldEditStore};
-use bevy::{platform::collections::HashMap, prelude::error};
+use bevy::{
+    platform::collections::HashMap,
+    prelude::{error, info},
+};
 use noise::{NoiseFn, Perlin};
 use rumpel_blocks::AIR_BLOCK_ID;
 use rumpel_blocks::{BlockId, BlockRegistry};
@@ -10,6 +13,12 @@ const TERRAIN_SEED: u32 = 1337;
 const TERRAIN_NOISE_SCALE: f64 = 0.02;
 const TERRAIN_BASE_HEIGHT: f64 = 10.0;
 const TERRAIN_HEIGHT_RANGE: f64 = 40.0;
+const BIOME_TEMPERATURE_SEED: u32 = 21_337;
+const BIOME_HUMIDITY_SEED: u32 = 31_337;
+const BIOME_NOISE_SCALE: f64 = 0.006;
+const BIOME_MOUNTAIN_HEIGHT_THRESHOLD: usize = 38;
+const BIOME_FOREST_HUMIDITY_THRESHOLD: f32 = 0.58;
+const BIOME_ROUGHNESS_THRESHOLD: f32 = 0.26;
 const DIRT_DEPTH: usize = 3;
 pub const SURFACE_BEACH_HEIGHT_THRESHOLD: usize = 14;
 const SURFACE_SHELL_HEIGHT_KERNEL: [usize; 5] = [1, 4, 6, 4, 1];
@@ -18,6 +27,7 @@ const SURFACE_EDIT_SCAN_HEADROOM: usize = 24;
 const SURFACE_EDIT_SCAN_MAX_Y: usize = 96;
 const WORLD_GEN_SCRIPT_PATH: &str = "assets/mods/world_gen.lua";
 const LUA_WORLD_GEN_CHUNK: ChunkPos = ChunkPos { x: 0, z: 0 };
+const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
 
 #[must_use]
 pub fn terrain_generation_contract_version() -> u64 {
@@ -113,6 +123,40 @@ pub struct TerrainSurfaceSample {
     pub top_block: BlockId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerrainBiome {
+    Beach,
+    Plains,
+    Forest,
+    Mountains,
+}
+
+impl TerrainBiome {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Beach => "beach",
+            Self::Plains => "plains",
+            Self::Forest => "forest",
+            Self::Mountains => "mountains",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldTerrainSample {
+    pub global_x: i32,
+    pub global_z: i32,
+    pub height: usize,
+    pub chunk_height: usize,
+    pub biome: TerrainBiome,
+    pub surface_block: BlockId,
+    pub subsurface_block: BlockId,
+    pub temperature: f32,
+    pub humidity: f32,
+    pub roughness: f32,
+}
+
 #[must_use]
 pub fn terrain_height_at(global_x: i32, global_z: i32) -> usize {
     let perlin = Perlin::new(TERRAIN_SEED);
@@ -132,6 +176,94 @@ pub fn terrain_height_with_noise(global_x: i32, global_z: i32, perlin: &Perlin) 
 #[must_use]
 pub fn terrain_perlin() -> Perlin {
     Perlin::new(TERRAIN_SEED)
+}
+
+#[must_use]
+pub fn terrain_temperature_at(global_x: i32, global_z: i32) -> f32 {
+    normalized_perlin_sample(
+        global_x,
+        global_z,
+        BIOME_NOISE_SCALE,
+        &Perlin::new(BIOME_TEMPERATURE_SEED),
+    )
+}
+
+#[must_use]
+pub fn terrain_humidity_at(global_x: i32, global_z: i32) -> f32 {
+    normalized_perlin_sample(
+        global_x,
+        global_z,
+        BIOME_NOISE_SCALE,
+        &Perlin::new(BIOME_HUMIDITY_SEED),
+    )
+}
+
+#[must_use]
+pub fn terrain_roughness_at(global_x: i32, global_z: i32) -> f32 {
+    let center = terrain_height_at(global_x, global_z);
+    let neighbor_delta = [
+        terrain_height_at(global_x + 2, global_z),
+        terrain_height_at(global_x - 2, global_z),
+        terrain_height_at(global_x, global_z + 2),
+        terrain_height_at(global_x, global_z - 2),
+    ]
+    .into_iter()
+    .map(|height| height.abs_diff(center))
+    .max()
+    .unwrap_or(0);
+
+    (neighbor_delta as f32 / TERRAIN_HEIGHT_RANGE as f32).clamp(0.0, 1.0)
+}
+
+#[must_use]
+pub fn terrain_biome_at(global_x: i32, global_z: i32) -> TerrainBiome {
+    let height = terrain_height_at(global_x, global_z);
+    if height <= SURFACE_BEACH_HEIGHT_THRESHOLD {
+        return TerrainBiome::Beach;
+    }
+
+    let roughness = terrain_roughness_at(global_x, global_z);
+    if height >= BIOME_MOUNTAIN_HEIGHT_THRESHOLD || roughness >= BIOME_ROUGHNESS_THRESHOLD {
+        return TerrainBiome::Mountains;
+    }
+
+    if terrain_humidity_at(global_x, global_z) >= BIOME_FOREST_HUMIDITY_THRESHOLD {
+        TerrainBiome::Forest
+    } else {
+        TerrainBiome::Plains
+    }
+}
+
+#[must_use]
+pub fn terrain_world_sample_at(
+    global_x: i32,
+    global_z: i32,
+    context: &WorldGenerationContext,
+    surface_material: BlockId,
+) -> WorldTerrainSample {
+    let height = terrain_height_at(global_x, global_z);
+    let chunk_height = height.min(CHUNK_SIZE - 1);
+    let surface_block = terrain_surface_top_block(height, context.palette, surface_material);
+    let subsurface_block =
+        terrain_block_at_height(height.saturating_sub(2), height, context.palette);
+
+    WorldTerrainSample {
+        global_x,
+        global_z,
+        height,
+        chunk_height,
+        biome: terrain_biome_at(global_x, global_z),
+        surface_block,
+        subsurface_block,
+        temperature: terrain_temperature_at(global_x, global_z),
+        humidity: terrain_humidity_at(global_x, global_z),
+        roughness: terrain_roughness_at(global_x, global_z),
+    }
+}
+
+fn normalized_perlin_sample(global_x: i32, global_z: i32, scale: f64, perlin: &Perlin) -> f32 {
+    let value = perlin.get([f64::from(global_x) * scale, f64::from(global_z) * scale]);
+    ((value + 1.0) * 0.5).clamp(0.0, 1.0) as f32
 }
 
 #[must_use]
@@ -438,27 +570,36 @@ fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGene
 
     let lua = mlua::Lua::new();
     let globals = lua.globals();
+    let origin_x = pos.x * CHUNK_SIZE_I32;
+    let origin_z = pos.z * CHUNK_SIZE_I32;
+    let sand_block = context.block_id("sand");
 
     let Ok(chunk_table) = lua.create_table() else {
         return;
     };
     let _ = chunk_table.set("x", pos.x);
     let _ = chunk_table.set("z", pos.z);
+    let _ = chunk_table.set("size", CHUNK_SIZE);
+    let _ = chunk_table.set("origin_x", origin_x);
+    let _ = chunk_table.set("origin_z", origin_z);
     let _ = globals.set("Chunk", chunk_table);
 
     let blocks_cell = Rc::new(RefCell::new(chunk.blocks.clone()));
     let id_to_name = context.id_to_name.clone();
     let name_to_id = context.name_to_id.clone();
+    let stats = Rc::new(RefCell::new(LuaWorldGenStats::default()));
 
     let get_block_buffer = Rc::clone(&blocks_cell);
-    let get_block = lua.create_function(move |_, (x, y, z): (usize, usize, usize)| {
-        if x < CHUNK_SIZE && y < CHUNK_SIZE && z < CHUNK_SIZE {
-            let id = get_block_buffer.borrow()[ChunkData::get_index(x, y, z)];
+    let get_block_stats = Rc::clone(&stats);
+    let get_block = lua.create_function(move |_, (x, y, z): (i32, i32, i32)| {
+        if let Some(index) = local_block_index(x, y, z) {
+            let id = get_block_buffer.borrow()[index];
             Ok(id_to_name
                 .get(&id)
                 .cloned()
                 .unwrap_or_else(|| "air".to_string()))
         } else {
+            get_block_stats.borrow_mut().get_out_of_bounds += 1;
             Ok("air".to_string())
         }
     });
@@ -467,29 +608,135 @@ fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGene
     }
 
     let set_block_buffer = Rc::clone(&blocks_cell);
-    let set_block =
-        lua.create_function(move |_, (x, y, z, name): (usize, usize, usize, String)| {
-            if x < CHUNK_SIZE && y < CHUNK_SIZE && z < CHUNK_SIZE {
-                let id = name_to_id.get(&name).copied().unwrap_or(AIR_BLOCK_ID);
-                set_block_buffer.borrow_mut()[ChunkData::get_index(x, y, z)] = id;
-            }
-            Ok(())
-        });
+    let set_block_stats = Rc::clone(&stats);
+    let set_block = lua.create_function(move |_, (x, y, z, name): (i32, i32, i32, String)| {
+        let mut stats = set_block_stats.borrow_mut();
+        stats.set_attempts += 1;
+
+        let Some(index) = local_block_index(x, y, z) else {
+            stats.set_out_of_bounds += 1;
+            return Ok(());
+        };
+
+        let Some(id) = name_to_id.get(&name).copied() else {
+            stats.unknown_block_names += 1;
+            return Ok(());
+        };
+
+        set_block_buffer.borrow_mut()[index] = id;
+        stats.set_applied += 1;
+        Ok(())
+    });
     if let Ok(function) = set_block {
         let _ = globals.set("set_block", function);
     }
 
+    let local_origin_x = origin_x;
+    let to_world_x = lua.create_function(move |_, x: i32| Ok(local_origin_x + x));
+    if let Ok(function) = to_world_x {
+        let _ = globals.set("chunk_to_world_x", function);
+    }
+
+    let local_origin_z = origin_z;
+    let to_world_z = lua.create_function(move |_, z: i32| Ok(local_origin_z + z));
+    if let Ok(function) = to_world_z {
+        let _ = globals.set("chunk_to_world_z", function);
+    }
+
+    let local_origin_x = origin_x;
+    let to_chunk_x = lua.create_function(move |_, x: i32| Ok(x - local_origin_x));
+    if let Ok(function) = to_chunk_x {
+        let _ = globals.set("world_to_chunk_x", function);
+    }
+
+    let local_origin_z = origin_z;
+    let to_chunk_z = lua.create_function(move |_, z: i32| Ok(z - local_origin_z));
+    if let Ok(function) = to_chunk_z {
+        let _ = globals.set("world_to_chunk_z", function);
+    }
+
+    let sample_context = context.clone();
+    let sample_stats = Rc::clone(&stats);
+    let sample_world = lua.create_function(move |lua, (x, z): (i32, i32)| {
+        sample_stats.borrow_mut().world_sample_requests += 1;
+        let global_x = origin_x + x;
+        let global_z = origin_z + z;
+        let sample = terrain_world_sample_at(global_x, global_z, &sample_context, sand_block);
+        let table = lua.create_table()?;
+
+        table.set("x", global_x)?;
+        table.set("z", global_z)?;
+        table.set("local_x", x)?;
+        table.set("local_z", z)?;
+        table.set("height", sample.height)?;
+        table.set("chunk_height", sample.chunk_height)?;
+        table.set("biome", sample.biome.as_str())?;
+        table.set(
+            "surface_block",
+            sample_context.block_name(sample.surface_block),
+        )?;
+        table.set(
+            "subsurface_block",
+            sample_context.block_name(sample.subsurface_block),
+        )?;
+        table.set("temperature", sample.temperature)?;
+        table.set("humidity", sample.humidity)?;
+        table.set("roughness", sample.roughness)?;
+
+        Ok(table)
+    });
+    if let Ok(function) = sample_world {
+        let _ = globals.set("sample_world", function);
+    }
+
+    let biome_context = context.clone();
+    let get_biome = lua.create_function(move |_, (x, z): (i32, i32)| {
+        let sample =
+            terrain_world_sample_at(origin_x + x, origin_z + z, &biome_context, sand_block);
+        Ok(sample.biome.as_str().to_string())
+    });
+    if let Ok(function) = get_biome {
+        let _ = globals.set("get_biome", function);
+    }
+
+    let rand_stats = Rc::clone(&stats);
+    let rand01 = lua.create_function(move |_, (salt, x, z): (String, i32, i32)| {
+        rand_stats.borrow_mut().deterministic_random_requests += 1;
+        Ok(worldgen_rand01(&salt, origin_x + x, origin_z + z))
+    });
+    if let Ok(function) = rand01 {
+        let _ = globals.set("rand01", function);
+    }
+
+    let chance_stats = Rc::clone(&stats);
+    let chance = lua.create_function(
+        move |_, (salt, x, z, probability): (String, i32, i32, f64)| {
+            chance_stats.borrow_mut().deterministic_random_requests += 1;
+            let probability = probability.clamp(0.0, 1.0);
+            Ok(worldgen_rand01(&salt, origin_x + x, origin_z + z) < probability)
+        },
+    );
+    if let Ok(function) = chance {
+        let _ = globals.set("chance", function);
+    }
+
+    let get_height_stats = Rc::clone(&stats);
     let get_height = lua.create_function(move |_, (x, z): (i32, i32)| {
-        let global_x = pos.x * CHUNK_SIZE as i32 + x;
-        let global_z = pos.z * CHUNK_SIZE as i32 + z;
+        get_height_stats.borrow_mut().height_requests += 1;
+        let global_x = pos.x * CHUNK_SIZE_I32 + x;
+        let global_z = pos.z * CHUNK_SIZE_I32 + z;
         Ok(terrain_height_at(global_x, global_z).min(CHUNK_SIZE - 1))
     });
     if let Ok(function) = get_height {
         let _ = globals.set("get_height", function);
     }
 
+    let spawn_stats = Rc::clone(&stats);
     let spawn_mob =
-        lua.create_function(|_, (_mob_type, _x, _y, _z): (String, f32, f32, f32)| Ok(()));
+        lua.create_function(move |_, (_mob_type, _x, _y, _z): (String, f32, f32, f32)| {
+            spawn_stats.borrow_mut().mob_spawn_intents += 1;
+            Ok(())
+        });
     if let Ok(function) = spawn_mob {
         let _ = globals.set("spawn_mob", function);
     }
@@ -501,7 +748,73 @@ fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGene
         error!("WORLD_GEN: Lua post-pass failed for chunk {pos:?}: {error:?}");
     }
 
+    let stats = stats.borrow();
+    if stats.has_reportable_work() {
+        info!(
+            "WORLD_GEN: Lua post-pass stats for chunk {pos:?}: set_applied={}/{} set_oob={} get_oob={} unknown_blocks={} height={} samples={} deterministic_random={} mob_intents={}",
+            stats.set_applied,
+            stats.set_attempts,
+            stats.set_out_of_bounds,
+            stats.get_out_of_bounds,
+            stats.unknown_block_names,
+            stats.height_requests,
+            stats.world_sample_requests,
+            stats.deterministic_random_requests,
+            stats.mob_spawn_intents
+        );
+    }
+
     chunk.blocks = blocks_cell.borrow().clone();
+}
+
+#[derive(Default, Debug)]
+struct LuaWorldGenStats {
+    set_attempts: usize,
+    set_applied: usize,
+    set_out_of_bounds: usize,
+    get_out_of_bounds: usize,
+    unknown_block_names: usize,
+    height_requests: usize,
+    world_sample_requests: usize,
+    deterministic_random_requests: usize,
+    mob_spawn_intents: usize,
+}
+
+impl LuaWorldGenStats {
+    fn has_reportable_work(&self) -> bool {
+        self.set_attempts > 0
+            || self.get_out_of_bounds > 0
+            || self.unknown_block_names > 0
+            || self.world_sample_requests > 0
+            || self.mob_spawn_intents > 0
+    }
+}
+
+fn local_block_index(x: i32, y: i32, z: i32) -> Option<usize> {
+    if (0..CHUNK_SIZE_I32).contains(&x)
+        && (0..CHUNK_SIZE_I32).contains(&y)
+        && (0..CHUNK_SIZE_I32).contains(&z)
+    {
+        Some(ChunkData::get_index(
+            usize::try_from(x).ok()?,
+            usize::try_from(y).ok()?,
+            usize::try_from(z).ok()?,
+        ))
+    } else {
+        None
+    }
+}
+
+fn worldgen_rand01(salt: &str, global_x: i32, global_z: i32) -> f64 {
+    let mut hash = fnv64(FNV64_OFFSET, 0xA11C_EC0D_E133_7A11);
+    hash = fnv64(hash, (i64::from(global_x)) as u64);
+    hash = fnv64(hash, (i64::from(global_z)) as u64);
+    for byte in salt.as_bytes() {
+        hash = fnv64(hash, u64::from(*byte));
+    }
+
+    let mantissa = hash >> 11;
+    mantissa as f64 / ((1_u64 << 53) as f64)
 }
 
 const FNV64_OFFSET: u64 = 14_695_981_039_346_656_037;
@@ -514,6 +827,33 @@ fn fnv64(hash: u64, value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_world_context() -> WorldGenerationContext {
+        let palette = TerrainBlockPalette {
+            air: 0,
+            dirt: 1,
+            grass: 2,
+            stone: 3,
+        };
+        let mut name_to_id = HashMap::default();
+        let mut id_to_name = HashMap::default();
+        for (id, name) in [
+            (palette.air, "air"),
+            (palette.dirt, "dirt"),
+            (palette.grass, "grass"),
+            (palette.stone, "stone"),
+            (4, "sand"),
+        ] {
+            name_to_id.insert(name.to_string(), id);
+            id_to_name.insert(id, name.to_string());
+        }
+
+        WorldGenerationContext {
+            palette,
+            name_to_id,
+            id_to_name,
+        }
+    }
 
     #[test]
     fn terrain_generation_contract_version_is_stable_and_nonzero() {
@@ -553,6 +893,58 @@ mod tests {
                 terrain_height_with_noise(x, z, &perlin)
             );
         }
+    }
+
+    #[test]
+    fn terrain_world_sample_contract_is_deterministic() {
+        let context = test_world_context();
+        let first = terrain_world_sample_at(128, -64, &context, 4);
+        let second = terrain_world_sample_at(128, -64, &context, 4);
+
+        assert_eq!(first, second);
+        assert_eq!(first.biome, terrain_biome_at(128, -64));
+        assert_eq!(first.chunk_height, first.height.min(CHUNK_SIZE - 1));
+        assert!((0.0..=1.0).contains(&first.temperature));
+        assert!((0.0..=1.0).contains(&first.humidity));
+        assert!((0.0..=1.0).contains(&first.roughness));
+        assert!(!first.biome.as_str().is_empty());
+        assert!(!context.block_name(first.surface_block).is_empty());
+    }
+
+    #[test]
+    fn terrain_world_sample_uses_surface_material_for_beach() {
+        let context = test_world_context();
+        let sand = context.block_id("sand");
+        let (x, z) = (-128..=128)
+            .flat_map(|z| (-128..=128).map(move |x| (x, z)))
+            .find(|(x, z)| terrain_height_at(*x, *z) <= SURFACE_BEACH_HEIGHT_THRESHOLD)
+            .expect("deterministic terrain should expose a beach-height sample");
+
+        let sample = terrain_world_sample_at(x, z, &context, sand);
+
+        assert_eq!(sample.biome, TerrainBiome::Beach);
+        assert_eq!(sample.surface_block, sand);
+    }
+
+    #[test]
+    fn deterministic_worldgen_random_is_coordinate_stable() {
+        let first = worldgen_rand01("emerald_tree", 12, -4);
+        let second = worldgen_rand01("emerald_tree", 12, -4);
+        let different_salt = worldgen_rand01("emerald_flower", 12, -4);
+        let different_position = worldgen_rand01("emerald_tree", 13, -4);
+
+        assert_eq!(first, second);
+        assert!((0.0..1.0).contains(&first));
+        assert_ne!(first, different_salt);
+        assert_ne!(first, different_position);
+    }
+
+    #[test]
+    fn lua_worldgen_local_index_rejects_out_of_chunk_positions() {
+        assert_eq!(local_block_index(0, 0, 0), Some(0));
+        assert!(local_block_index(-1, 0, 0).is_none());
+        assert!(local_block_index(0, CHUNK_SIZE_I32, 0).is_none());
+        assert!(local_block_index(0, 0, CHUNK_SIZE_I32).is_none());
     }
 
     #[test]

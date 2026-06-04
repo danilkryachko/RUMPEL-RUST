@@ -57,6 +57,23 @@
 ---@class ChunkTable
 ---@field x integer
 ---@field z integer
+---@field size integer
+---@field origin_x integer
+---@field origin_z integer
+
+---@class WorldTerrainSample
+---@field x integer
+---@field z integer
+---@field local_x integer
+---@field local_z integer
+---@field height integer
+---@field chunk_height integer
+---@field biome "beach"|"plains"|"forest"|"mountains"
+---@field surface_block string
+---@field subsurface_block string
+---@field temperature number
+---@field humidity number
+---@field roughness number
 
 ---@type table<string, BlockBehavior>
 Behaviors = {}
@@ -142,6 +159,45 @@ function set_block(x, y, z, block_id) end
 ---@param z integer
 ---@return integer surface_y
 function get_height(x, z) end
+
+---@param x integer
+---@return integer world_x
+function chunk_to_world_x(x) end
+
+---@param z integer
+---@return integer world_z
+function chunk_to_world_z(z) end
+
+---@param x integer
+---@return integer local_x
+function world_to_chunk_x(x) end
+
+---@param z integer
+---@return integer local_z
+function world_to_chunk_z(z) end
+
+---@param x integer
+---@param z integer
+---@return WorldTerrainSample
+function sample_world(x, z) end
+
+---@param x integer
+---@param z integer
+---@return "beach"|"plains"|"forest"|"mountains" biome
+function get_biome(x, z) end
+
+---@param salt string
+---@param x integer
+---@param z integer
+---@return number value
+function rand01(salt, x, z) end
+
+---@param salt string
+---@param x integer
+---@param z integer
+---@param probability number
+---@return boolean
+function chance(salt, x, z, probability) end
 
 ---@param block_name string
 ---@param tool_name? string

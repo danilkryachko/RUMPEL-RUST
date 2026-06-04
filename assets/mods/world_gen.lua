@@ -1,6 +1,13 @@
 -- Procedural world generation for «Emerald Grove» Biome in Lua!
 
 local SEA_LEVEL = 12
+local CHUNK_SIZE = Chunk.size or 32
+local CHUNK_MAX = CHUNK_SIZE - 1
+
+local function rand_range(salt, index, min_value, max_value)
+    local span = max_value - min_value + 1
+    return min_value + math.floor(rand01(salt, index, 0) * span)
+end
 
 -- Helper function to spawn spherical leaf crowns
 local function spawn_leaf_sphere(cx, cy, cz, radius)
@@ -11,7 +18,7 @@ local function spawn_leaf_sphere(cx, cy, cz, radius)
                     local px = cx + lx
                     local py = cy + ly
                     local pz = cz + lz
-                    if px >= 0 and px < 32 and py >= 0 and py < 32 and pz >= 0 and pz < 32 then
+                    if px >= 0 and px < CHUNK_SIZE and py >= 0 and py < CHUNK_SIZE and pz >= 0 and pz < CHUNK_SIZE then
                         -- Place leaves if currently air
                         if get_block(px, py, pz) == "air" then
                             set_block(px, py, pz, "leaves")
@@ -27,7 +34,7 @@ end
 local function spawn_organic_oak(tx, ty, tz)
     -- 1. Grow main thick trunk
     for y = ty, ty + 5 do
-        if y >= 0 and y < 32 then
+        if y >= 0 and y < CHUNK_SIZE then
             set_block(tx, y, tz, "wood")
         end
     end
@@ -49,7 +56,7 @@ local function spawn_organic_oak(tx, ty, tz)
         local by = ty + 4
         local bz = tz + dir.z
 
-        if bx >= 0 and bx < 32 and bz >= 0 and bz < 32 and by >= 0 and by < 32 then
+        if bx >= 0 and bx < CHUNK_SIZE and bz >= 0 and bz < CHUNK_SIZE and by >= 0 and by < CHUNK_SIZE then
             set_block(bx, by, bz, "wood")
 
             -- Extend branch further out and upwards
@@ -57,7 +64,7 @@ local function spawn_organic_oak(tx, ty, tz)
             local byy = by + 1
             local bzz = bz + dir.z
 
-            if bxx >= 0 and bxx < 32 and bzz >= 0 and bzz < 32 and byy >= 0 and byy < 32 then
+            if bxx >= 0 and bxx < CHUNK_SIZE and bzz >= 0 and bzz < CHUNK_SIZE and byy >= 0 and byy < CHUNK_SIZE then
                 set_block(bxx, byy, bzz, "wood")
 
                 -- Leaf sphere at the tip of the branch!
@@ -78,14 +85,14 @@ local function spawn_organic_oak(tx, ty, tz)
         local ry = ty
         local rz = tz + rdir.z
 
-        if rx >= 0 and rx < 32 and rz >= 0 and rz < 32 and ry >= 0 and ry < 32 then
+        if rx >= 0 and rx < CHUNK_SIZE and rz >= 0 and rz < CHUNK_SIZE and ry >= 0 and ry < CHUNK_SIZE then
             set_block(rx, ry, rz, "wood")
 
             -- Anchor root underground
             local rxx = rx + rdir.x
             local ryy = ry - 1
             local rzz = rz + rdir.z
-            if rxx >= 0 and rxx < 32 and rzz >= 0 and rzz < 32 and ryy >= 0 and ryy < 32 then
+            if rxx >= 0 and rxx < CHUNK_SIZE and rzz >= 0 and rzz < CHUNK_SIZE and ryy >= 0 and ryy < CHUNK_SIZE then
                 set_block(rxx, ryy, rzz, "wood")
             end
         end
@@ -94,8 +101,8 @@ end
 
 
 -- 1. Fill valleys up to Sea Level with water (Lakes & Streams)
-for x = 0, 31 do
-    for z = 0, 31 do
+for x = 0, CHUNK_MAX do
+    for z = 0, CHUNK_MAX do
         for y = 0, SEA_LEVEL do
             if get_block(x, y, z) == "air" then
                 set_block(x, y, z, "water")
@@ -132,7 +139,7 @@ for x = 2, 29, 4 do
             local h = get_height(x, z)
             if h > SEA_LEVEL and h < 24 then
                 -- 60% chance to grow a tree at this grid coordinate
-                if math.random() < 0.6 then
+                if chance("emerald_tree", x, z, 0.6) then
                     spawn_organic_oak(x, h + 1, z)
                 end
             end
@@ -143,14 +150,14 @@ end
 -- 3.5 Spawn Forest Floor Details (Fallen mossy logs & bushy leafy undergrowth)
 -- Spawn 4 poваленные бревна on grass
 for k = 1, 4 do
-    local lx = math.random(3, 28)
-    local lz = math.random(3, 28)
+    local lx = rand_range("fallen_log_x", k, 3, 28)
+    local lz = rand_range("fallen_log_z", k, 3, 28)
     local lh = get_height(lx, lz)
     if lh > SEA_LEVEL and lh < 28 then
         if get_block(lx, lh, lz) == "grass" then
             -- Place 3 horizontal logs on the ground
             set_block(lx, lh + 1, lz, "wood")
-            if lx + 1 < 32 then set_block(lx + 1, lh + 1, lz, "wood") end
+            if lx + 1 < CHUNK_SIZE then set_block(lx + 1, lh + 1, lz, "wood") end
             if lx - 1 >= 0 then set_block(lx - 1, lh + 1, lz, "wood") end
         end
     end
@@ -158,8 +165,8 @@ end
 
 -- Spawn 6 small organic leafy bushes
 for k = 1, 6 do
-    local bx = math.random(3, 28)
-    local bz = math.random(3, 28)
+    local bx = rand_range("bush_x", k, 3, 28)
+    local bz = rand_range("bush_z", k, 3, 28)
     local bh = get_height(bx, bz)
     if bh > SEA_LEVEL and bh < 28 then
         if get_block(bx, bh, bz) == "grass" then
@@ -271,9 +278,9 @@ end
 
 -- 6. Generate Subterranean Glowing Crystal Caves (Grottos)
 for c = 1, 4 do
-    local kx = math.random(4, 27)
-    local kz = math.random(4, 27)
-    local ky = math.random(3, 9)
+    local kx = rand_range("cave_x", c, 4, 27)
+    local kz = rand_range("cave_z", c, 4, 27)
+    local ky = rand_range("cave_y", c, 3, 9)
 
     -- Carve out a pocket inside stone
     for dx = -1, 1 do
@@ -282,12 +289,12 @@ for c = 1, 4 do
                 local px = kx + dx
                 local py = ky + dy
                 local pz = kz + dz
-                if px >= 0 and px < 32 and py >= 0 and py < 32 and pz >= 0 and pz < 32 then
+                if px >= 0 and px < CHUNK_SIZE and py >= 0 and py < CHUNK_SIZE and pz >= 0 and pz < CHUNK_SIZE then
                     if dx*dx + dy*dy + dz*dz <= 1 then
                         set_block(px, py, pz, "air")
                     else
                         -- Lined walls with glowing crystal blocks
-                        if math.random() < 0.35 then
+                        if chance("crystal_cave_" .. c, px, pz + py * CHUNK_SIZE, 0.35) then
                             set_block(px, py, pz, "crystal_ore")
                         end
                     end
@@ -298,12 +305,12 @@ for c = 1, 4 do
 end
 
 -- 7. Scatter lush fields of Wildflowers (roses & dandelions)
-for x = 0, 31 do
-    for z = 0, 31 do
+for x = 0, CHUNK_MAX do
+    for z = 0, CHUNK_MAX do
         local h = get_height(x, z)
-        if h > SEA_LEVEL and h < 31 then
+        if h > SEA_LEVEL and h < CHUNK_MAX then
             if get_block(x, h, z) == "grass" then
-                local rand = math.random()
+                local rand = rand01("emerald_flower", x, z)
                 if rand < 0.04 then
                     -- Red rose flower
                     set_block(x, h + 1, z, "flower_red")
