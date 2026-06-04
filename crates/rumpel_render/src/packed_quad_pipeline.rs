@@ -1485,7 +1485,7 @@ pub fn pack_arena_allocations(
     usize,
 ) {
     let mut sorted_batches = batches.iter().collect::<Vec<_>>();
-    sorted_batches.sort_by_key(|batch| batch.key);
+    sorted_batches.sort_unstable_by_key(|batch| batch.key);
 
     let total_quads: usize = sorted_batches.iter().map(|batch| batch.quads.len()).sum();
     let mut staging = Vec::with_capacity(total_quads);
@@ -1525,7 +1525,7 @@ fn sort_packed_batch_order(batch_order: &mut Vec<usize>, batches: &[PackedQuadBa
         batch_order.reserve(batches.len() - batch_order_capacity);
     }
     batch_order.extend(0..batches.len());
-    batch_order.sort_by_key(|batch_index| batches[*batch_index].key);
+    batch_order.sort_unstable_by_key(|batch_index| batches[*batch_index].key);
 }
 
 fn reserve_vec_capacity<T>(items: &mut Vec<T>, capacity: usize) {
@@ -3658,7 +3658,7 @@ fn apply_sliding_generated_batches_in_place(
         sync_gpu_chunk_range_active_flags(&mut batch, active_chunk_keys);
         batches.push(batch);
     }
-    batches.sort_by_key(|batch| batch.key);
+    batches.sort_unstable_by_key(|batch| batch.key);
     let (batch_signature, batch_structure_signature, batch_summary) =
         PackedGpuGenerationBatches::calculate_batch_metadata(&batches);
     gpu_batches.batch_signature = batch_signature;
@@ -3777,7 +3777,9 @@ fn assemble_generated_batches_for_active_regions(
         synchronous_builds = synchronous_builds.saturating_add(1);
     }
 
-    scratch.generated_batches.sort_by_key(|batch| batch.key);
+    scratch
+        .generated_batches
+        .sort_unstable_by_key(|batch| batch.key);
     stats
 }
 
