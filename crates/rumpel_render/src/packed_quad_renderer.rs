@@ -268,22 +268,14 @@ fn collect_active_gpu_generation_jobs(
     allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
     dispatched: &HashMap<u64, u64>,
     buffers: &mut PackedGpuGenerationBuffers,
+    active_chunk_job_count: usize,
 ) {
     buffers.jobs.clear();
     buffers.dirty_jobs.clear();
     buffers.pending_chunk_generations.clear();
     buffers.draw_params.clear();
 
-    let jobs_reserve = ordered_batches
-        .iter()
-        .map(|batch| {
-            batch
-                .chunk_ranges
-                .iter()
-                .filter(|range| range.active && range.column_len > 0)
-                .count()
-        })
-        .sum::<usize>();
+    let jobs_reserve = active_chunk_job_count;
     if buffers.jobs.capacity() < jobs_reserve {
         buffers.jobs.reserve(jobs_reserve - buffers.jobs.capacity());
     }
@@ -1014,6 +1006,7 @@ fn refresh_structure_stable_gpu_generated_prepare(
         &arena.allocations,
         &prepared.chunk_dispatched_generation,
         buffers,
+        active_chunk_job_count,
     );
     prepared
         .pending_chunk_generations
@@ -1455,6 +1448,7 @@ fn prepare_packed_gpu_generated_draw(
         &arena.allocations,
         &prepared.chunk_dispatched_generation,
         &mut buffers,
+        active_chunk_job_count,
     );
     prepared
         .pending_chunk_generations
