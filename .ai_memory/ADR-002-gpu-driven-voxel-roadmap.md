@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated job collection now reserves `pending_chunk_generations` with the same active job-count hint used for jobs, dirty jobs, and draw params, avoiding incremental growth when many chunks need dispatch-generation tracking. Verified with focused generated prepare/summary tests and full `just verify`.
 - 2026-06-04: GPU-generated allocation request staging now reserves by `PackedGpuGenerationBatchSummary::active_chunk_job_count` before pushing per-active-chunk requests, preventing incremental Vec growth when generated view sizes increase. Verified with focused generated prepare/summary tests and full `just verify`.
 - 2026-06-04: GPU-generated planned-region staging now receives `PackedGpuGenerationBatchSummary::active_chunk_job_count` as the reserve hint, removing another active chunk-range count pass before building prepared region metadata. Verified with focused generated prepare/summary tests and full `just verify`.
 - 2026-06-04: GPU-generated render prepare now passes `PackedGpuGenerationBatchSummary::active_chunk_job_count` into generation job collection as the reserve hint, removing the extra active chunk-range scan that existed only to size staging buffers. Verified with focused generated prepare/summary tests and full `just verify`.

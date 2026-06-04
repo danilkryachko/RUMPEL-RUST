@@ -284,6 +284,11 @@ fn collect_active_gpu_generation_jobs(
             .dirty_jobs
             .reserve(jobs_reserve - buffers.dirty_jobs.capacity());
     }
+    if buffers.pending_chunk_generations.capacity() < jobs_reserve {
+        buffers
+            .pending_chunk_generations
+            .reserve(jobs_reserve - buffers.pending_chunk_generations.capacity());
+    }
     if buffers.draw_params.capacity() < jobs_reserve {
         buffers
             .draw_params
