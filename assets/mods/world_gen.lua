@@ -153,6 +153,7 @@ end
 --   Plains : sparse short oaks (density scales with humidity)
 --   Snow   : pines below the snow line
 --   Desert : rare shrubs on sand
+--   Canyon : very rare shrubs on the mesas (terrain carries the look)
 --   Beach  : bare
 
 local function lerp(a, b, t)
@@ -189,14 +190,21 @@ for x = 2, CHUNK_MAX - 2, 3 do
                 if chance("desert_shrub", x, z, 0.05) then
                     set_block(x, h, z, "leaves")
                 end
+            elseif s.biome == "canyon" then
+                -- Canyon mesas are mostly bare; the carved cuts speak for
+                -- themselves. Sparse shrubs only on the flat plateau tops.
+                if chance("canyon_shrub", x, z, 0.02) then
+                    set_block(x, h, z, "leaves")
+                end
             end
         end
     end
 end
 
 -- ── 2.5 Biome decorations ─────────────────────────────────────────────────────
--- Desert: occasional tall cacti. Snow: scattered snow drifts. Both placed on a
--- coarse deterministic grid in the air slot above the surface.
+-- Desert: occasional tall cacti. Snow: scattered snow drifts. Canyon: short
+-- cacti on the mesa tops. Placed on a coarse deterministic grid in the air
+-- slot above the surface.
 for x = 1, CHUNK_MAX - 1, 2 do
     for z = 1, CHUNK_MAX - 1, 2 do
         local h = get_height(x, z)
@@ -210,6 +218,11 @@ for x = 1, CHUNK_MAX - 1, 2 do
             elseif biome == "snow" then
                 if chance("snow_mound", x, z, 0.08) then
                     spawn_snow_mound(x, h, z, chance("snow_mound_tall", x, z, 0.4))
+                end
+            elseif biome == "canyon" then
+                if chance("canyon_cactus", x, z, 0.04) then
+                    local height = 2 + math.floor(rand01("canyon_cactus_h", x, z) * 2)
+                    spawn_cactus(x, h, z, height)
                 end
             end
         end
@@ -333,7 +346,7 @@ if not placed_structure and chance("well_v2", ORIGIN_X, ORIGIN_Z, 0.04) then
     local az = rand_range("well_az", ORIGIN_X, ORIGIN_Z, 2, CHUNK_MAX - 2)
     local biome = get_biome(ax, az)
     local ah = get_height(ax, az)
-    if biome ~= "beach" and ah > SEA_LEVEL and ah < CHUNK_MAX - 5 then
+    if biome ~= "beach" and biome ~= "canyon" and ah > SEA_LEVEL and ah < CHUNK_MAX - 5 then
         build_well(ax, az, ah)
         placed_structure = true
     end

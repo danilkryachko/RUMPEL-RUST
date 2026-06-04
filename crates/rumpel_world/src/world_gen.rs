@@ -25,6 +25,25 @@ const BIOME_SNOW_TEMPERATURE_THRESHOLD: f32 = 0.30;
 const BIOME_MOUNTAIN_SNOW_HEIGHT: usize = 30;
 const ORE_NOISE_SEED: u32 = 51_337;
 const ORE_NOISE_SCALE: f64 = 0.08;
+
+// Canyon biome: large mesa regions carved by narrow channels.
+const TERRAIN_CANYON_SEED: u32 = 41_337;
+const TERRAIN_CANYON_SCALE: f64 = 0.012;
+const TERRAIN_CANYON_THRESHOLD: f32 = 0.62;
+const TERRAIN_CANYON_MESA_BONUS: i32 = 8;
+const TERRAIN_CANYON_CUT_SEED: u32 = 43_337;
+const TERRAIN_CANYON_CUT_SCALE: f64 = 0.05;
+const TERRAIN_CANYON_CUT_THRESHOLD: f32 = 0.66;
+const TERRAIN_CANYON_CUT_DEPTH: i32 = 14;
+
+// Coast cliff: along the shoreline the gradual beach gradient snaps up to a
+// sheer wall wherever the cliff noise is active. Inland heights are untouched.
+const TERRAIN_COAST_CLIFF_SEED: u32 = 61_337;
+const TERRAIN_COAST_CLIFF_SCALE: f64 = 0.02;
+const TERRAIN_COAST_CLIFF_THRESHOLD: f32 = 0.55;
+const TERRAIN_COAST_CLIFF_RANGE: i32 = 6;
+const TERRAIN_COAST_CLIFF_LIFT: i32 = 10;
+
 const DIRT_DEPTH: usize = 3;
 pub const SURFACE_BEACH_HEIGHT_THRESHOLD: usize = 14;
 const SURFACE_SHELL_HEIGHT_KERNEL: [usize; 5] = [1, 4, 6, 4, 1];
@@ -53,6 +72,19 @@ pub fn terrain_generation_contract_version() -> u64 {
     hash = fnv64(hash, f64::from(BIOME_DESERT_HUMIDITY_THRESHOLD).to_bits());
     hash = fnv64(hash, f64::from(BIOME_SNOW_TEMPERATURE_THRESHOLD).to_bits());
     hash = fnv64(hash, BIOME_MOUNTAIN_SNOW_HEIGHT as u64);
+    hash = fnv64(hash, u64::from(TERRAIN_CANYON_SEED));
+    hash = fnv64(hash, TERRAIN_CANYON_SCALE.to_bits());
+    hash = fnv64(hash, f64::from(TERRAIN_CANYON_THRESHOLD).to_bits());
+    hash = fnv64(hash, TERRAIN_CANYON_MESA_BONUS as i64 as u64);
+    hash = fnv64(hash, u64::from(TERRAIN_CANYON_CUT_SEED));
+    hash = fnv64(hash, TERRAIN_CANYON_CUT_SCALE.to_bits());
+    hash = fnv64(hash, f64::from(TERRAIN_CANYON_CUT_THRESHOLD).to_bits());
+    hash = fnv64(hash, TERRAIN_CANYON_CUT_DEPTH as i64 as u64);
+    hash = fnv64(hash, u64::from(TERRAIN_COAST_CLIFF_SEED));
+    hash = fnv64(hash, TERRAIN_COAST_CLIFF_SCALE.to_bits());
+    hash = fnv64(hash, f64::from(TERRAIN_COAST_CLIFF_THRESHOLD).to_bits());
+    hash = fnv64(hash, TERRAIN_COAST_CLIFF_RANGE as i64 as u64);
+    hash = fnv64(hash, TERRAIN_COAST_CLIFF_LIFT as i64 as u64);
     if let Ok(bytes) = fs::read(WORLD_GEN_SCRIPT_PATH) {
         for byte in bytes {
             hash = fnv64(hash, u64::from(byte));
@@ -180,6 +212,7 @@ pub enum TerrainBiome {
     Mountains,
     Desert,
     Snow,
+    Canyon,
 }
 
 impl TerrainBiome {
@@ -192,6 +225,7 @@ impl TerrainBiome {
             Self::Mountains => "mountains",
             Self::Desert => "desert",
             Self::Snow => "snow",
+            Self::Canyon => "canyon",
         }
     }
 }
@@ -218,12 +252,65 @@ pub fn terrain_height_at(global_x: i32, global_z: i32) -> usize {
 
 #[must_use]
 pub fn terrain_height_with_noise(global_x: i32, global_z: i32, perlin: &Perlin) -> usize {
+    let mut height = base_terrain_height_with_noise(global_x, global_z, perlin);
+
+    if terrain_canyon_value_at(global_x, global_z) >= TERRAIN_CANYON_THRESHOLD {
+        height = height.saturating_add(TERRAIN_CANYON_MESA_BONUS);
+        if terrain_canyon_cut_value_at(global_x, global_z) >= TERRAIN_CANYON_CUT_THRESHOLD {
+            height = height.saturating_sub(TERRAIN_CANYON_CUT_DEPTH);
+        }
+    }
+
+    let sea_level = SURFACE_BEACH_HEIGHT_THRESHOLD as i32;
+    if height > sea_level
+        && height <= sea_level + TERRAIN_COAST_CLIFF_RANGE
+        && terrain_coast_cliff_value_at(global_x, global_z) >= TERRAIN_COAST_CLIFF_THRESHOLD
+    {
+        height = sea_level + TERRAIN_COAST_CLIFF_LIFT;
+    }
+
+    usize::try_from(height.max(0)).unwrap_or(0)
+}
+
+/// Raw heightfield from the base terrain Perlin, before canyon/cliff
+/// modifiers. Used internally so feature noise lookups never feed back into
+/// themselves through [`terrain_height_with_noise`].
+fn base_terrain_height_with_noise(global_x: i32, global_z: i32, perlin: &Perlin) -> i32 {
     let noise_val = perlin.get([
         f64::from(global_x) * TERRAIN_NOISE_SCALE,
         f64::from(global_z) * TERRAIN_NOISE_SCALE,
     ]);
+    ((noise_val + 1.0) * 0.5 * TERRAIN_HEIGHT_RANGE + TERRAIN_BASE_HEIGHT) as i32
+}
 
-    ((noise_val + 1.0) * 0.5 * TERRAIN_HEIGHT_RANGE + TERRAIN_BASE_HEIGHT) as usize
+#[must_use]
+fn terrain_canyon_value_at(global_x: i32, global_z: i32) -> f32 {
+    normalized_perlin_sample(
+        global_x,
+        global_z,
+        TERRAIN_CANYON_SCALE,
+        &Perlin::new(TERRAIN_CANYON_SEED),
+    )
+}
+
+#[must_use]
+fn terrain_canyon_cut_value_at(global_x: i32, global_z: i32) -> f32 {
+    normalized_perlin_sample(
+        global_x,
+        global_z,
+        TERRAIN_CANYON_CUT_SCALE,
+        &Perlin::new(TERRAIN_CANYON_CUT_SEED),
+    )
+}
+
+#[must_use]
+fn terrain_coast_cliff_value_at(global_x: i32, global_z: i32) -> f32 {
+    normalized_perlin_sample(
+        global_x,
+        global_z,
+        TERRAIN_COAST_CLIFF_SCALE,
+        &Perlin::new(TERRAIN_COAST_CLIFF_SEED),
+    )
 }
 
 #[must_use]
@@ -275,6 +362,10 @@ pub fn terrain_biome_at(global_x: i32, global_z: i32) -> TerrainBiome {
         return TerrainBiome::Beach;
     }
 
+    if terrain_canyon_value_at(global_x, global_z) >= TERRAIN_CANYON_THRESHOLD {
+        return TerrainBiome::Canyon;
+    }
+
     let roughness = terrain_roughness_at(global_x, global_z);
     if height >= BIOME_MOUNTAIN_HEIGHT_THRESHOLD || roughness >= BIOME_ROUGHNESS_THRESHOLD {
         return TerrainBiome::Mountains;
@@ -307,7 +398,7 @@ pub fn terrain_biome_surface_block(
     surface: BiomeSurfaceBlocks,
 ) -> BlockId {
     match biome {
-        TerrainBiome::Beach | TerrainBiome::Desert => surface.sand,
+        TerrainBiome::Beach | TerrainBiome::Desert | TerrainBiome::Canyon => surface.sand,
         TerrainBiome::Snow => surface.snow,
         TerrainBiome::Mountains if height >= BIOME_MOUNTAIN_SNOW_HEIGHT => surface.snow,
         _ => surface.grass,
@@ -1428,24 +1519,29 @@ mod tests {
                 top_block: palette.grass,
             },
             GoldenSurfaceCase {
+                // Canyon mesa lifts the raw height by +8 here; the surface
+                // kernel still averages into the surrounding base level.
                 x: 512,
                 z: 384,
                 width: 4,
                 depth: 3,
-                raw_height: 40,
-                shell_height: 40,
-                cell_height: 41,
+                raw_height: 48,
+                shell_height: 44,
+                cell_height: 48,
                 top_block: palette.grass,
             },
             GoldenSurfaceCase {
+                // Coast cliff: base column is at sea level but neighbours in
+                // the smoothing kernel are lifted, so the shell/cell heights
+                // climb above the beach threshold and the surface is grass.
                 x: -179,
                 z: -512,
                 width: 1,
                 depth: 1,
                 raw_height: 14,
-                shell_height: 14,
-                cell_height: 14,
-                top_block: sand,
+                shell_height: 18,
+                cell_height: 18,
+                top_block: palette.grass,
             },
         ];
 

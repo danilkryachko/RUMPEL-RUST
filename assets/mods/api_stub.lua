@@ -74,7 +74,7 @@
 ---@field local_z integer
 ---@field height integer
 ---@field chunk_height integer
----@field biome "beach"|"plains"|"forest"|"mountains"|"desert"|"snow"
+---@field biome "beach"|"plains"|"forest"|"mountains"|"desert"|"snow"|"canyon"
 ---@field surface_block string
 ---@field subsurface_block string
 ---@field temperature number
@@ -189,7 +189,7 @@ function sample_world(x, z) end
 
 ---@param x integer
 ---@param z integer
----@return "beach"|"plains"|"forest"|"mountains"|"desert"|"snow" biome
+---@return "beach"|"plains"|"forest"|"mountains"|"desert"|"snow"|"canyon" biome
 function get_biome(x, z) end
 
 ---@param salt string
