@@ -5450,6 +5450,7 @@ mod tests {
             is_transparent: !is_solid,
             color: (1.0, 1.0, 1.0, 1.0),
             gravity_affected: false,
+            wind_animated: false,
             strength: 1.0,
         }
     }
