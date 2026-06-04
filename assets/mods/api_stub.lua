@@ -74,7 +74,7 @@
 ---@field local_z integer
 ---@field height integer
 ---@field chunk_height integer
----@field biome "beach"|"plains"|"forest"|"mountains"
+---@field biome "beach"|"plains"|"forest"|"mountains"|"desert"|"snow"
 ---@field surface_block string
 ---@field subsurface_block string
 ---@field temperature number
@@ -189,14 +189,27 @@ function sample_world(x, z) end
 
 ---@param x integer
 ---@param z integer
----@return "beach"|"plains"|"forest"|"mountains" biome
+---@return "beach"|"plains"|"forest"|"mountains"|"desert"|"snow" biome
 function get_biome(x, z) end
 
 ---@param salt string
 ---@param x integer
 ---@param z integer
----@return number value
+---@return number value # deterministic value in [0, 1)
 function rand01(salt, x, z) end
+
+---@param salt string
+---@param x integer
+---@param y integer
+---@param z integer
+---@return number value # deterministic 3D value in [0, 1)
+function rand3d(salt, x, y, z) end
+
+---@param x integer
+---@param y integer
+---@param z integer
+---@return number value # smooth 3D ore-vein field in [0, 1]
+function ore_noise(x, y, z) end
 
 ---@param salt string
 ---@param x integer

@@ -19,6 +19,11 @@ const BIOME_NOISE_SCALE: f64 = 0.006;
 const BIOME_MOUNTAIN_HEIGHT_THRESHOLD: usize = 38;
 const BIOME_FOREST_HUMIDITY_THRESHOLD: f32 = 0.58;
 const BIOME_ROUGHNESS_THRESHOLD: f32 = 0.26;
+const BIOME_DESERT_TEMPERATURE_THRESHOLD: f32 = 0.66;
+const BIOME_DESERT_HUMIDITY_THRESHOLD: f32 = 0.35;
+const BIOME_SNOW_TEMPERATURE_THRESHOLD: f32 = 0.30;
+const ORE_NOISE_SEED: u32 = 51_337;
+const ORE_NOISE_SCALE: f64 = 0.08;
 const DIRT_DEPTH: usize = 3;
 pub const SURFACE_BEACH_HEIGHT_THRESHOLD: usize = 14;
 const SURFACE_SHELL_HEIGHT_KERNEL: [usize; 5] = [1, 4, 6, 4, 1];
@@ -133,6 +138,8 @@ pub enum TerrainBiome {
     Plains,
     Forest,
     Mountains,
+    Desert,
+    Snow,
 }
 
 impl TerrainBiome {
@@ -143,6 +150,8 @@ impl TerrainBiome {
             Self::Plains => "plains",
             Self::Forest => "forest",
             Self::Mountains => "mountains",
+            Self::Desert => "desert",
+            Self::Snow => "snow",
         }
     }
 }
@@ -231,11 +240,52 @@ pub fn terrain_biome_at(global_x: i32, global_z: i32) -> TerrainBiome {
         return TerrainBiome::Mountains;
     }
 
-    if terrain_humidity_at(global_x, global_z) >= BIOME_FOREST_HUMIDITY_THRESHOLD {
+    let temperature = terrain_temperature_at(global_x, global_z);
+    let humidity = terrain_humidity_at(global_x, global_z);
+
+    if temperature <= BIOME_SNOW_TEMPERATURE_THRESHOLD {
+        return TerrainBiome::Snow;
+    }
+    if temperature >= BIOME_DESERT_TEMPERATURE_THRESHOLD
+        && humidity < BIOME_DESERT_HUMIDITY_THRESHOLD
+    {
+        return TerrainBiome::Desert;
+    }
+    if humidity >= BIOME_FOREST_HUMIDITY_THRESHOLD {
         TerrainBiome::Forest
     } else {
         TerrainBiome::Plains
     }
+}
+
+/// Deterministic 3D value in `[0, 1)` from a salt and global block coordinate.
+///
+/// 3D analogue of [`worldgen_rand01`] for scattering ores and other
+/// volume-based features that vary with depth.
+#[must_use]
+pub fn worldgen_rand3d(salt: &str, global_x: i32, world_y: i32, global_z: i32) -> f64 {
+    let mut hash = fnv64(FNV64_OFFSET, 0x3D0F_FE5E_7C0D_EBAD_u64);
+    hash = fnv64(hash, (i64::from(global_x)) as u64);
+    hash = fnv64(hash, (i64::from(world_y)) as u64);
+    hash = fnv64(hash, (i64::from(global_z)) as u64);
+    for byte in salt.as_bytes() {
+        hash = fnv64(hash, u64::from(*byte));
+    }
+    let mantissa = hash >> 11;
+    mantissa as f64 / ((1_u64 << 53) as f64)
+}
+
+/// Smooth 3D ore-vein field in `[0, 1]`, used to grow connected ore pockets
+/// rather than isolated specks.
+#[must_use]
+pub fn terrain_ore_noise_at(global_x: i32, world_y: i32, global_z: i32) -> f32 {
+    let perlin = Perlin::new(ORE_NOISE_SEED);
+    let value = perlin.get([
+        f64::from(global_x) * ORE_NOISE_SCALE,
+        f64::from(world_y) * ORE_NOISE_SCALE,
+        f64::from(global_z) * ORE_NOISE_SCALE,
+    ]);
+    ((value + 1.0) * 0.5).clamp(0.0, 1.0) as f32
 }
 
 #[must_use]
@@ -858,6 +908,22 @@ fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGene
     );
     if let Ok(function) = chance {
         let _ = globals.set("chance", function);
+    }
+
+    let rand3d_stats = Rc::clone(&stats);
+    let rand3d = lua.create_function(move |_, (salt, x, y, z): (String, i32, i32, i32)| {
+        rand3d_stats.borrow_mut().deterministic_random_requests += 1;
+        Ok(worldgen_rand3d(&salt, origin_x + x, y, origin_z + z))
+    });
+    if let Ok(function) = rand3d {
+        let _ = globals.set("rand3d", function);
+    }
+
+    let ore_noise = lua.create_function(move |_, (x, y, z): (i32, i32, i32)| {
+        Ok(f64::from(terrain_ore_noise_at(origin_x + x, y, origin_z + z)))
+    });
+    if let Ok(function) = ore_noise {
+        let _ = globals.set("ore_noise", function);
     }
 
     let get_height_stats = Rc::clone(&stats);

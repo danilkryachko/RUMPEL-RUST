@@ -118,8 +118,10 @@ for x = 0, CHUNK_MAX do
         local h = get_height(x, z)
         if h > SEA_LEVEL and h <= CHUNK_MAX and get_block(x, h, z) ~= "air" then
             local biome = get_biome(x, z)
-            if biome == "beach" then
+            if biome == "beach" or biome == "desert" then
                 set_block(x, h, z, "sand")
+            elseif biome == "snow" then
+                set_block(x, h, z, "snow")
             elseif biome == "mountains" and h >= MOUNTAIN_SNOW_HEIGHT then
                 set_block(x, h, z, "snow")
             end
@@ -128,25 +130,48 @@ for x = 0, CHUNK_MAX do
 end
 
 -- ── 3. Biome-driven vegetation ───────────────────────────────────────────────
--- Forests: dense tall oaks. Plains: sparse short oaks. Mountains: pines below
--- the snow line. Beaches: bare sand.
+-- Tree density blends with the continuous humidity field so forest/plains and
+-- plains/desert edges fade smoothly instead of snapping at the biome boundary.
+--   Forest : dense tall oaks (density scales with humidity)
+--   Plains : sparse short oaks (density scales with humidity)
+--   Snow   : pines below the snow line
+--   Desert : rare dead shrubs on sand
+--   Beach  : bare
+
+local function lerp(a, b, t)
+    if t < 0 then t = 0 elseif t > 1 then t = 1 end
+    return a + (b - a) * t
+end
 
 for x = 2, CHUNK_MAX - 2, 3 do
     for z = 2, CHUNK_MAX - 2, 3 do
         local h = get_height(x, z)
-        if h > SEA_LEVEL and h < CHUNK_MAX - 4 and get_block(x, h, z) == "grass" then
-            local biome = get_biome(x, z)
-            if biome == "forest" then
-                if chance("tree_forest", x, z, 0.55) then
+        if h > SEA_LEVEL and h < CHUNK_MAX - 4 then
+            local s = sample_world(x, z)
+            local top = get_block(x, h, z)
+            if s.biome == "forest" and top == "grass" then
+                -- humidity 0.58..1.0 → density 0.35..0.7
+                local density = lerp(0.35, 0.70, (s.humidity - 0.58) / 0.42)
+                if chance("tree_forest", x, z, density) then
                     spawn_organic_oak(x, h + 1, z, 6)
                 end
-            elseif biome == "plains" then
-                if chance("tree_plains", x, z, 0.12) then
+            elseif s.biome == "plains" and top == "grass" then
+                -- humidity 0.0..0.58 → density 0.04..0.18
+                local density = lerp(0.04, 0.18, s.humidity / 0.58)
+                if chance("tree_plains", x, z, density) then
                     spawn_organic_oak(x, h + 1, z, 4)
                 end
-            elseif biome == "mountains" and h < MOUNTAIN_SNOW_HEIGHT then
+            elseif s.biome == "snow" and h < MOUNTAIN_SNOW_HEIGHT and (top == "snow" or top == "grass") then
+                if chance("tree_snow", x, z, 0.22) then
+                    spawn_pine(x, h + 1, z, 5)
+                end
+            elseif s.biome == "mountains" and h < MOUNTAIN_SNOW_HEIGHT and top == "grass" then
                 if chance("tree_mountain", x, z, 0.20) then
                     spawn_pine(x, h + 1, z, 5)
+                end
+            elseif s.biome == "desert" and top == "sand" then
+                if chance("desert_shrub", x, z, 0.05) then
+                    set_block(x, h + 1, z, "leaves")
                 end
             end
         end
@@ -293,6 +318,45 @@ for c = 1, 4 do
                         set_block(px, py, pz, "crystal_ore")
                     end
                 end
+            end
+        end
+    end
+end
+
+-- ── 6.5 3D ore distribution ───────────────────────────────────────────────────
+-- Ores grow as connected veins: `ore_noise` (smooth 3D Perlin) gates where a
+-- vein exists, `rand3d` picks the ore type within a depth band. Deep stone
+-- yields rarer ores (diamond/lapis/redstone), shallow stone the common ones.
+
+local ORE_VEIN_THRESHOLD = 0.70
+
+local function ore_for_depth(y, roll)
+    if y <= 6 then
+        -- Deep band: precious + utility ores.
+        if roll < 0.10 then return "diamond_ore"
+        elseif roll < 0.30 then return "lapis_ore"
+        elseif roll < 0.55 then return "redstone_ore"
+        elseif roll < 0.75 then return "gold_ore"
+        else return "iron_ore" end
+    elseif y <= 14 then
+        -- Mid band: structural metals.
+        if roll < 0.08 then return "gold_ore"
+        elseif roll < 0.30 then return "iron_ore"
+        elseif roll < 0.60 then return "copper_ore"
+        else return "coal_ore" end
+    else
+        -- Shallow band: mostly coal with a little copper.
+        if roll < 0.25 then return "copper_ore" else return "coal_ore" end
+    end
+end
+
+for x = 0, CHUNK_MAX do
+    for z = 0, CHUNK_MAX do
+        local surface = get_height(x, z)
+        local scan_top = math.min(surface - 1, CHUNK_MAX)
+        for y = 1, scan_top do
+            if get_block(x, y, z) == "stone" and ore_noise(x, y, z) >= ORE_VEIN_THRESHOLD then
+                set_block(x, y, z, ore_for_depth(y, rand3d("ore_type", x, y, z)))
             end
         end
     end
