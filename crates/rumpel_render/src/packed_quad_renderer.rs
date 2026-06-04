@@ -717,9 +717,16 @@ struct IndirectVisibilityEstimate {
 struct VisibleIndirectSelection {
     indices: Vec<usize>,
     commands: Vec<crate::packed_quad_buffer::PackedQuadDrawCommand>,
+    visible_commands: usize,
     visible_batches: usize,
     visible_quads: usize,
     considered_commands: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct VisibleIndirectCollectionMode {
+    indices: bool,
+    commands: bool,
 }
 
 fn collect_visible_indirect_commands(
@@ -729,16 +736,21 @@ fn collect_visible_indirect_commands(
     view_position: Vec3,
     clip_from_world: Mat4,
     face_range_cull_enabled: bool,
-    collect_indices: bool,
+    collection_mode: VisibleIndirectCollectionMode,
 ) -> VisibleIndirectSelection {
     let mut last_visible_batch_key = None;
     let mut selection = VisibleIndirectSelection {
-        indices: if collect_indices {
+        indices: if collection_mode.indices {
             Vec::with_capacity(command_count.min(draw_commands.len()))
         } else {
             Vec::new()
         },
-        commands: Vec::with_capacity(command_count.min(draw_commands.len())),
+        commands: if collection_mode.commands {
+            Vec::with_capacity(command_count.min(draw_commands.len()))
+        } else {
+            Vec::new()
+        },
+        visible_commands: 0,
         visible_batches: 0,
         visible_quads: 0,
         considered_commands: 0,
@@ -771,10 +783,13 @@ fn collect_visible_indirect_commands(
             continue;
         }
 
-        if collect_indices {
+        if collection_mode.indices {
             selection.indices.push(index);
         }
-        selection.commands.push(*draw_command);
+        if collection_mode.commands {
+            selection.commands.push(*draw_command);
+        }
+        selection.visible_commands += 1;
         selection.visible_quads += command.len_quads;
         if last_visible_batch_key != Some(command.batch_key) {
             selection.visible_batches += 1;
@@ -2591,6 +2606,7 @@ impl render_graph::Node for PackedQuadRenderNode {
                 Some((_, capacity_commands)) => capacity_commands < indirect.command_count,
                 None => true,
             };
+            let collect_visible_commands = cpu_visible_indirect_buffer.is_some();
 
             let visible_selection =
                 (gpu_cull_count.is_none() && !full_cpu_multi_indirect).then(|| {
@@ -2604,7 +2620,10 @@ impl render_graph::Node for PackedQuadRenderNode {
                             PACKED_FACE_RANGE_CULL_ENV,
                             DEFAULT_PACKED_FACE_RANGE_CULL,
                         ),
-                        collect_visible_indices,
+                        VisibleIndirectCollectionMode {
+                            indices: collect_visible_indices,
+                            commands: collect_visible_commands,
+                        },
                     )
                 });
 
@@ -2709,7 +2728,7 @@ impl render_graph::Node for PackedQuadRenderNode {
                     }
                     crate::packed_quad_pipeline::record_packed_quad_cpu_visible_indirect(
                         false,
-                        selection.commands.len(),
+                        selection.visible_commands,
                     );
                 }
             }
@@ -3578,11 +3597,15 @@ mod tests {
             Vec3::new(0.0, 0.0, -2.0),
             Mat4::IDENTITY,
             false,
-            true,
+            VisibleIndirectCollectionMode {
+                indices: true,
+                commands: true,
+            },
         );
 
         assert_eq!(selection.indices, vec![0, 1]);
         assert_eq!(selection.commands, vec![draw_commands[0], draw_commands[1]]);
+        assert_eq!(selection.visible_commands, 2);
         assert_eq!(selection.visible_batches, 1);
         assert_eq!(selection.visible_quads, 15);
         assert_eq!(selection.considered_commands, 3);
@@ -3594,7 +3617,10 @@ mod tests {
             Vec3::new(0.0, 0.0, -2.0),
             Mat4::IDENTITY,
             false,
-            false,
+            VisibleIndirectCollectionMode {
+                indices: false,
+                commands: true,
+            },
         );
 
         assert!(compact_selection.indices.is_empty());
@@ -3606,6 +3632,35 @@ mod tests {
         assert_eq!(compact_selection.visible_quads, selection.visible_quads);
         assert_eq!(
             compact_selection.considered_commands,
+            selection.considered_commands
+        );
+
+        let fallback_selection = collect_visible_indirect_commands(
+            &metadata,
+            &draw_commands,
+            metadata.len(),
+            Vec3::new(0.0, 0.0, -2.0),
+            Mat4::IDENTITY,
+            false,
+            VisibleIndirectCollectionMode {
+                indices: true,
+                commands: false,
+            },
+        );
+
+        assert_eq!(fallback_selection.indices, selection.indices);
+        assert!(fallback_selection.commands.is_empty());
+        assert_eq!(
+            fallback_selection.visible_commands,
+            selection.visible_commands
+        );
+        assert_eq!(
+            fallback_selection.visible_batches,
+            selection.visible_batches
+        );
+        assert_eq!(fallback_selection.visible_quads, selection.visible_quads);
+        assert_eq!(
+            fallback_selection.considered_commands,
             selection.considered_commands
         );
     }
