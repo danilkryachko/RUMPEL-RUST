@@ -18,6 +18,7 @@ use std::{num::NonZeroU32, time::Duration};
 
 mod profiling;
 mod working_dir;
+mod world_save;
 
 const DEPTH_PREPASS_ENV: &str = "RUMPEL_DEPTH_PREPASS";
 const OCCLUSION_CULLING_ENV: &str = "RUMPEL_OCCLUSION_CULLING";
@@ -40,8 +41,11 @@ const CAMERA_PITCH_RADIANS_ENV: &str = "RUMPEL_CAMERA_PITCH_RADIANS";
 const CAMERA_YAW_RADIANS_ENV: &str = "RUMPEL_CAMERA_YAW_RADIANS";
 const START_PLAYER_X: f32 = 8.0;
 const START_PLAYER_Z: f32 = 24.0;
-const PACKED_START_PLAYER_CLEARANCE: f32 = 56.0;
-const PACKED_START_CAMERA_PITCH_RADIANS: f32 = -0.36;
+// Stand right above the terrain surface so packed-mode screenshots show the
+// ground and horizon instead of starting high above the playable world.
+const PACKED_START_PLAYER_CLEARANCE: f32 = 1.5;
+// Slight downward tilt so the spawn vista shows ground+horizon, not sky.
+const PACKED_START_CAMERA_PITCH_RADIANS: f32 = -0.18;
 const DEFAULT_PRESENT_MODE: PresentMode = PresentMode::Immediate;
 const DEFAULT_FRAME_LATENCY: Option<NonZeroU32> = NonZeroU32::new(1);
 const DEFAULT_HEADLESS_WAIT_MS: f64 = 0.0;
@@ -53,6 +57,14 @@ fn main() {
     if env_flag_default(GPU_PREFLIGHT_ENV, true) {
         preflight_gpu_adapter();
     }
+
+    let active_world = match world_save::open_active_world_save() {
+        Ok(save) => save,
+        Err(error) => {
+            eprintln!("failed to open world save: {error}");
+            std::process::exit(70);
+        }
+    };
 
     let block_registry = BlockRegistry::default();
     let headless_render = headless_render_enabled();
@@ -68,7 +80,8 @@ fn main() {
     }
 
     let mut app = App::new();
-    app.insert_resource(block_registry)
+    app.insert_resource(active_world)
+        .insert_resource(block_registry)
         .insert_resource(WinitSettings::continuous())
         .insert_resource(ClearColor(Color::srgb(0.529, 0.808, 0.922)))
         .add_plugins(default_plugins)
@@ -76,6 +89,7 @@ fn main() {
         .add_plugins(rumpel_debug::RumpelDebugPlugin)
         .add_plugins(rumpel_render::RumpelRenderPlugin)
         .add_plugins(RumpelClientProfilingPlugin)
+        .add_plugins(world_save::plugin)
         .init_state::<GameState>()
         .init_resource::<RumpelTime>()
         .add_systems(Startup, setup_camera_and_light)
@@ -286,6 +300,7 @@ fn setup_camera_and_light(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     render_mode: Option<Res<rumpel_render::RumpelRenderMode>>,
+    save: Res<world_save::ActiveWorldSave>,
 ) {
     let render_mode_value = render_mode.as_ref().map(|mode| **mode);
     let shadows_enabled = shadows_enabled_for_render_mode(render_mode_value);
@@ -343,17 +358,24 @@ fn setup_camera_and_light(
         PACKED_START_PLAYER_CLEARANCE,
         PACKED_START_CAMERA_PITCH_RADIANS,
     );
-    let start_x = env_f32(CAMERA_START_X_ENV).unwrap_or(START_PLAYER_X);
-    let start_z = env_f32(CAMERA_START_Z_ENV).unwrap_or(START_PLAYER_Z);
     let start_clearance = env_f32(CAMERA_CLEARANCE_ENV).unwrap_or(default_clearance);
     let camera_pitch = env_f32(CAMERA_PITCH_RADIANS_ENV).unwrap_or(default_pitch);
     let camera_yaw = env_f32(CAMERA_YAW_RADIANS_ENV).unwrap_or(0.0);
-    let surface_y = terrain_height_at(start_x as i32, start_z as i32) as f32;
-    // Legacy profile env treats clearance as eye height above terrain; gameplay uses feet on surface.
-    let start_y = if start_clearance > 1.0 {
-        surface_y + start_clearance - PLAYER_EYE_HEIGHT
+    let (start_x, start_y, start_z) = if env_f32(CAMERA_START_X_ENV).is_none()
+        && env_f32(CAMERA_START_Z_ENV).is_none()
+        && let Some(saved) = world_save::spawn_position_from_save(&save.meta)
+    {
+        (saved.x, saved.y, saved.z)
     } else {
-        surface_y + start_clearance.max(PLAYER_FEET_SURFACE_EPSILON)
+        let start_x = env_f32(CAMERA_START_X_ENV).unwrap_or(START_PLAYER_X);
+        let start_z = env_f32(CAMERA_START_Z_ENV).unwrap_or(START_PLAYER_Z);
+        let surface_y = terrain_height_at(start_x as i32, start_z as i32) as f32;
+        let start_y = if start_clearance > 1.0 {
+            surface_y + start_clearance - PLAYER_EYE_HEIGHT
+        } else {
+            surface_y + start_clearance.max(PLAYER_FEET_SURFACE_EPSILON)
+        };
+        (start_x, start_y, start_z)
     };
     let camera_rotation = Quat::from_rotation_y(camera_yaw) * Quat::from_rotation_x(camera_pitch);
     let headless_render_target =

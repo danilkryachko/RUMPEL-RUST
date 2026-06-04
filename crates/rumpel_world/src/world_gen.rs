@@ -1,4 +1,4 @@
-use crate::chunk::{CHUNK_SIZE, ChunkData, WorldEditStore};
+use crate::chunk::{CHUNK_HEIGHT, CHUNK_SIZE, ChunkData, WorldEditStore};
 use bevy::{
     platform::collections::HashMap,
     prelude::{error, info},
@@ -7,84 +7,155 @@ use noise::{NoiseFn, Perlin};
 use rumpel_blocks::AIR_BLOCK_ID;
 use rumpel_blocks::{BlockId, BlockRegistry};
 use rumpel_coords::{ChunkPos, LocalBlockPos};
-use std::{cell::RefCell, fs, rc::Rc};
+use std::{
+    cell::RefCell,
+    fs,
+    rc::Rc,
+    sync::{
+        OnceLock,
+        atomic::{AtomicU32, Ordering},
+    },
+};
 
-const TERRAIN_SEED: u32 = 1337;
-const TERRAIN_NOISE_SCALE: f64 = 0.02;
-const TERRAIN_BASE_HEIGHT: f64 = 10.0;
-const TERRAIN_HEIGHT_RANGE: f64 = 40.0;
+pub const DEFAULT_TERRAIN_SEED: u32 = 1337;
+const TERRAIN_CONTINENT_SEED: u32 = 7_137;
+const TERRAIN_UPLAND_SEED: u32 = 11_337;
+const TERRAIN_RIDGE_SEED: u32 = 17_337;
+const TERRAIN_VALLEY_SEED: u32 = 19_337;
+const TERRAIN_WARP_X_SEED: u32 = 23_337;
+const TERRAIN_WARP_Z_SEED: u32 = 29_337;
+const TERRAIN_ARIDITY_SEED: u32 = 37_337;
+const TERRAIN_BIOME_VARIATION_SEED: u32 = 41_337;
+const TERRAIN_LAKE_SEED: u32 = 43_337;
+const TERRAIN_CAVE_PRIMARY_SEED: u32 = 47_337;
+const TERRAIN_CAVE_DETAIL_SEED: u32 = 53_337;
+const TERRAIN_ORE_SEED: u32 = 59_337;
+const TERRAIN_NOISE_SCALE: f64 = 0.018;
+const TERRAIN_CONTINENT_SCALE: f64 = 0.0015;
+const TERRAIN_UPLAND_SCALE: f64 = 0.0042;
+const TERRAIN_RIDGE_SCALE: f64 = 0.009;
+const TERRAIN_VALLEY_SCALE: f64 = 0.0024;
+const TERRAIN_WARP_SCALE: f64 = 0.0032;
+const TERRAIN_WARP_STRENGTH: f64 = 24.0;
+const TERRAIN_LAKE_SCALE: f64 = 0.0028;
+const TERRAIN_BASE_HEIGHT: f64 = 18.0;
+const TERRAIN_HEIGHT_RANGE: f64 = 150.0;
+const WORLD_WATER_LEVEL: usize = 12;
 const BIOME_TEMPERATURE_SEED: u32 = 21_337;
 const BIOME_HUMIDITY_SEED: u32 = 31_337;
 const BIOME_NOISE_SCALE: f64 = 0.006;
-const BIOME_MOUNTAIN_HEIGHT_THRESHOLD: usize = 38;
+const BIOME_MOUNTAIN_HEIGHT_THRESHOLD: usize = 82;
 const BIOME_FOREST_HUMIDITY_THRESHOLD: f32 = 0.58;
-const BIOME_ROUGHNESS_THRESHOLD: f32 = 0.26;
-const BIOME_DESERT_TEMPERATURE_THRESHOLD: f32 = 0.66;
-const BIOME_DESERT_HUMIDITY_THRESHOLD: f32 = 0.35;
-const BIOME_SNOW_TEMPERATURE_THRESHOLD: f32 = 0.30;
-const BIOME_MOUNTAIN_SNOW_HEIGHT: usize = 30;
-const ORE_NOISE_SEED: u32 = 51_337;
-const ORE_NOISE_SCALE: f64 = 0.08;
-
-// Canyon biome: large mesa regions carved by narrow channels.
-const TERRAIN_CANYON_SEED: u32 = 41_337;
-const TERRAIN_CANYON_SCALE: f64 = 0.012;
-const TERRAIN_CANYON_THRESHOLD: f32 = 0.62;
-const TERRAIN_CANYON_MESA_BONUS: i32 = 8;
-const TERRAIN_CANYON_CUT_SEED: u32 = 43_337;
-const TERRAIN_CANYON_CUT_SCALE: f64 = 0.05;
-const TERRAIN_CANYON_CUT_THRESHOLD: f32 = 0.66;
-const TERRAIN_CANYON_CUT_DEPTH: i32 = 14;
-
-// Coast cliff: along the shoreline the gradual beach gradient snaps up to a
-// sheer wall wherever the cliff noise is active. Inland heights are untouched.
-const TERRAIN_COAST_CLIFF_SEED: u32 = 61_337;
-const TERRAIN_COAST_CLIFF_SCALE: f64 = 0.02;
-const TERRAIN_COAST_CLIFF_THRESHOLD: f32 = 0.55;
-const TERRAIN_COAST_CLIFF_RANGE: i32 = 6;
-const TERRAIN_COAST_CLIFF_LIFT: i32 = 10;
-
+const BIOME_ROUGHNESS_THRESHOLD: f32 = 0.16;
 const DIRT_DEPTH: usize = 3;
 pub const SURFACE_BEACH_HEIGHT_THRESHOLD: usize = 14;
 const SURFACE_SHELL_HEIGHT_KERNEL: [usize; 5] = [1, 4, 6, 4, 1];
 const SURFACE_SHELL_HEIGHT_RADIUS: i32 = 2;
 const SURFACE_EDIT_SCAN_HEADROOM: usize = 24;
-const SURFACE_EDIT_SCAN_MAX_Y: usize = 96;
+const SURFACE_EDIT_SCAN_MAX_Y: usize = CHUNK_HEIGHT;
 const WORLD_GEN_SCRIPT_PATH: &str = "assets/mods/world_gen.lua";
 const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
+const CHUNK_HEIGHT_I32: i32 = CHUNK_HEIGHT as i32;
+const CAVE_SCALE: f64 = 0.044;
+const CAVE_DETAIL_SCALE: f64 = 0.095;
+const CAVE_MIN_DEPTH_BELOW_SURFACE: usize = 10;
+const ORE_SCALE: f64 = 0.078;
+const ORE_SURFACE_SAFETY: usize = 7;
+
+struct TerrainFieldNoise {
+    detail: Perlin,
+    continent: Perlin,
+    upland: Perlin,
+    ridge: Perlin,
+    valley: Perlin,
+    aridity: Perlin,
+    biome_variation: Perlin,
+    lake: Perlin,
+    cave_primary: Perlin,
+    cave_detail: Perlin,
+    ore: Perlin,
+    warp_x: Perlin,
+    warp_z: Perlin,
+    temperature: Perlin,
+    humidity: Perlin,
+}
+
+impl TerrainFieldNoise {
+    fn new(terrain_seed: u32) -> Self {
+        Self {
+            detail: Perlin::new(terrain_seed),
+            continent: Perlin::new(TERRAIN_CONTINENT_SEED),
+            upland: Perlin::new(TERRAIN_UPLAND_SEED),
+            ridge: Perlin::new(TERRAIN_RIDGE_SEED),
+            valley: Perlin::new(TERRAIN_VALLEY_SEED),
+            aridity: Perlin::new(TERRAIN_ARIDITY_SEED),
+            biome_variation: Perlin::new(TERRAIN_BIOME_VARIATION_SEED),
+            lake: Perlin::new(TERRAIN_LAKE_SEED),
+            cave_primary: Perlin::new(TERRAIN_CAVE_PRIMARY_SEED),
+            cave_detail: Perlin::new(TERRAIN_CAVE_DETAIL_SEED),
+            ore: Perlin::new(TERRAIN_ORE_SEED),
+            warp_x: Perlin::new(TERRAIN_WARP_X_SEED),
+            warp_z: Perlin::new(TERRAIN_WARP_Z_SEED),
+            temperature: Perlin::new(BIOME_TEMPERATURE_SEED),
+            humidity: Perlin::new(BIOME_HUMIDITY_SEED),
+        }
+    }
+}
+
+static ACTIVE_TERRAIN_SEED: AtomicU32 = AtomicU32::new(DEFAULT_TERRAIN_SEED);
+static TERRAIN_FIELD_NOISE: OnceLock<TerrainFieldNoise> = OnceLock::new();
+
+/// Sets the procedural terrain seed for this process and initializes noise tables once.
+pub fn init_active_world_terrain(terrain_seed: u32) {
+    ACTIVE_TERRAIN_SEED.store(terrain_seed, Ordering::Relaxed);
+    let _ = TERRAIN_FIELD_NOISE.get_or_init(|| TerrainFieldNoise::new(terrain_seed));
+}
+
+#[must_use]
+pub fn active_terrain_seed() -> u32 {
+    ACTIVE_TERRAIN_SEED.load(Ordering::Relaxed)
+}
+
+#[must_use]
+fn terrain_field_noise() -> &'static TerrainFieldNoise {
+    TERRAIN_FIELD_NOISE.get_or_init(|| TerrainFieldNoise::new(active_terrain_seed()))
+}
 
 #[must_use]
 pub fn terrain_generation_contract_version() -> u64 {
     let mut hash = FNV64_OFFSET;
-    hash = fnv64(hash, u64::from(TERRAIN_SEED));
+    hash = fnv64(hash, u64::from(active_terrain_seed()));
+    hash = fnv64(hash, u64::from(TERRAIN_CONTINENT_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_UPLAND_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_RIDGE_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_VALLEY_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_WARP_X_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_WARP_Z_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_ARIDITY_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_BIOME_VARIATION_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_LAKE_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_CAVE_PRIMARY_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_CAVE_DETAIL_SEED));
+    hash = fnv64(hash, u64::from(TERRAIN_ORE_SEED));
     hash = fnv64(hash, TERRAIN_NOISE_SCALE.to_bits());
+    hash = fnv64(hash, TERRAIN_CONTINENT_SCALE.to_bits());
+    hash = fnv64(hash, TERRAIN_UPLAND_SCALE.to_bits());
+    hash = fnv64(hash, TERRAIN_RIDGE_SCALE.to_bits());
+    hash = fnv64(hash, TERRAIN_VALLEY_SCALE.to_bits());
+    hash = fnv64(hash, TERRAIN_WARP_SCALE.to_bits());
+    hash = fnv64(hash, TERRAIN_WARP_STRENGTH.to_bits());
+    hash = fnv64(hash, TERRAIN_LAKE_SCALE.to_bits());
     hash = fnv64(hash, TERRAIN_BASE_HEIGHT.to_bits());
     hash = fnv64(hash, TERRAIN_HEIGHT_RANGE.to_bits());
+    hash = fnv64(hash, WORLD_WATER_LEVEL as u64);
+    hash = fnv64(hash, CAVE_SCALE.to_bits());
+    hash = fnv64(hash, CAVE_DETAIL_SCALE.to_bits());
+    hash = fnv64(hash, CAVE_MIN_DEPTH_BELOW_SURFACE as u64);
+    hash = fnv64(hash, ORE_SCALE.to_bits());
+    hash = fnv64(hash, ORE_SURFACE_SAFETY as u64);
     hash = fnv64(hash, DIRT_DEPTH as u64);
     hash = fnv64(hash, CHUNK_SIZE as u64);
-    hash = fnv64(hash, u64::from(BIOME_TEMPERATURE_SEED));
-    hash = fnv64(hash, u64::from(BIOME_HUMIDITY_SEED));
-    hash = fnv64(hash, BIOME_NOISE_SCALE.to_bits());
-    hash = fnv64(hash, BIOME_MOUNTAIN_HEIGHT_THRESHOLD as u64);
-    hash = fnv64(hash, f64::from(BIOME_FOREST_HUMIDITY_THRESHOLD).to_bits());
-    hash = fnv64(hash, f64::from(BIOME_ROUGHNESS_THRESHOLD).to_bits());
-    hash = fnv64(hash, f64::from(BIOME_DESERT_TEMPERATURE_THRESHOLD).to_bits());
-    hash = fnv64(hash, f64::from(BIOME_DESERT_HUMIDITY_THRESHOLD).to_bits());
-    hash = fnv64(hash, f64::from(BIOME_SNOW_TEMPERATURE_THRESHOLD).to_bits());
-    hash = fnv64(hash, BIOME_MOUNTAIN_SNOW_HEIGHT as u64);
-    hash = fnv64(hash, u64::from(TERRAIN_CANYON_SEED));
-    hash = fnv64(hash, TERRAIN_CANYON_SCALE.to_bits());
-    hash = fnv64(hash, f64::from(TERRAIN_CANYON_THRESHOLD).to_bits());
-    hash = fnv64(hash, TERRAIN_CANYON_MESA_BONUS as i64 as u64);
-    hash = fnv64(hash, u64::from(TERRAIN_CANYON_CUT_SEED));
-    hash = fnv64(hash, TERRAIN_CANYON_CUT_SCALE.to_bits());
-    hash = fnv64(hash, f64::from(TERRAIN_CANYON_CUT_THRESHOLD).to_bits());
-    hash = fnv64(hash, TERRAIN_CANYON_CUT_DEPTH as i64 as u64);
-    hash = fnv64(hash, u64::from(TERRAIN_COAST_CLIFF_SEED));
-    hash = fnv64(hash, TERRAIN_COAST_CLIFF_SCALE.to_bits());
-    hash = fnv64(hash, f64::from(TERRAIN_COAST_CLIFF_THRESHOLD).to_bits());
-    hash = fnv64(hash, TERRAIN_COAST_CLIFF_RANGE as i64 as u64);
-    hash = fnv64(hash, TERRAIN_COAST_CLIFF_LIFT as i64 as u64);
+    hash = fnv64(hash, CHUNK_HEIGHT as u64);
     if let Ok(bytes) = fs::read(WORLD_GEN_SCRIPT_PATH) {
         for byte in bytes {
             hash = fnv64(hash, u64::from(byte));
@@ -155,35 +226,6 @@ impl WorldGenerationContext {
     pub fn block_id(&self, name: &str) -> BlockId {
         self.name_to_id.get(name).copied().unwrap_or(AIR_BLOCK_ID)
     }
-
-    /// Resolve the per-biome top-soil blocks once so column generation and
-    /// surface sampling agree without repeated registry lookups.
-    #[must_use]
-    pub fn biome_surface_blocks(&self) -> BiomeSurfaceBlocks {
-        let sand = self.block_id("sand");
-        let snow = self.block_id("snow");
-        BiomeSurfaceBlocks {
-            grass: self.palette.grass,
-            sand: if sand == AIR_BLOCK_ID {
-                self.palette.grass
-            } else {
-                sand
-            },
-            snow: if snow == AIR_BLOCK_ID {
-                self.palette.grass
-            } else {
-                snow
-            },
-        }
-    }
-}
-
-/// Top-soil block ids selected per biome by [`terrain_biome_surface_block`].
-#[derive(Clone, Copy, Debug)]
-pub struct BiomeSurfaceBlocks {
-    pub grass: BlockId,
-    pub sand: BlockId,
-    pub snow: BlockId,
 }
 
 impl TerrainBlockPalette {
@@ -207,11 +249,15 @@ pub struct TerrainSurfaceSample {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerrainBiome {
     Beach,
+    River,
+    Wetlands,
     Plains,
     Forest,
+    AutumnForest,
+    Taiga,
     Mountains,
-    Desert,
     Snow,
+    Desert,
     Canyon,
 }
 
@@ -220,11 +266,15 @@ impl TerrainBiome {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Beach => "beach",
+            Self::River => "river",
+            Self::Wetlands => "wetlands",
             Self::Plains => "plains",
             Self::Forest => "forest",
+            Self::AutumnForest => "autumn_forest",
+            Self::Taiga => "taiga",
             Self::Mountains => "mountains",
-            Self::Desert => "desert",
             Self::Snow => "snow",
+            Self::Desert => "desert",
             Self::Canyon => "canyon",
         }
     }
@@ -242,80 +292,169 @@ pub struct WorldTerrainSample {
     pub temperature: f32,
     pub humidity: f32,
     pub roughness: f32,
+    pub aridity: f32,
+    pub river: f32,
+    pub lake: f32,
+    pub mountain: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainColumnSample {
+    pub global_x: i32,
+    pub global_z: i32,
+    pub height: usize,
+    pub biome: TerrainBiome,
+    pub temperature: f32,
+    pub humidity: f32,
+    pub roughness: f32,
+    pub aridity: f32,
+    pub river: f32,
+    pub lake: f32,
+    pub mountain: f32,
+    pub hill: f32,
+    pub valley: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TerrainShapeSample {
+    height: usize,
+    river: f64,
+    lake: f64,
+    mountain: f64,
+    hill: f64,
+    valley: f64,
+    continent: f64,
+    upland: f64,
+    aridity: f64,
+    biome_variation: f64,
 }
 
 #[must_use]
 pub fn terrain_height_at(global_x: i32, global_z: i32) -> usize {
-    let perlin = Perlin::new(TERRAIN_SEED);
-    terrain_height_with_noise(global_x, global_z, &perlin)
+    terrain_height_with_noise(global_x, global_z, &terrain_field_noise().detail)
 }
 
 #[must_use]
 pub fn terrain_height_with_noise(global_x: i32, global_z: i32, perlin: &Perlin) -> usize {
-    let mut height = base_terrain_height_with_noise(global_x, global_z, perlin);
-
-    if terrain_canyon_value_at(global_x, global_z) >= TERRAIN_CANYON_THRESHOLD {
-        height = height.saturating_add(TERRAIN_CANYON_MESA_BONUS);
-        if terrain_canyon_cut_value_at(global_x, global_z) >= TERRAIN_CANYON_CUT_THRESHOLD {
-            height = height.saturating_sub(TERRAIN_CANYON_CUT_DEPTH);
-        }
-    }
-
-    let sea_level = SURFACE_BEACH_HEIGHT_THRESHOLD as i32;
-    if height > sea_level
-        && height <= sea_level + TERRAIN_COAST_CLIFF_RANGE
-        && terrain_coast_cliff_value_at(global_x, global_z) >= TERRAIN_COAST_CLIFF_THRESHOLD
-    {
-        height = sea_level + TERRAIN_COAST_CLIFF_LIFT;
-    }
-
-    usize::try_from(height.max(0)).unwrap_or(0)
+    terrain_shape_with_noise(global_x, global_z, perlin).height
 }
 
-/// Raw heightfield from the base terrain Perlin, before canyon/cliff
-/// modifiers. Used internally so feature noise lookups never feed back into
-/// themselves through [`terrain_height_with_noise`].
-fn base_terrain_height_with_noise(global_x: i32, global_z: i32, perlin: &Perlin) -> i32 {
-    let noise_val = perlin.get([
-        f64::from(global_x) * TERRAIN_NOISE_SCALE,
-        f64::from(global_z) * TERRAIN_NOISE_SCALE,
+#[must_use]
+pub fn terrain_column_at(global_x: i32, global_z: i32) -> TerrainColumnSample {
+    terrain_column_with_noise(global_x, global_z, &terrain_field_noise().detail)
+}
+
+#[must_use]
+pub fn terrain_column_with_noise(
+    global_x: i32,
+    global_z: i32,
+    perlin: &Perlin,
+) -> TerrainColumnSample {
+    let shape = terrain_shape_with_noise(global_x, global_z, perlin);
+    let temperature = terrain_temperature_at(global_x, global_z);
+    let humidity = terrain_humidity_at(global_x, global_z);
+    let roughness = terrain_roughness_at(global_x, global_z);
+    let biome = terrain_biome_from_fields(&shape, temperature, humidity, roughness);
+
+    TerrainColumnSample {
+        global_x,
+        global_z,
+        height: shape.height,
+        biome,
+        temperature,
+        humidity,
+        roughness,
+        aridity: shape.aridity as f32,
+        river: shape.river as f32,
+        lake: shape.lake as f32,
+        mountain: shape.mountain as f32,
+        hill: shape.hill as f32,
+        valley: shape.valley as f32,
+    }
+}
+
+fn terrain_shape_with_noise(global_x: i32, global_z: i32, perlin: &Perlin) -> TerrainShapeSample {
+    let noise = terrain_field_noise();
+    let (warped_x, warped_z) = terrain_warped_coords(global_x, global_z, noise);
+
+    let continent = perlin01(
+        &noise.continent,
+        warped_x,
+        warped_z,
+        TERRAIN_CONTINENT_SCALE,
+    );
+    let upland = perlin01(&noise.upland, warped_x, warped_z, TERRAIN_UPLAND_SCALE);
+    let valley = perlin01(&noise.valley, warped_x, warped_z, TERRAIN_VALLEY_SCALE);
+    let aridity = perlin01(&noise.aridity, warped_x, warped_z, BIOME_NOISE_SCALE * 0.72);
+    let biome_variation = perlin01(
+        &noise.biome_variation,
+        warped_x,
+        warped_z,
+        BIOME_NOISE_SCALE * 1.15,
+    );
+    let lake_noise = perlin01(&noise.lake, warped_x, warped_z, TERRAIN_LAKE_SCALE);
+    let detail = fbm01(
+        perlin,
+        warped_x,
+        warped_z,
+        TERRAIN_NOISE_SCALE,
+        4,
+        2.05,
+        0.48,
+    );
+    let ridge_raw = noise.ridge.get([
+        warped_x * TERRAIN_RIDGE_SCALE,
+        warped_z * TERRAIN_RIDGE_SCALE,
     ]);
-    ((noise_val + 1.0) * 0.5 * TERRAIN_HEIGHT_RANGE + TERRAIN_BASE_HEIGHT) as i32
-}
+    let ridge = (1.0 - ridge_raw.abs().clamp(0.0, 1.0)).powf(2.35);
 
-#[must_use]
-fn terrain_canyon_value_at(global_x: i32, global_z: i32) -> f32 {
-    normalized_perlin_sample(
-        global_x,
-        global_z,
-        TERRAIN_CANYON_SCALE,
-        &Perlin::new(TERRAIN_CANYON_SEED),
-    )
-}
+    let mountain_weight = smoothstep(0.58, 0.88, continent) * smoothstep(0.48, 0.86, upland);
+    let hill_weight =
+        smoothstep(0.30, 0.68, upland) * (1.0 - mountain_weight * 0.70).clamp(0.0, 1.0);
+    let broad_land = smoothstep(0.12, 0.92, continent);
+    let valley_axis = 1.0 - ((valley - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+    let valley_cut = smoothstep(0.70, 0.96, valley_axis);
+    let river = smoothstep(0.86, 0.985, valley_axis)
+        * smoothstep(0.14, 0.72, continent)
+        * (1.0 - smoothstep(0.62, 0.95, upland) * 0.55);
+    let lake = smoothstep(0.78, 0.94, lake_noise)
+        * smoothstep(0.10, 0.68, continent)
+        * (1.0 - smoothstep(0.50, 0.86, upland));
 
-#[must_use]
-fn terrain_canyon_cut_value_at(global_x: i32, global_z: i32) -> f32 {
-    normalized_perlin_sample(
-        global_x,
-        global_z,
-        TERRAIN_CANYON_CUT_SCALE,
-        &Perlin::new(TERRAIN_CANYON_CUT_SEED),
-    )
-}
+    let mut height = TERRAIN_BASE_HEIGHT
+        + broad_land * 24.0
+        + hill_weight * 34.0
+        + mountain_weight * ridge * 112.0
+        + (detail - 0.5) * (8.0 + hill_weight * 10.0 + mountain_weight * 18.0)
+        - valley_cut * (8.0 + mountain_weight * 24.0)
+        - river * (8.0 + hill_weight * 8.0 + mountain_weight * 12.0)
+        - lake * 8.0;
 
-#[must_use]
-fn terrain_coast_cliff_value_at(global_x: i32, global_z: i32) -> f32 {
-    normalized_perlin_sample(
-        global_x,
-        global_z,
-        TERRAIN_COAST_CLIFF_SCALE,
-        &Perlin::new(TERRAIN_COAST_CLIFF_SEED),
-    )
+    if river > 0.76 && height <= WORLD_WATER_LEVEL as f64 + 20.0 {
+        height = height.min(WORLD_WATER_LEVEL as f64 + (1.0 - river) * 8.0);
+    }
+    if lake > 0.82 && height <= WORLD_WATER_LEVEL as f64 + 12.0 {
+        height = height.min(WORLD_WATER_LEVEL as f64 + (1.0 - lake) * 6.0);
+    }
+
+    let max_height = CHUNK_HEIGHT.saturating_sub(32) as f64;
+    TerrainShapeSample {
+        height: height.round().clamp(4.0, max_height) as usize,
+        river,
+        lake,
+        mountain: mountain_weight,
+        hill: hill_weight,
+        valley: valley_axis,
+        continent,
+        upland,
+        aridity,
+        biome_variation,
+    }
 }
 
 #[must_use]
 pub fn terrain_perlin() -> Perlin {
-    Perlin::new(TERRAIN_SEED)
+    Perlin::new(active_terrain_seed())
 }
 
 #[must_use]
@@ -324,7 +463,7 @@ pub fn terrain_temperature_at(global_x: i32, global_z: i32) -> f32 {
         global_x,
         global_z,
         BIOME_NOISE_SCALE,
-        &Perlin::new(BIOME_TEMPERATURE_SEED),
+        &terrain_field_noise().temperature,
     )
 }
 
@@ -334,7 +473,7 @@ pub fn terrain_humidity_at(global_x: i32, global_z: i32) -> f32 {
         global_x,
         global_z,
         BIOME_NOISE_SCALE,
-        &Perlin::new(BIOME_HUMIDITY_SEED),
+        &terrain_field_noise().humidity,
     )
 }
 
@@ -355,84 +494,69 @@ pub fn terrain_roughness_at(global_x: i32, global_z: i32) -> f32 {
     (neighbor_delta as f32 / TERRAIN_HEIGHT_RANGE as f32).clamp(0.0, 1.0)
 }
 
-#[must_use]
-pub fn terrain_biome_at(global_x: i32, global_z: i32) -> TerrainBiome {
-    let height = terrain_height_at(global_x, global_z);
+fn terrain_biome_from_fields(
+    shape: &TerrainShapeSample,
+    temperature: f32,
+    humidity: f32,
+    roughness: f32,
+) -> TerrainBiome {
+    let height = shape.height;
+    let temperature = f64::from(temperature);
+    let humidity = f64::from(humidity);
+    let roughness = f64::from(roughness);
+    let cold = (1.0 - temperature).clamp(0.0, 1.0);
+    let wet = humidity;
+    let dry = (shape.aridity * (1.0 - humidity * 0.55)).clamp(0.0, 1.0);
+    let high = smoothstep(54.0, 132.0, height as f64);
+
+    if shape.river >= 0.70 && height <= WORLD_WATER_LEVEL + 8 {
+        return TerrainBiome::River;
+    }
     if height <= SURFACE_BEACH_HEIGHT_THRESHOLD {
         return TerrainBiome::Beach;
     }
-
-    if terrain_canyon_value_at(global_x, global_z) >= TERRAIN_CANYON_THRESHOLD {
-        return TerrainBiome::Canyon;
+    if shape.lake >= 0.66 && height <= WORLD_WATER_LEVEL + 10 && wet >= 0.48 {
+        return TerrainBiome::Wetlands;
     }
-
-    let roughness = terrain_roughness_at(global_x, global_z);
-    if height >= BIOME_MOUNTAIN_HEIGHT_THRESHOLD || roughness >= BIOME_ROUGHNESS_THRESHOLD {
-        return TerrainBiome::Mountains;
-    }
-
-    let temperature = terrain_temperature_at(global_x, global_z);
-    let humidity = terrain_humidity_at(global_x, global_z);
-
-    if temperature <= BIOME_SNOW_TEMPERATURE_THRESHOLD {
+    if cold >= 0.78 && (height >= 48 || shape.mountain >= 0.35) {
         return TerrainBiome::Snow;
     }
-    if temperature >= BIOME_DESERT_TEMPERATURE_THRESHOLD
-        && humidity < BIOME_DESERT_HUMIDITY_THRESHOLD
-    {
+    if dry >= 0.72 && temperature >= 0.52 && wet <= 0.44 {
+        if roughness >= 0.10 || shape.valley >= 0.78 || shape.upland >= 0.58 {
+            return TerrainBiome::Canyon;
+        }
         return TerrainBiome::Desert;
     }
-    if humidity >= BIOME_FOREST_HUMIDITY_THRESHOLD {
-        TerrainBiome::Forest
-    } else {
-        TerrainBiome::Plains
+    if height >= BIOME_MOUNTAIN_HEIGHT_THRESHOLD
+        || roughness >= f64::from(BIOME_ROUGHNESS_THRESHOLD)
+        || shape.mountain >= 0.62
+    {
+        return if cold >= 0.55 {
+            TerrainBiome::Snow
+        } else {
+            TerrainBiome::Mountains
+        };
     }
+    if cold >= 0.52 && wet >= 0.38 {
+        return TerrainBiome::Taiga;
+    }
+    if wet >= f64::from(BIOME_FOREST_HUMIDITY_THRESHOLD) && shape.continent >= 0.22 && dry <= 0.58 {
+        return if shape.biome_variation >= 0.66 && temperature <= 0.70 {
+            TerrainBiome::AutumnForest
+        } else {
+            TerrainBiome::Forest
+        };
+    }
+    if wet >= 0.72 && height <= WORLD_WATER_LEVEL + 18 && high <= 0.40 {
+        return TerrainBiome::Wetlands;
+    }
+
+    TerrainBiome::Plains
 }
 
-/// Top-soil block for a biome column, painted into the chunk shell so packed,
-/// GPU, and sampling paths all see the biome surface without a Lua repaint.
 #[must_use]
-pub fn terrain_biome_surface_block(
-    biome: TerrainBiome,
-    height: usize,
-    surface: BiomeSurfaceBlocks,
-) -> BlockId {
-    match biome {
-        TerrainBiome::Beach | TerrainBiome::Desert | TerrainBiome::Canyon => surface.sand,
-        TerrainBiome::Snow => surface.snow,
-        TerrainBiome::Mountains if height >= BIOME_MOUNTAIN_SNOW_HEIGHT => surface.snow,
-        _ => surface.grass,
-    }
-}
-
-/// Deterministic 3D value in `[0, 1)` from a salt and global block coordinate.
-///
-/// 3D analogue of [`worldgen_rand01`] for scattering ores and other
-/// volume-based features that vary with depth.
-#[must_use]
-pub fn worldgen_rand3d(salt: &str, global_x: i32, world_y: i32, global_z: i32) -> f64 {
-    let mut hash = fnv64(FNV64_OFFSET, 0x3D0F_FE5E_7C0D_EBAD_u64);
-    hash = fnv64(hash, (i64::from(global_x)) as u64);
-    hash = fnv64(hash, (i64::from(world_y)) as u64);
-    hash = fnv64(hash, (i64::from(global_z)) as u64);
-    for byte in salt.as_bytes() {
-        hash = fnv64(hash, u64::from(*byte));
-    }
-    let mantissa = hash >> 11;
-    mantissa as f64 / ((1_u64 << 53) as f64)
-}
-
-/// Smooth 3D ore-vein field in `[0, 1]`, used to grow connected ore pockets
-/// rather than isolated specks.
-#[must_use]
-pub fn terrain_ore_noise_at(global_x: i32, world_y: i32, global_z: i32) -> f32 {
-    let perlin = Perlin::new(ORE_NOISE_SEED);
-    let value = perlin.get([
-        f64::from(global_x) * ORE_NOISE_SCALE,
-        f64::from(world_y) * ORE_NOISE_SCALE,
-        f64::from(global_z) * ORE_NOISE_SCALE,
-    ]);
-    ((value + 1.0) * 0.5).clamp(0.0, 1.0) as f32
+pub fn terrain_biome_at(global_x: i32, global_z: i32) -> TerrainBiome {
+    terrain_column_at(global_x, global_z).biome
 }
 
 #[must_use]
@@ -442,34 +566,92 @@ pub fn terrain_world_sample_at(
     context: &WorldGenerationContext,
     surface_material: BlockId,
 ) -> WorldTerrainSample {
-    let height = terrain_height_at(global_x, global_z);
-    let chunk_height = height.min(CHUNK_SIZE - 1);
-    let biome = terrain_biome_at(global_x, global_z);
-    let mut surface_blocks = context.biome_surface_blocks();
-    if surface_material != context.palette.air {
-        surface_blocks.sand = surface_material;
-    }
-    let surface_block = terrain_biome_surface_block(biome, height, surface_blocks);
-    let subsurface_block =
-        terrain_block_at_height(height.saturating_sub(2), height, context.palette);
+    let column = terrain_column_at(global_x, global_z);
+    let height = column.height;
+    let chunk_height = height.min(CHUNK_HEIGHT - 1);
+    let surface_block = terrain_surface_block_for_column(&column, context, surface_material);
+    let subsurface_block = terrain_subsurface_block_for_column(&column, context, surface_material);
 
     WorldTerrainSample {
         global_x,
         global_z,
         height,
         chunk_height,
-        biome,
+        biome: column.biome,
         surface_block,
         subsurface_block,
-        temperature: terrain_temperature_at(global_x, global_z),
-        humidity: terrain_humidity_at(global_x, global_z),
-        roughness: terrain_roughness_at(global_x, global_z),
+        temperature: column.temperature,
+        humidity: column.humidity,
+        roughness: column.roughness,
+        aridity: column.aridity,
+        river: column.river,
+        lake: column.lake,
+        mountain: column.mountain,
     }
 }
 
 fn normalized_perlin_sample(global_x: i32, global_z: i32, scale: f64, perlin: &Perlin) -> f32 {
     let value = perlin.get([f64::from(global_x) * scale, f64::from(global_z) * scale]);
     ((value + 1.0) * 0.5).clamp(0.0, 1.0) as f32
+}
+
+fn terrain_warped_coords(global_x: i32, global_z: i32, noise: &TerrainFieldNoise) -> (f64, f64) {
+    let x = f64::from(global_x);
+    let z = f64::from(global_z);
+    let warp_x = noise
+        .warp_x
+        .get([x * TERRAIN_WARP_SCALE, z * TERRAIN_WARP_SCALE])
+        * TERRAIN_WARP_STRENGTH;
+    let warp_z = noise.warp_z.get([
+        (x + 1024.0) * TERRAIN_WARP_SCALE,
+        (z - 1024.0) * TERRAIN_WARP_SCALE,
+    ]) * TERRAIN_WARP_STRENGTH;
+
+    (x + warp_x, z + warp_z)
+}
+
+fn perlin01(perlin: &Perlin, x: f64, z: f64, scale: f64) -> f64 {
+    ((perlin.get([x * scale, z * scale]) + 1.0) * 0.5).clamp(0.0, 1.0)
+}
+
+fn perlin01_3d(perlin: &Perlin, x: f64, y: f64, z: f64, scale: f64) -> f64 {
+    ((perlin.get([x * scale, y * scale, z * scale]) + 1.0) * 0.5).clamp(0.0, 1.0)
+}
+
+fn fbm01(
+    perlin: &Perlin,
+    x: f64,
+    z: f64,
+    scale: f64,
+    octaves: usize,
+    lacunarity: f64,
+    persistence: f64,
+) -> f64 {
+    let mut frequency = scale;
+    let mut amplitude = 1.0;
+    let mut value = 0.0;
+    let mut amplitude_sum = 0.0;
+
+    for _ in 0..octaves {
+        value += perlin01(perlin, x, z, frequency) * amplitude;
+        amplitude_sum += amplitude;
+        frequency *= lacunarity;
+        amplitude *= persistence;
+    }
+
+    if amplitude_sum <= f64::EPSILON {
+        0.5
+    } else {
+        value / amplitude_sum
+    }
+}
+
+fn smoothstep(edge0: f64, edge1: f64, value: f64) -> f64 {
+    if edge1 <= edge0 {
+        return if value >= edge1 { 1.0 } else { 0.0 };
+    }
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[must_use]
@@ -519,6 +701,207 @@ pub fn terrain_surface_cell_height_with_noise(
     (height_sum + sample_count / 2)
         .checked_div(sample_count)
         .unwrap_or(0)
+}
+
+fn block_id_or(context: &WorldGenerationContext, name: &str, fallback: BlockId) -> BlockId {
+    let id = context.block_id(name);
+    if id == context.palette.air && name != "air" {
+        fallback
+    } else {
+        id
+    }
+}
+
+fn terrain_surface_block_for_column(
+    column: &TerrainColumnSample,
+    context: &WorldGenerationContext,
+    surface_material: BlockId,
+) -> BlockId {
+    let sand = block_id_or(context, "sand", surface_material);
+    let snow = block_id_or(context, "snow", context.palette.grass);
+    let gravel = block_id_or(context, "gravel", context.palette.stone);
+    let clay = block_id_or(context, "clay", context.palette.dirt);
+
+    match column.biome {
+        TerrainBiome::Beach | TerrainBiome::Desert => sand,
+        TerrainBiome::River => {
+            if column.humidity >= 0.58 || column.lake >= 0.55 {
+                clay
+            } else {
+                sand
+            }
+        }
+        TerrainBiome::Wetlands => {
+            if column.lake >= 0.58 {
+                clay
+            } else {
+                context.palette.grass
+            }
+        }
+        TerrainBiome::Canyon => {
+            if column.roughness >= 0.14 {
+                context.palette.stone
+            } else {
+                sand
+            }
+        }
+        TerrainBiome::Snow => snow,
+        TerrainBiome::Mountains if column.roughness >= 0.18 || column.mountain >= 0.70 => {
+            if column.height >= 150 && column.temperature <= 0.45 {
+                snow
+            } else {
+                context.palette.stone
+            }
+        }
+        TerrainBiome::Taiga if column.height >= 92 && column.temperature <= 0.32 => snow,
+        TerrainBiome::Mountains if column.river >= 0.45 => gravel,
+        TerrainBiome::Plains
+        | TerrainBiome::Forest
+        | TerrainBiome::AutumnForest
+        | TerrainBiome::Taiga
+        | TerrainBiome::Mountains => context.palette.grass,
+    }
+}
+
+fn terrain_subsurface_block_for_column(
+    column: &TerrainColumnSample,
+    context: &WorldGenerationContext,
+    surface_material: BlockId,
+) -> BlockId {
+    let sand = block_id_or(context, "sand", surface_material);
+    let gravel = block_id_or(context, "gravel", context.palette.stone);
+    let clay = block_id_or(context, "clay", context.palette.dirt);
+
+    match column.biome {
+        TerrainBiome::Beach | TerrainBiome::Desert | TerrainBiome::Canyon => sand,
+        TerrainBiome::River | TerrainBiome::Wetlands if column.lake >= 0.50 => clay,
+        TerrainBiome::River if column.river >= 0.65 => gravel,
+        TerrainBiome::Mountains if column.roughness >= 0.18 => context.palette.stone,
+        _ => context.palette.dirt,
+    }
+}
+
+fn terrain_block_at_column_height(
+    y: usize,
+    column: &TerrainColumnSample,
+    context: &WorldGenerationContext,
+    surface_material: BlockId,
+) -> BlockId {
+    if y >= column.height {
+        return context.palette.air;
+    }
+
+    if y == column.height - 1 {
+        return terrain_surface_block_for_column(column, context, surface_material);
+    }
+
+    let subsurface_depth = match column.biome {
+        TerrainBiome::Beach | TerrainBiome::Desert | TerrainBiome::Canyon => 5,
+        TerrainBiome::River | TerrainBiome::Wetlands => 4,
+        TerrainBiome::Snow | TerrainBiome::Taiga => 3,
+        TerrainBiome::Mountains => 2,
+        TerrainBiome::Plains | TerrainBiome::Forest | TerrainBiome::AutumnForest => DIRT_DEPTH,
+    };
+
+    if y > column.height.saturating_sub(subsurface_depth + 1) {
+        terrain_subsurface_block_for_column(column, context, surface_material)
+    } else {
+        context.palette.stone
+    }
+}
+
+fn is_cave_air(global_x: i32, world_y: usize, global_z: i32, column: &TerrainColumnSample) -> bool {
+    if world_y <= 2 || world_y + CAVE_MIN_DEPTH_BELOW_SURFACE >= column.height {
+        return false;
+    }
+
+    let noise = terrain_field_noise();
+    let x = f64::from(global_x);
+    let y = world_y as f64;
+    let z = f64::from(global_z);
+    let primary = perlin01_3d(&noise.cave_primary, x, y, z, CAVE_SCALE);
+    let detail = perlin01_3d(
+        &noise.cave_detail,
+        x + 91.0,
+        y - 37.0,
+        z - 55.0,
+        CAVE_DETAIL_SCALE,
+    );
+    let depth = column.height.saturating_sub(world_y);
+    let depth_weight = smoothstep(
+        CAVE_MIN_DEPTH_BELOW_SURFACE as f64,
+        (CAVE_MIN_DEPTH_BELOW_SURFACE + 22) as f64,
+        depth as f64,
+    );
+    let mountain_bonus = f64::from(column.mountain) * 0.05;
+    let river_suppression = f64::from(column.river.max(column.lake)) * 0.10;
+    let threshold = 0.705 - mountain_bonus + river_suppression;
+
+    (primary * 0.74 + detail * 0.26) > threshold && depth_weight > 0.35
+}
+
+fn ore_block_for(
+    global_x: i32,
+    world_y: usize,
+    global_z: i32,
+    column: &TerrainColumnSample,
+    context: &WorldGenerationContext,
+) -> Option<BlockId> {
+    let depth = column.height.saturating_sub(world_y);
+    if world_y < 4 || depth < ORE_SURFACE_SAFETY {
+        return None;
+    }
+
+    let noise = terrain_field_noise();
+    let ore_noise = perlin01_3d(
+        &noise.ore,
+        f64::from(global_x) + 211.0,
+        world_y as f64 - 67.0,
+        f64::from(global_z) - 149.0,
+        ORE_SCALE,
+    );
+    let rarity = 0.772 - (depth.min(96) as f64 / 96.0) * 0.045 - f64::from(column.mountain) * 0.018;
+    if ore_noise < rarity {
+        return None;
+    }
+
+    let roll = worldgen_rand01("ore_kind", global_x, global_z + world_y as i32 * 4099);
+    let name = if world_y <= 18 {
+        if roll < 0.09 {
+            "diamond_ore"
+        } else if roll < 0.22 {
+            "redstone_ore"
+        } else if roll < 0.34 {
+            "lapis_ore"
+        } else if roll < 0.58 {
+            "iron_ore"
+        } else {
+            "coal_ore"
+        }
+    } else if world_y <= 46 {
+        if roll < 0.12 {
+            "gold_ore"
+        } else if roll < 0.34 {
+            "copper_ore"
+        } else if roll < 0.62 {
+            "iron_ore"
+        } else {
+            "coal_ore"
+        }
+    } else if column.mountain >= 0.62 && roll < 0.16 {
+        "emerald_ore"
+    } else if column.lake >= 0.62 && roll < 0.10 {
+        "crystal_ore"
+    } else if roll < 0.22 {
+        "copper_ore"
+    } else if roll < 0.50 {
+        "iron_ore"
+    } else {
+        "coal_ore"
+    };
+
+    let block = context.block_id(name);
+    (block != context.palette.air).then_some(block)
 }
 
 #[must_use]
@@ -736,17 +1119,16 @@ pub fn terrain_block_at_height(
 }
 
 #[must_use]
-pub fn is_terrain_shell_block(
-    block: BlockId,
-    palette: TerrainBlockPalette,
-    sand: BlockId,
-    snow: BlockId,
-) -> bool {
-    block == palette.stone
-        || block == palette.dirt
-        || block == palette.grass
-        || block == sand
-        || block == snow
+pub fn is_terrain_shell_block(block: BlockId, palette: TerrainBlockPalette, sand: BlockId) -> bool {
+    block == palette.stone || block == palette.dirt || block == palette.grass || block == sand
+}
+
+#[must_use]
+pub fn is_world_terrain_shell_block(block: BlockId, context: &WorldGenerationContext) -> bool {
+    is_terrain_shell_block(block, context.palette, context.block_id("sand"))
+        || block == context.block_id("snow")
+        || block == context.block_id("gravel")
+        || block == context.block_id("clay")
 }
 
 #[must_use]
@@ -756,14 +1138,13 @@ pub fn terrain_column_top_in_chunk(
     local_z: usize,
     palette: TerrainBlockPalette,
     sand: BlockId,
-    snow: BlockId,
 ) -> TerrainSurfaceSample {
-    for y in (0..CHUNK_SIZE).rev() {
+    for y in (0..CHUNK_HEIGHT).rev() {
         let block = chunk.get_block(local_x, y, local_z);
         if block == palette.air {
             continue;
         }
-        if is_terrain_shell_block(block, palette, sand, snow) {
+        if is_terrain_shell_block(block, palette, sand) {
             return TerrainSurfaceSample {
                 height: y + 1,
                 top_block: block,
@@ -776,10 +1157,31 @@ pub fn terrain_column_top_in_chunk(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Surface cell sampling threads chunk geometry, palette, and biome shell blocks."
-)]
+#[must_use]
+pub fn terrain_column_top_in_chunk_with_context(
+    chunk: &ChunkData,
+    local_x: usize,
+    local_z: usize,
+    context: &WorldGenerationContext,
+) -> TerrainSurfaceSample {
+    for y in (0..CHUNK_HEIGHT).rev() {
+        let block = chunk.get_block(local_x, y, local_z);
+        if block == context.palette.air {
+            continue;
+        }
+        if is_world_terrain_shell_block(block, context) {
+            return TerrainSurfaceSample {
+                height: y + 1,
+                top_block: block,
+            };
+        }
+    }
+    TerrainSurfaceSample {
+        height: 0,
+        top_block: context.palette.air,
+    }
+}
+
 #[must_use]
 pub fn terrain_surface_cell_sample_from_chunk_local(
     chunk: &ChunkData,
@@ -789,7 +1191,6 @@ pub fn terrain_surface_cell_sample_from_chunk_local(
     depth: usize,
     palette: TerrainBlockPalette,
     sand: BlockId,
-    snow: BlockId,
 ) -> TerrainSurfaceSample {
     let mut height_sum = 0usize;
     let mut sample_count = 0usize;
@@ -801,7 +1202,7 @@ pub fn terrain_surface_cell_sample_from_chunk_local(
             if x >= CHUNK_SIZE || z >= CHUNK_SIZE {
                 continue;
             }
-            height_sum += terrain_column_top_in_chunk(chunk, x, z, palette, sand, snow).height;
+            height_sum += terrain_column_top_in_chunk(chunk, x, z, palette, sand).height;
             sample_count += 1;
         }
     }
@@ -817,8 +1218,51 @@ pub fn terrain_surface_cell_sample_from_chunk_local(
     let center_x = (local_x + width / 2).min(CHUNK_SIZE - 1);
     let center_z = (local_z + depth / 2).min(CHUNK_SIZE - 1);
     let mut top_block =
-        terrain_column_top_in_chunk(chunk, center_x, center_z, palette, sand, snow).top_block;
+        terrain_column_top_in_chunk(chunk, center_x, center_z, palette, sand).top_block;
     if top_block == palette.air && height > 0 {
+        top_block = chunk.get_block(center_x, height - 1, center_z);
+    }
+
+    TerrainSurfaceSample { height, top_block }
+}
+
+#[must_use]
+pub fn terrain_surface_cell_sample_from_chunk_local_with_context(
+    chunk: &ChunkData,
+    local_x: usize,
+    local_z: usize,
+    width: usize,
+    depth: usize,
+    context: &WorldGenerationContext,
+) -> TerrainSurfaceSample {
+    let mut height_sum = 0usize;
+    let mut sample_count = 0usize;
+
+    for dz in 0..depth {
+        for dx in 0..width {
+            let x = local_x + dx;
+            let z = local_z + dz;
+            if x >= CHUNK_SIZE || z >= CHUNK_SIZE {
+                continue;
+            }
+            height_sum += terrain_column_top_in_chunk_with_context(chunk, x, z, context).height;
+            sample_count += 1;
+        }
+    }
+
+    if sample_count == 0 {
+        return TerrainSurfaceSample {
+            height: 0,
+            top_block: context.palette.air,
+        };
+    }
+
+    let height = (height_sum + sample_count / 2) / sample_count;
+    let center_x = (local_x + width / 2).min(CHUNK_SIZE - 1);
+    let center_z = (local_z + depth / 2).min(CHUNK_SIZE - 1);
+    let mut top_block =
+        terrain_column_top_in_chunk_with_context(chunk, center_x, center_z, context).top_block;
+    if top_block == context.palette.air && height > 0 {
         top_block = chunk.get_block(center_x, height - 1, center_z);
     }
 
@@ -832,24 +1276,25 @@ pub fn terrain_surface_cell_sample_from_world_cached(
     width: usize,
     depth: usize,
     context: &WorldGenerationContext,
+    edit_store: &WorldEditStore,
 ) -> TerrainSurfaceSample {
     let chunk_x = world_x.div_euclid(CHUNK_SIZE as i32);
     let chunk_z = world_z.div_euclid(CHUNK_SIZE as i32);
     let local_x = usize::try_from(world_x.rem_euclid(CHUNK_SIZE as i32)).unwrap_or(0);
     let local_z = usize::try_from(world_z.rem_euclid(CHUNK_SIZE as i32)).unwrap_or(0);
     let sand = context.block_id("sand");
-    let snow = context.block_id("snow");
-    let generated =
-        crate::chunk_gen_cache::cached_chunk(ChunkPos::new(chunk_x, chunk_z), context);
-    let sample = terrain_surface_cell_sample_from_chunk_local(
+    let generated = crate::chunk_gen_cache::cached_chunk(
+        ChunkPos::new(chunk_x, chunk_z),
+        context,
+        edit_store,
+    );
+    let sample = terrain_surface_cell_sample_from_chunk_local_with_context(
         &generated.chunk,
         local_x,
         local_z,
         width,
         depth,
-        context.palette,
-        sand,
-        snow,
+        context,
     );
     if sample.height > 0 {
         return sample;
@@ -875,28 +1320,49 @@ pub fn generate_chunk(pos: ChunkPos, registry: &BlockRegistry) -> ChunkData {
 #[must_use]
 pub fn generate_chunk_with_context(pos: ChunkPos, context: &WorldGenerationContext) -> ChunkData {
     let mut chunk = ChunkData::default();
-    let perlin = Perlin::new(TERRAIN_SEED);
-    let surface_blocks = context.biome_surface_blocks();
+    let perlin = terrain_perlin();
+    let sand = block_id_or(context, "sand", context.palette.dirt);
+    let water = block_id_or(context, "water", context.palette.air);
+    let ice = block_id_or(context, "ice", water);
 
     for x in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
             let global_x = pos.x * CHUNK_SIZE as i32 + x as i32;
             let global_z = pos.z * CHUNK_SIZE as i32 + z as i32;
-            let height = terrain_height_with_noise(global_x, global_z, &perlin);
-            let biome = terrain_biome_at(global_x, global_z);
-            let surface_block = terrain_biome_surface_block(biome, height, surface_blocks);
-            // Clamp the surface row to the chunk ceiling so canyon mesas and
-            // mountain columns whose computed height > CHUNK_SIZE still receive
-            // a biome surface block instead of bare stone at the top.
-            let surface_y = height.saturating_sub(1).min(CHUNK_SIZE - 1);
+            let column = terrain_column_with_noise(global_x, global_z, &perlin);
+            let solid_top = column.height.min(CHUNK_HEIGHT);
 
-            for y in 0..CHUNK_SIZE {
-                let mut block_id = terrain_block_at_height(y, height, context.palette);
-                if y == surface_y && y < height {
-                    block_id = surface_block;
+            for y in 0..solid_top {
+                if is_cave_air(global_x, y, global_z, &column) {
+                    continue;
+                }
+
+                let mut block_id = terrain_block_at_column_height(y, &column, context, sand);
+                if block_id == context.palette.stone
+                    && let Some(ore) = ore_block_for(global_x, y, global_z, &column, context)
+                {
+                    block_id = ore;
                 }
                 if block_id != context.palette.air {
                     chunk.set_block(x, y, z, block_id);
+                }
+            }
+
+            if water != context.palette.air
+                && solid_top <= WORLD_WATER_LEVEL
+                && WORLD_WATER_LEVEL < CHUNK_HEIGHT
+            {
+                for y in solid_top..=WORLD_WATER_LEVEL {
+                    let fluid = if y == WORLD_WATER_LEVEL
+                        && matches!(column.biome, TerrainBiome::Snow | TerrainBiome::Taiga)
+                    {
+                        ice
+                    } else {
+                        water
+                    };
+                    if fluid != context.palette.air {
+                        chunk.set_block(x, y, z, fluid);
+                    }
                 }
             }
         }
@@ -928,8 +1394,17 @@ pub fn terrain_surface_cell_height_from_world_cached(
     width: usize,
     depth: usize,
     context: &WorldGenerationContext,
+    edit_store: &WorldEditStore,
 ) -> usize {
-    terrain_surface_cell_sample_from_world_cached(world_x, world_z, width, depth, context).height
+    terrain_surface_cell_sample_from_world_cached(
+        world_x,
+        world_z,
+        width,
+        depth,
+        context,
+        edit_store,
+    )
+    .height
 }
 
 fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGenerationContext) {
@@ -949,6 +1424,7 @@ fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGene
     let _ = chunk_table.set("x", pos.x);
     let _ = chunk_table.set("z", pos.z);
     let _ = chunk_table.set("size", CHUNK_SIZE);
+    let _ = chunk_table.set("height", CHUNK_HEIGHT);
     let _ = chunk_table.set("origin_x", origin_x);
     let _ = chunk_table.set("origin_z", origin_z);
     let _ = globals.set("Chunk", chunk_table);
@@ -1051,6 +1527,10 @@ fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGene
         table.set("temperature", sample.temperature)?;
         table.set("humidity", sample.humidity)?;
         table.set("roughness", sample.roughness)?;
+        table.set("aridity", sample.aridity)?;
+        table.set("river", sample.river)?;
+        table.set("lake", sample.lake)?;
+        table.set("mountain", sample.mountain)?;
 
         Ok(table)
     });
@@ -1089,28 +1569,12 @@ fn apply_lua_world_gen(pos: ChunkPos, chunk: &mut ChunkData, context: &WorldGene
         let _ = globals.set("chance", function);
     }
 
-    let rand3d_stats = Rc::clone(&stats);
-    let rand3d = lua.create_function(move |_, (salt, x, y, z): (String, i32, i32, i32)| {
-        rand3d_stats.borrow_mut().deterministic_random_requests += 1;
-        Ok(worldgen_rand3d(&salt, origin_x + x, y, origin_z + z))
-    });
-    if let Ok(function) = rand3d {
-        let _ = globals.set("rand3d", function);
-    }
-
-    let ore_noise = lua.create_function(move |_, (x, y, z): (i32, i32, i32)| {
-        Ok(f64::from(terrain_ore_noise_at(origin_x + x, y, origin_z + z)))
-    });
-    if let Ok(function) = ore_noise {
-        let _ = globals.set("ore_noise", function);
-    }
-
     let get_height_stats = Rc::clone(&stats);
     let get_height = lua.create_function(move |_, (x, z): (i32, i32)| {
         get_height_stats.borrow_mut().height_requests += 1;
         let global_x = pos.x * CHUNK_SIZE_I32 + x;
         let global_z = pos.z * CHUNK_SIZE_I32 + z;
-        Ok(terrain_height_at(global_x, global_z).min(CHUNK_SIZE - 1))
+        Ok(terrain_height_at(global_x, global_z).min(CHUNK_HEIGHT - 1))
     });
     if let Ok(function) = get_height {
         let _ = globals.set("get_height", function);
@@ -1177,7 +1641,7 @@ impl LuaWorldGenStats {
 
 fn local_block_index(x: i32, y: i32, z: i32) -> Option<usize> {
     if (0..CHUNK_SIZE_I32).contains(&x)
-        && (0..CHUNK_SIZE_I32).contains(&y)
+        && (0..CHUNK_HEIGHT_I32).contains(&y)
         && (0..CHUNK_SIZE_I32).contains(&z)
     {
         Some(ChunkData::get_index(
@@ -1228,6 +1692,26 @@ mod tests {
             (palette.grass, "grass"),
             (palette.stone, "stone"),
             (4, "sand"),
+            (5, "water"),
+            (6, "ice"),
+            (7, "snow"),
+            (8, "gravel"),
+            (9, "clay"),
+            (10, "coal_ore"),
+            (11, "iron_ore"),
+            (12, "copper_ore"),
+            (13, "gold_ore"),
+            (14, "diamond_ore"),
+            (15, "emerald_ore"),
+            (16, "lapis_ore"),
+            (17, "redstone_ore"),
+            (18, "crystal_ore"),
+            (19, "wood"),
+            (20, "leaves"),
+            (21, "cobblestone"),
+            (22, "stone_bricks"),
+            (23, "flower_red"),
+            (24, "flower_yellow"),
         ] {
             name_to_id.insert(name.to_string(), id);
             id_to_name.insert(id, name.to_string());
@@ -1281,6 +1765,60 @@ mod tests {
     }
 
     #[test]
+    fn terrain_height_field_has_lowlands_and_vertical_headroom() {
+        let mut min_sample = (0, 0, usize::MAX);
+        let mut max_sample = (0, 0, 0usize);
+
+        for z in (-1024..=1024).step_by(16) {
+            for x in (-1024..=1024).step_by(16) {
+                let height = terrain_height_at(x, z);
+                if height < min_sample.2 {
+                    min_sample = (x, z, height);
+                }
+                if height > max_sample.2 {
+                    max_sample = (x, z, height);
+                }
+            }
+        }
+
+        if std::env::var_os("RUMPEL_PRINT_GOLDEN").is_some() {
+            eprintln!("terrain min={min_sample:?} max={max_sample:?}");
+        }
+
+        assert!(
+            min_sample.2 <= SURFACE_BEACH_HEIGHT_THRESHOLD,
+            "terrain should expose lowland/beach samples, min_sample={min_sample:?}"
+        );
+        assert!(
+            max_sample.2 > CHUNK_SIZE * 2,
+            "terrain should visibly use the taller chunk headroom, max_sample={max_sample:?}"
+        );
+        assert!(max_sample.2 < CHUNK_HEIGHT);
+    }
+
+    #[test]
+    fn terrain_height_field_has_no_single_column_walls() {
+        let perlin = terrain_perlin();
+        let max_neighbor_delta = (-160..=160)
+            .step_by(8)
+            .flat_map(|z| {
+                (-160..=160).step_by(8).map(move |x| {
+                    let center = terrain_height_with_noise(x, z, &perlin);
+                    let east = terrain_height_with_noise(x + 1, z, &perlin);
+                    let south = terrain_height_with_noise(x, z + 1, &perlin);
+                    center.abs_diff(east).max(center.abs_diff(south))
+                })
+            })
+            .max()
+            .unwrap_or(0);
+
+        assert!(
+            max_neighbor_delta <= 18,
+            "single-column height jumps should stay terrain-like, max_delta={max_neighbor_delta}"
+        );
+    }
+
+    #[test]
     fn terrain_world_sample_contract_is_deterministic() {
         let context = test_world_context();
         let first = terrain_world_sample_at(128, -64, &context, 4);
@@ -1288,10 +1826,14 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.biome, terrain_biome_at(128, -64));
-        assert_eq!(first.chunk_height, first.height.min(CHUNK_SIZE - 1));
+        assert_eq!(first.chunk_height, first.height.min(CHUNK_HEIGHT - 1));
         assert!((0.0..=1.0).contains(&first.temperature));
         assert!((0.0..=1.0).contains(&first.humidity));
         assert!((0.0..=1.0).contains(&first.roughness));
+        assert!((0.0..=1.0).contains(&first.aridity));
+        assert!((0.0..=1.0).contains(&first.river));
+        assert!((0.0..=1.0).contains(&first.lake));
+        assert!((0.0..=1.0).contains(&first.mountain));
         assert!(!first.biome.as_str().is_empty());
         assert!(!context.block_name(first.surface_block).is_empty());
     }
@@ -1300,15 +1842,99 @@ mod tests {
     fn terrain_world_sample_uses_surface_material_for_beach() {
         let context = test_world_context();
         let sand = context.block_id("sand");
-        let (x, z) = (-128..=128)
-            .flat_map(|z| (-128..=128).map(move |x| (x, z)))
-            .find(|(x, z)| terrain_height_at(*x, *z) <= SURFACE_BEACH_HEIGHT_THRESHOLD)
-            .expect("deterministic terrain should expose a beach-height sample");
+        let (x, z) = (-304, -80);
+        assert!(terrain_height_at(x, z) <= SURFACE_BEACH_HEIGHT_THRESHOLD);
 
         let sample = terrain_world_sample_at(x, z, &context, sand);
 
         assert_eq!(sample.biome, TerrainBiome::Beach);
         assert_eq!(sample.surface_block, sand);
+    }
+
+    #[test]
+    fn terrain_sampler_exposes_rich_biome_set() {
+        let biomes = (-2048..=2048)
+            .step_by(32)
+            .flat_map(|z| {
+                (-2048..=2048)
+                    .step_by(32)
+                    .map(move |x| terrain_biome_at(x, z).as_str())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(
+            biomes.len() >= 7,
+            "terrain sampler should expose a broad biome set, got {biomes:?}"
+        );
+        for expected in ["beach", "plains", "forest", "mountains", "snow", "desert"] {
+            assert!(
+                biomes.contains(expected),
+                "terrain sampler should expose {expected}, got {biomes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn terrain_material_sampler_uses_biome_specific_surface_blocks() {
+        let context = test_world_context();
+        let sand = context.block_id("sand");
+        let mut found_snow = false;
+        let mut found_gravel_or_clay = false;
+        let mut found_stone_mountain = false;
+
+        for z in (-2048..=2048).step_by(16) {
+            for x in (-2048..=2048).step_by(16) {
+                let sample = terrain_world_sample_at(x, z, &context, sand);
+                let name = context.block_name(sample.surface_block);
+                found_snow |= matches!(sample.biome, TerrainBiome::Snow | TerrainBiome::Taiga)
+                    && name == "snow";
+                found_gravel_or_clay |=
+                    matches!(sample.biome, TerrainBiome::River | TerrainBiome::Wetlands)
+                        && (name == "gravel" || name == "clay" || name == "sand");
+                found_stone_mountain |= sample.biome == TerrainBiome::Mountains && name == "stone";
+            }
+        }
+
+        assert!(found_snow, "snow/taiga biomes should produce snow surfaces");
+        assert!(
+            found_gravel_or_clay,
+            "river/wetland biomes should produce wet shoreline materials"
+        );
+        assert!(
+            found_stone_mountain,
+            "mountain biomes should expose stone surfaces on rough peaks"
+        );
+    }
+
+    #[test]
+    fn underground_sampler_exposes_caves_and_ores() {
+        let context = test_world_context();
+        let mut found_cave = false;
+        let mut found_ore = false;
+
+        for z in (-512..=512).step_by(16) {
+            for x in (-512..=512).step_by(16) {
+                let column = terrain_column_at(x, z);
+                for y in (4..column.height.saturating_sub(CAVE_MIN_DEPTH_BELOW_SURFACE)).step_by(4)
+                {
+                    found_cave |= is_cave_air(x, y, z, &column);
+                    found_ore |= ore_block_for(x, y, z, &column, &context)
+                        .is_some_and(|ore| context.block_name(ore).ends_with("_ore"));
+                    if found_cave && found_ore {
+                        return;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            found_cave,
+            "terrain sampler should carve deterministic underground caves"
+        );
+        assert!(
+            found_ore,
+            "terrain sampler should place deterministic underground ores"
+        );
     }
 
     #[test]
@@ -1328,7 +1954,7 @@ mod tests {
     fn lua_worldgen_local_index_rejects_out_of_chunk_positions() {
         assert_eq!(local_block_index(0, 0, 0), Some(0));
         assert!(local_block_index(-1, 0, 0).is_none());
-        assert!(local_block_index(0, CHUNK_SIZE_I32, 0).is_none());
+        assert!(local_block_index(0, CHUNK_HEIGHT_I32, 0).is_none());
         assert!(local_block_index(0, 0, CHUNK_SIZE_I32).is_none());
     }
 
@@ -1343,13 +1969,8 @@ mod tests {
         let sand = 4;
         let perlin = terrain_perlin();
 
-        let beach = (-128..=128)
-            .flat_map(|z| (-128..=128).map(move |x| (x, z)))
-            .map(|(x, z)| {
-                terrain_surface_cell_sample_with_noise(x, z, 1, 1, palette, sand, &perlin)
-            })
-            .find(|sample| sample.height <= SURFACE_BEACH_HEIGHT_THRESHOLD)
-            .expect("deterministic terrain should expose a beach-height sample");
+        let beach = terrain_surface_cell_sample_with_noise(-304, -80, 1, 1, palette, sand, &perlin);
+        assert!(beach.height <= SURFACE_BEACH_HEIGHT_THRESHOLD);
         assert_eq!(beach.top_block, sand);
 
         let grass = (-128..=128)
@@ -1477,9 +2098,9 @@ mod tests {
                 z: -256,
                 width: 1,
                 depth: 1,
-                raw_height: 29,
-                shell_height: 29,
-                cell_height: 29,
+                raw_height: 26,
+                shell_height: 26,
+                cell_height: 26,
                 top_block: palette.grass,
             },
             GoldenSurfaceCase {
@@ -1487,9 +2108,9 @@ mod tests {
                 z: 17,
                 width: 1,
                 depth: 1,
-                raw_height: 40,
-                shell_height: 40,
-                cell_height: 40,
+                raw_height: 57,
+                shell_height: 57,
+                cell_height: 57,
                 top_block: palette.grass,
             },
             GoldenSurfaceCase {
@@ -1507,9 +2128,9 @@ mod tests {
                 z: 31,
                 width: 1,
                 depth: 1,
-                raw_height: 41,
-                shell_height: 41,
-                cell_height: 41,
+                raw_height: 39,
+                shell_height: 39,
+                cell_height: 39,
                 top_block: palette.grass,
             },
             GoldenSurfaceCase {
@@ -1517,55 +2138,63 @@ mod tests {
                 z: -93,
                 width: 2,
                 depth: 2,
-                raw_height: 42,
-                shell_height: 42,
-                cell_height: 42,
+                raw_height: 22,
+                shell_height: 22,
+                cell_height: 23,
                 top_block: palette.grass,
             },
             GoldenSurfaceCase {
-                // Canyon mesa lifts the raw height by +8 here; the surface
-                // kernel still averages into the surrounding base level.
                 x: 512,
                 z: 384,
                 width: 4,
                 depth: 3,
-                raw_height: 48,
-                shell_height: 44,
-                cell_height: 48,
+                raw_height: 52,
+                shell_height: 52,
+                cell_height: 52,
                 top_block: palette.grass,
             },
             GoldenSurfaceCase {
-                // Coast cliff: base column is at sea level but neighbours in
-                // the smoothing kernel are lifted, so the shell/cell heights
-                // climb above the beach threshold and the surface is grass.
-                x: -179,
-                z: -512,
+                x: -304,
+                z: -80,
                 width: 1,
                 depth: 1,
-                raw_height: 14,
-                shell_height: 18,
-                cell_height: 18,
-                top_block: palette.grass,
+                raw_height: 7,
+                shell_height: 7,
+                cell_height: 7,
+                top_block: sand,
             },
         ];
 
+        let print_golden = std::env::var_os("RUMPEL_PRINT_GOLDEN").is_some();
         for case in cases {
-            assert_eq!(
-                terrain_height_with_noise(case.x, case.z, &perlin),
-                case.raw_height,
-                "raw terrain height changed at ({}, {})",
-                case.x,
-                case.z
-            );
-            assert_eq!(
-                terrain_surface_shell_height_with_noise(case.x, case.z, &perlin),
-                case.shell_height,
-                "surface shell height changed at ({}, {})",
-                case.x,
-                case.z
-            );
+            let raw = terrain_height_with_noise(case.x, case.z, &perlin);
+            let shell = terrain_surface_shell_height_with_noise(case.x, case.z, &perlin);
             let sample = terrain_surface_cell_sample_with_noise(
                 case.x, case.z, case.width, case.depth, palette, sand, &perlin,
+            );
+            if print_golden {
+                eprintln!(
+                    "GoldenSurfaceCase {{ x: {}, z: {}, width: {}, depth: {}, raw_height: {}, shell_height: {}, cell_height: {}, top_block: {}, }},",
+                    case.x,
+                    case.z,
+                    case.width,
+                    case.depth,
+                    raw,
+                    shell,
+                    sample.height,
+                    sample.top_block
+                );
+                continue;
+            }
+            assert_eq!(
+                raw, case.raw_height,
+                "raw terrain height changed at ({}, {})",
+                case.x, case.z
+            );
+            assert_eq!(
+                shell, case.shell_height,
+                "surface shell height changed at ({}, {})",
+                case.x, case.z
             );
             assert_eq!(
                 sample,

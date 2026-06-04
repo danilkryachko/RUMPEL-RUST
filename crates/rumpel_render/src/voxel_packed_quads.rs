@@ -1,7 +1,7 @@
 use noise::Perlin;
 use rumpel_blocks::{AIR_BLOCK_ID, BlockId};
 use rumpel_prelude::ChunkPos;
-use rumpel_world::chunk::{CHUNK_SIZE, ChunkData, WorldEditStore};
+use rumpel_world::chunk::{CHUNK_HEIGHT, CHUNK_SIZE, ChunkData, WorldEditStore};
 use rumpel_world::world_gen::{
     TerrainBlockPalette, WorldGenerationContext, terrain_perlin,
     terrain_surface_cell_height_from_world_cached, terrain_surface_cell_height_with_edits,
@@ -137,7 +137,7 @@ fn is_face_visible(
     if nx >= 0
         && nx < CHUNK_SIZE as i32
         && ny >= 0
-        && ny < CHUNK_SIZE as i32
+        && ny < CHUNK_HEIGHT as i32
         && nz >= 0
         && nz < CHUNK_SIZE as i32
     {
@@ -163,8 +163,8 @@ fn is_face_visible(
             };
 
             let ry = if ny < 0 {
-                CHUNK_SIZE - 1
-            } else if ny >= CHUNK_SIZE as i32 {
+                CHUNK_HEIGHT - 1
+            } else if ny >= CHUNK_HEIGHT as i32 {
                 0
             } else {
                 ny as usize
@@ -535,6 +535,7 @@ fn for_each_surface_packed_column_for_chunk(
                     width,
                     depth,
                     source.context,
+                    source.edit_store,
                 )
             };
 
@@ -651,6 +652,7 @@ fn surface_neighbor_heights(
                 column.width,
                 column.depth,
                 source.context,
+                source.edit_store,
             ),
             terrain_surface_cell_height_from_world_cached(
                 world_x - column.width as i32,
@@ -658,6 +660,7 @@ fn surface_neighbor_heights(
                 column.width,
                 column.depth,
                 source.context,
+                source.edit_store,
             ),
             terrain_surface_cell_height_from_world_cached(
                 world_x,
@@ -665,6 +668,7 @@ fn surface_neighbor_heights(
                 column.width,
                 column.depth,
                 source.context,
+                source.edit_store,
             ),
             terrain_surface_cell_height_from_world_cached(
                 world_x,
@@ -672,6 +676,7 @@ fn surface_neighbor_heights(
                 column.width,
                 column.depth,
                 source.context,
+                source.edit_store,
             ),
         ];
     }
@@ -732,6 +737,7 @@ fn surface_neighbor_sample_height(
             column.width,
             column.depth,
             context,
+            edit_store,
         );
     }
 
@@ -756,6 +762,7 @@ fn surface_neighbor_sample_height(
             column.width,
             column.depth,
             context,
+            edit_store,
         )
     }
 }
@@ -847,7 +854,7 @@ struct LodColumn {
 }
 
 fn lod_surface_height_at(chunk: &ChunkData, x: usize, z: usize) -> (usize, u16) {
-    for y in (0..CHUNK_SIZE).rev() {
+    for y in (0..CHUNK_HEIGHT).rev() {
         let block = chunk.get_block(x, y, z);
         if block != AIR_BLOCK_ID {
             return (y + 1, block);
@@ -1679,14 +1686,17 @@ mod tests {
                         sand_block,
                         &perlin,
                     );
-                    (sample.height.saturating_add(4) < CHUNK_SIZE)
+                    (sample.height.saturating_add(64) < CHUNK_HEIGHT)
                         .then_some((local_x, local_z, sample))
                 })
             })
             .expect("test terrain should contain an editable low surface inside the origin chunk");
-        let edit_y = baseline.height.saturating_add(4);
+        // Lift the edit above the procedural shell while keeping it inside
+        // the surface edit scan window used by the world sampler. The 5x5
+        // shell kernel still detects the change after integer rounding.
+        let edit_y = baseline.height.saturating_add(20).min(CHUNK_HEIGHT - 1);
         let mut edit_store = WorldEditStore::default();
-        let edit_index = local_z * CHUNK_SIZE * CHUNK_SIZE + edit_y * CHUNK_SIZE + local_x;
+        let edit_index = rumpel_world::chunk::ChunkData::get_index(local_x, edit_y, local_z);
 
         assert!(
             edit_store.apply_edit(
@@ -1780,6 +1790,7 @@ mod tests {
     }
 
     fn max_sampled_surface_height(chunk_pos: ChunkPos, context: &WorldGenerationContext) -> usize {
+        let edit_store = WorldEditStore::default();
         let mut max_height = 0;
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
@@ -1791,6 +1802,7 @@ mod tests {
                     1,
                     1,
                     context,
+                    &edit_store,
                 ));
             }
         }

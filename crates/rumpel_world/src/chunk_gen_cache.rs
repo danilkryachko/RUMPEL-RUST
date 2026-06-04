@@ -2,6 +2,7 @@ use bevy::platform::collections::HashMap;
 use rumpel_coords::ChunkPos;
 use std::sync::{Mutex, OnceLock};
 
+use crate::chunk_disk::{mark_chunk_pending, try_load_generated_chunk};
 use crate::world_gen::{
     GeneratedChunk, WorldGenerationContext, generate_chunk_uncached,
     terrain_generation_contract_version,
@@ -37,7 +38,11 @@ fn cache_state() -> &'static Mutex<ChunkGenCacheState> {
 }
 
 #[must_use]
-pub fn cached_chunk(pos: ChunkPos, context: &WorldGenerationContext) -> GeneratedChunk {
+pub fn cached_chunk(
+    pos: ChunkPos,
+    context: &WorldGenerationContext,
+    edit_store: &crate::chunk::WorldEditStore,
+) -> GeneratedChunk {
     let mut cache = cache_state()
         .lock()
         .expect("chunk generation cache mutex poisoned");
@@ -48,7 +53,9 @@ pub fn cached_chunk(pos: ChunkPos, context: &WorldGenerationContext) -> Generate
     if cache.entries.len() >= MAX_CACHED_CHUNKS {
         cache.entries.clear();
     }
-    let generated = generate_chunk_uncached(pos, context);
+    let generated = try_load_generated_chunk(pos, context, edit_store)
+        .unwrap_or_else(|| generate_chunk_uncached(pos, context));
+    mark_chunk_pending(pos);
     cache.entries.insert(pos, generated.clone());
     generated
 }

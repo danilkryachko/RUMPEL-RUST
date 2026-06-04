@@ -4,10 +4,10 @@ use noise::Perlin;
 use rumpel_blocks::{AIR_BLOCK_ID, BlockId, BlockRegistry};
 use rumpel_coords::{ChunkPos, LocalBlockPos, WorldBlockPos};
 
-use crate::chunk::{CHUNK_SIZE, ChunkData, WorldBlockEdit, WorldEditStore};
+use crate::chunk::{CHUNK_HEIGHT, CHUNK_SIZE, ChunkData, WorldBlockEdit, WorldEditStore};
+use crate::chunk_gen_cache::cached_chunk;
 use crate::world_gen::{
-    WorldGenerationContext, generate_chunk_with_context, terrain_block_at_surface_world,
-    terrain_perlin,
+    WorldGenerationContext, terrain_block_at_surface_world, terrain_perlin,
 };
 
 struct CachedChunk {
@@ -41,16 +41,13 @@ impl WorldBlocks {
             return block;
         }
 
-        if (0..CHUNK_SIZE as i32).contains(&world.y) {
+        if (0..CHUNK_HEIGHT as i32).contains(&world.y) {
             let chunk_pos = chunk_pos_from_world_xz(world.x, world.z);
             let local_x = usize::try_from(world.x.rem_euclid(CHUNK_SIZE as i32)).unwrap_or(0);
             let local_y = usize::try_from(world.y).unwrap_or(0);
             let local_z = usize::try_from(world.z.rem_euclid(CHUNK_SIZE as i32)).unwrap_or(0);
             let chunk = self.chunk_data(chunk_pos, edit_store);
-            let block = chunk.get_block(local_x, local_y, local_z);
-            if block != AIR_BLOCK_ID {
-                return block;
-            }
+            return chunk.get_block(local_x, local_y, local_z);
         }
 
         terrain_block_at_surface_world(
@@ -122,9 +119,15 @@ impl WorldBlocks {
             .is_none_or(|cached| cached.revision != revision);
 
         if needs_refresh {
-            let mut data = generate_chunk_with_context(chunk_pos, &self.context);
-            edit_store.apply_all_edits_to_chunk(chunk_pos, &mut data);
-            self.cache.insert(chunk_pos, CachedChunk { data, revision });
+            let mut generated = cached_chunk(chunk_pos, &self.context, edit_store);
+            edit_store.apply_all_edits_to_chunk(chunk_pos, &mut generated.chunk);
+            self.cache.insert(
+                chunk_pos,
+                CachedChunk {
+                    data: generated.chunk,
+                    revision,
+                },
+            );
         }
 
         &self
@@ -180,6 +183,7 @@ mod tests {
                 color: (0.5, 0.5, 0.5, 1.0),
                 gravity_affected: false,
                 strength: 1.0,
+                wind_animated: false,
             });
         }
         Some(registry)

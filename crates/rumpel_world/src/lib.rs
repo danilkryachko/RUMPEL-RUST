@@ -1,4 +1,5 @@
 pub mod chunk;
+pub mod chunk_disk;
 pub mod chunk_gen_cache;
 pub mod physics;
 pub mod surface_decor;

@@ -310,6 +310,7 @@ fn decor_material(texture: Handle<Image>, tint: [f32; 3], alpha_cutoff: f32) -> 
         base_color: Color::srgb(tint[0], tint[1], tint[2]),
         base_color_texture: Some(texture),
         alpha_mode: AlphaMode::Mask(alpha_cutoff),
+        depth_bias: 0.002,
         unlit: true,
         double_sided: true,
         cull_mode: None,
@@ -480,8 +481,11 @@ fn build_chunk_decor_meshes(
     leaf_template: &LeafClumpTemplate,
     edit_store: &WorldEditStore,
 ) -> BuiltChunkDecor {
-    let chunk_pos = ChunkPos { x: chunk.x, z: chunk.y };
-    let generated = cached_chunk(chunk_pos, world);
+    let chunk_pos = ChunkPos {
+        x: chunk.x,
+        z: chunk.y,
+    };
+    let generated = cached_chunk(chunk_pos, world, edit_store);
     let mut chunk_data = generated.chunk.clone();
     edit_store.apply_all_edits_to_chunk(chunk_pos, &mut chunk_data);
     let (grass, leaves, _counts) = resolve_chunk_decor(
@@ -624,13 +628,12 @@ pub(crate) fn invalidate_edited_decor_chunks(
     let old_gen = state.last_seen_edit_generation;
     state.last_seen_edit_generation = current_gen;
 
-    let dirty =
-        crate::feature_decor_invalidation::dirty_layer_chunks_since(
-            &edit_store,
-            old_gen,
-            &state.loaded,
-            &state.building,
-        );
+    let dirty = crate::feature_decor_invalidation::dirty_layer_chunks_since(
+        &edit_store,
+        old_gen,
+        &state.loaded,
+        &state.building,
+    );
 
     for pos in dirty {
         if let Some(entity) = state.loaded.remove(&pos) {

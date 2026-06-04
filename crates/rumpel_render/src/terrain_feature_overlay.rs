@@ -6,9 +6,9 @@ use bevy::{
 };
 use rumpel_prelude::*;
 use rumpel_world::{
-    chunk::{CHUNK_SIZE, WorldEditStore},
+    chunk::{CHUNK_HEIGHT, CHUNK_SIZE, WorldEditStore},
     chunk_gen_cache::cached_chunk,
-    world_gen::{WorldGenerationContext, is_terrain_shell_block},
+    world_gen::{WorldGenerationContext, is_world_terrain_shell_block},
 };
 
 use crate::voxel_material::{ATTRIBUTE_VOXEL_REPEAT_UV, ATTRIBUTE_VOXEL_TILE};
@@ -19,23 +19,15 @@ pub struct FeatureOverlayContext {
     textures: FeatureTexturePalette,
     air: BlockId,
     leaves: BlockId,
-    /// Sand block ID, included in the terrain-shell filter alongside stone/dirt/grass.
-    sand: BlockId,
-    /// Snow block ID, included in the terrain-shell filter for snow/mountain biomes.
-    snow: BlockId,
 }
 
 impl FeatureOverlayContext {
     pub fn from_registry(registry: &BlockRegistry) -> Self {
         let world = WorldGenerationContext::from_registry(registry);
-        let sand = world.block_id("sand");
-        let snow = world.block_id("snow");
         Self {
             textures: FeatureTexturePalette::from_registry(registry),
             air: world.palette.air,
             leaves: registry.get_id("leaves").unwrap_or(world.palette.air),
-            sand,
-            snow,
             world,
         }
     }
@@ -51,9 +43,9 @@ impl FeatureOverlayContext {
 /// Builds a textured mesh for non-procedural blocks placed by Lua world gen in one chunk.
 ///
 /// "Non-procedural" means the block is not air, not leaves (rendered via decor billboards),
-/// and not a terrain-shell block (grass / dirt / stone / sand). This matches the filter used
-/// by `terrain_surface_cell_sample_from_world_cached` so the baseline is derived from the
-/// cached Lua chunk rather than the analytical noise function.
+/// and not a terrain-shell block (stone, dirt, grass, sand, snow, gravel, clay). This matches
+/// the filter used by `terrain_surface_cell_sample_from_world_cached` so the baseline is derived
+/// from the cached Lua chunk rather than the analytical noise function.
 #[must_use]
 pub fn build_lua_feature_mesh_for_chunk(
     chunk_pos: ChunkPos,
@@ -62,25 +54,22 @@ pub fn build_lua_feature_mesh_for_chunk(
     context: &FeatureOverlayContext,
     edit_store: &WorldEditStore,
 ) -> Option<Mesh> {
-    let generated = cached_chunk(chunk_pos, &context.world);
+    let generated = cached_chunk(chunk_pos, &context.world, edit_store);
     let mut chunk = generated.chunk;
     edit_store.apply_all_edits_to_chunk(chunk_pos, &mut chunk);
 
     let base_x = chunk_pos.x * CHUNK_SIZE as i32 - mesh_origin_x;
     let base_z = chunk_pos.z * CHUNK_SIZE as i32 - mesh_origin_z;
-    let palette = context.world.palette;
-    let sand = context.sand;
-    let snow = context.snow;
 
     let mut buffers = FeatureOverlayMeshBuffers::with_block_capacity(CHUNK_SIZE * CHUNK_SIZE * 8);
 
     for z in 0..CHUNK_SIZE {
         for x in 0..CHUNK_SIZE {
-            for y in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_HEIGHT {
                 let block = chunk.get_block(x, y, z);
                 if block == context.air
                     || block == context.leaves
-                    || is_terrain_shell_block(block, palette, sand, snow)
+                    || is_world_terrain_shell_block(block, &context.world)
                 {
                     continue;
                 }
@@ -89,7 +78,7 @@ pub fn build_lua_feature_mesh_for_chunk(
                 let world_y = y as f32;
                 let world_z = (base_z + z as i32) as f32;
 
-                if y + 1 >= CHUNK_SIZE || chunk.get_block(x, y + 1, z) == context.air {
+                if y + 1 >= CHUNK_HEIGHT || chunk.get_block(x, y + 1, z) == context.air {
                     buffers.add_block_face(
                         world_x,
                         world_y,

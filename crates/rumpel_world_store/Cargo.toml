@@ -1,0 +1,16 @@
+[package]
+name = "rumpel_world_store"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bincode = "1.3"
+rocksdb = "0.23"
+rumpel_blocks = { workspace = true }
+rumpel_coords = { workspace = true }
+rumpel_world = { workspace = true }
+serde = { workspace = true }
+ron = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.14"

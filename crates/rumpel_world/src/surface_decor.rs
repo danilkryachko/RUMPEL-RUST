@@ -1,4 +1,4 @@
-use crate::chunk::{CHUNK_SIZE, ChunkData};
+use crate::chunk::{CHUNK_HEIGHT, CHUNK_SIZE, ChunkData};
 use bevy::platform::collections::HashSet;
 use rumpel_blocks::{AIR_BLOCK_ID, BlockId, BlockRegistry};
 
@@ -18,6 +18,7 @@ pub struct DecorInstance {
 pub struct DecorBlockContext {
     pub grass: BlockId,
     pub leaves: BlockId,
+    pub wood: BlockId,
     pub air: BlockId,
     grass_blocker_ids: HashSet<BlockId>,
 }
@@ -27,6 +28,7 @@ impl DecorBlockContext {
     pub fn from_registry(registry: &BlockRegistry) -> Self {
         let grass = registry.get_id("grass").unwrap_or(AIR_BLOCK_ID);
         let leaves = registry.get_id("leaves").unwrap_or(AIR_BLOCK_ID);
+        let wood = registry.get_id("wood").unwrap_or(AIR_BLOCK_ID);
         let air = AIR_BLOCK_ID;
         let mut grass_blocker_ids = HashSet::default();
         for id in 0..=u16::MAX {
@@ -44,6 +46,7 @@ impl DecorBlockContext {
         Self {
             grass,
             leaves,
+            wood,
             air,
             grass_blocker_ids,
         }
@@ -96,10 +99,14 @@ pub fn grass_instances(
         return (full_instances, 0);
     }
     for z in 0..CHUNK_SIZE {
-        for y in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_HEIGHT {
             for x in 0..CHUNK_SIZE {
-                if chunk.get_block(x, y, z) == context.grass {
+                let block = chunk.get_block(x, y, z);
+                if block == context.grass {
                     append_grass_block(chunk, x, y, z, context, &mut full_instances);
+                } else if block == context.leaves && is_ground_shrub_leaves(chunk, x, y, z, context)
+                {
+                    append_shrub_grass_decor(x, y, z, &mut full_instances);
                 }
             }
         }
@@ -116,9 +123,11 @@ pub fn leaf_instances(
 ) -> (Vec<DecorInstance>, i64) {
     let mut full_instances = Vec::new();
     for z in 0..CHUNK_SIZE {
-        for y in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_HEIGHT {
             for x in 0..CHUNK_SIZE {
-                if chunk.get_block(x, y, z) == context.leaves {
+                if chunk.get_block(x, y, z) == context.leaves
+                    && !is_ground_shrub_leaves(chunk, x, y, z, context)
+                {
                     append_leaf_lod_instances(chunk, x, y, z, context, &mut full_instances);
                 }
             }
@@ -126,6 +135,16 @@ pub fn leaf_instances(
     }
     let original_count = i64::try_from(full_instances.len()).unwrap_or(i64::MAX);
     (cap_decor_instances(full_instances, cap), original_count)
+}
+
+#[must_use]
+pub fn chunk_decor_output_uncapped(
+    chunk: &ChunkData,
+    registry: &BlockRegistry,
+) -> ChunkDecorOutput {
+    let context = DecorBlockContext::from_registry(registry);
+    let (grass, leaves, _) = build_chunk_decor(chunk, &context, i64::MAX, i64::MAX);
+    ChunkDecorOutput { grass, leaves }
 }
 
 #[must_use]
@@ -318,6 +337,62 @@ fn cap_decor_instances(full_instances: Vec<DecorInstance>, cap: i64) -> Vec<Deco
         }
     }
     instances
+}
+
+/// Lua `spawn_shrub` marker voxels: one leaves block on terrain shell, not tree crown.
+fn is_ground_shrub_leaves(
+    chunk: &ChunkData,
+    x: usize,
+    y: usize,
+    z: usize,
+    context: &DecorBlockContext,
+) -> bool {
+    if y == 0 {
+        return false;
+    }
+    let below = chunk.get_block(x, y - 1, z);
+    if below == context.air || below == context.leaves || below == context.wood {
+        return false;
+    }
+    if y + 1 < CHUNK_HEIGHT && chunk.get_block(x, y + 1, z) == context.leaves {
+        return false;
+    }
+    true
+}
+
+/// Low grass-bush billboards for ground shrubs (avoid tree-crown leaf clump LOD).
+fn append_shrub_grass_decor(x: usize, y: usize, z: usize, instances: &mut Vec<DecorInstance>) {
+    let shrub_seed = local_noise(
+        axis_to_i32(x) * 29 + 7,
+        axis_to_i32(y) * 31 + 11,
+        axis_to_i32(z) * 37 + 13,
+    );
+    let clump_count = 2 + ((shrub_seed >> 5).abs() % 2);
+    for clump_index in 0..clump_count {
+        let clump_seed = local_noise(
+            axis_to_i32(x) * 41 + clump_index * 13,
+            axis_to_i32(y) * 19 + 3,
+            axis_to_i32(z) * 43 + clump_index * 17,
+        );
+        let spread_x = i32_to_f32((clump_seed >> 1) & 31) / 31.0;
+        let spread_z = i32_to_f32((clump_seed >> 7) & 31) / 31.0;
+        let yaw = i32_to_f32(clump_seed % 6283) / 1000.0;
+        let height = 0.34 + i32_to_f32((clump_seed >> 8) & 7) * 0.012;
+        let width = 0.78 + i32_to_f32((clump_seed >> 11) & 5) * 0.008;
+        let color_mix = i32_to_f32((clump_seed >> 15) & 7) / 7.0 * 0.14;
+        let wind_offset = i32_to_f32((clump_seed >> 18) & 255) / 255.0;
+        push_decor_instance(
+            instances,
+            yaw,
+            [width, height, width],
+            [
+                x as f32 + 0.22 + spread_x * 0.56,
+                y as f32 + 0.004,
+                z as f32 + 0.22 + spread_z * 0.56,
+            ],
+            [color_mix, wind_offset, 0.0, 1.0],
+        );
+    }
 }
 
 fn append_leaf_lod_instances(
@@ -592,7 +667,7 @@ fn block_at_offset(
     let Some(z) = offset_axis(z, offset[2]) else {
         return air;
     };
-    if x >= CHUNK_SIZE || y >= CHUNK_SIZE || z >= CHUNK_SIZE {
+    if x >= CHUNK_SIZE || y >= CHUNK_HEIGHT || z >= CHUNK_SIZE {
         return air;
     }
     chunk.get_block(x, y, z)
@@ -701,6 +776,7 @@ mod tests {
         let context = DecorBlockContext {
             grass: 2,
             leaves: 7,
+            wood: 5,
             air: 0,
             grass_blocker_ids: HashSet::default(),
         };
@@ -722,6 +798,28 @@ mod tests {
         append_leaf_lod_instances(&chunk, center, center, center, &context, &mut instances);
 
         assert_eq!(instances.len(), 3);
+    }
+
+    #[test]
+    fn ground_shrub_leaves_emit_grass_billboards_not_tree_lod() {
+        let context = DecorBlockContext {
+            grass: 2,
+            leaves: 7,
+            wood: 5,
+            air: 0,
+            grass_blocker_ids: HashSet::default(),
+        };
+        let mut chunk = ChunkData::default();
+        let x = 10;
+        let z = 12;
+        chunk.set_block(x, 0, z, context.grass);
+        chunk.set_block(x, 1, z, context.leaves);
+
+        let (grass, _) = grass_instances(&chunk, &context, -1);
+        let (leaves, _) = leaf_instances(&chunk, &context, -1);
+
+        assert!(!grass.is_empty());
+        assert!(leaves.is_empty());
     }
 
     #[test]

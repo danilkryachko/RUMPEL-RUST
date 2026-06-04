@@ -17,6 +17,8 @@ pub struct BlockData {
     pub color: (f32, f32, f32, f32),
     #[serde(default)]
     pub gravity_affected: bool,
+    #[serde(default)]
+    pub wind_animated: bool,
     #[serde(default = "default_strength")]
     pub strength: f32,
 }
@@ -208,7 +210,8 @@ fn hash_block_data(mut hash: u64, block: &BlockData) -> u64 {
     ] {
         hash = fnv64(hash, u64::from(channel.to_bits()));
     }
-    hash_bool(hash, block.gravity_affected)
+    hash = hash_bool(hash, block.gravity_affected);
+    hash_bool(hash, block.wind_animated)
 }
 
 #[cfg(test)]
@@ -223,6 +226,7 @@ mod tests {
             is_transparent: false,
             color: (1.0, 1.0, 1.0, 1.0),
             gravity_affected: false,
+            wind_animated: false,
             strength: 1.0,
         }
     }
