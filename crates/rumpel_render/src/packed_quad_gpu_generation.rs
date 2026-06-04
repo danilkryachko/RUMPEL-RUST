@@ -649,13 +649,14 @@ pub fn region_has_active_chunks(
     view_radius: i32,
 ) -> bool {
     let region_size = region_size.max(1);
-    let radius_sq = i64::from(view_radius.max(0)).pow(2);
+    let radius = i128::from(view_radius.max(0));
+    let radius_sq = radius * radius;
     let max_x = region_origin_x.saturating_add(region_size.saturating_sub(1));
     let max_z = region_origin_z.saturating_add(region_size.saturating_sub(1));
     let closest_x = center_chunk.x.clamp(region_origin_x, max_x);
     let closest_z = center_chunk.y.clamp(region_origin_z, max_z);
-    let dx = i64::from(closest_x - center_chunk.x);
-    let dz = i64::from(closest_z - center_chunk.y);
+    let dx = i128::from(closest_x) - i128::from(center_chunk.x);
+    let dz = i128::from(closest_z) - i128::from(center_chunk.y);
     dx * dx + dz * dz <= radius_sq
 }
 
@@ -901,12 +902,12 @@ fn loaded_region_prefetch_order_key(
     camera_chunk_x: i32,
     camera_chunk_z: i32,
     region_size: i32,
-) -> (i64, u64) {
+) -> (i128, u64) {
     let center_offset = region_size.max(1) / 2;
     let center_x = region.0.saturating_add(center_offset);
     let center_z = region.1.saturating_add(center_offset);
-    let dx = i64::from(center_x) - i64::from(camera_chunk_x);
-    let dz = i64::from(center_z) - i64::from(camera_chunk_z);
+    let dx = i128::from(center_x) - i128::from(camera_chunk_x);
+    let dz = i128::from(center_z) - i128::from(camera_chunk_z);
     (dx * dx + dz * dz, region.2)
 }
 
@@ -1435,6 +1436,17 @@ mod tests {
     }
 
     #[test]
+    fn region_has_active_chunks_handles_large_coordinate_separation() {
+        assert!(!region_has_active_chunks(
+            i32::MAX - 8,
+            i32::MAX - 8,
+            4,
+            IVec2::new(i32::MIN + 8, i32::MIN + 8),
+            16,
+        ));
+    }
+
+    #[test]
     fn region_has_active_chunks_matches_active_chunk_set_scan() {
         let center = IVec2::new(3, -2);
 
@@ -1615,6 +1627,16 @@ mod tests {
         let mut regions = [(8, 0, 30_u64), (0, 0, 10_u64), (0, 0, 20_u64)];
         order_loaded_regions_for_prefetch(&mut regions, 5, 2, 4);
         assert_eq!(regions.map(|region| region.2), [10, 20, 30]);
+    }
+
+    #[test]
+    fn order_loaded_regions_for_prefetch_handles_large_coordinate_separation() {
+        let mut regions = [
+            (i32::MAX - 8, i32::MAX - 8, 20_u64),
+            (i32::MIN + 8, i32::MIN + 8, 10_u64),
+        ];
+        order_loaded_regions_for_prefetch(&mut regions, i32::MIN + 8, i32::MIN + 8, 4);
+        assert_eq!(regions.map(|region| region.2), [10, 20]);
     }
 
     #[test]

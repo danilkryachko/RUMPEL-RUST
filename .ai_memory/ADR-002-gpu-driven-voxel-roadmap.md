@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated region activity and prefetch distance helpers now widen coordinate deltas and squared-distance math to `i128`, preventing debug overflow for far-apart chunk coordinates while preserving deterministic prefetch ordering. Verified with focused large-coordinate tests, render clippy, and full `just verify`.
 - 2026-06-04: GPU-generated prepare now moves planned region metadata from scratch into prepared state with `swap` instead of cloning the Vec, preserving scratch capacity for later frames and removing an active-chunk-scale CPU copy. Verified with focused move-helper test, render clippy, and full `just verify`.
 - 2026-06-04: GPU-generated prepare now moves pending dispatch-generation states from reusable scratch into prepared state with `swap` instead of cloning the Vec, preserving scratch capacity for the next frame. Verified with focused move-helper test, render clippy, and full `just verify`.
 - 2026-06-04: GPU-generated structure-stable render refresh now combines active allocation satisfaction checking with planned-region staging, removing a duplicate active-range/allocation pass before refresh reuse. Verified with focused renderer tests, render clippy, and full `just verify`.
