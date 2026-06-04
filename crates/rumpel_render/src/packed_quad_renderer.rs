@@ -1145,21 +1145,18 @@ fn prepare_packed_gpu_generated_draw(
     };
 
     let ordered_batches = extracted_batches.batches();
-    let batch_signature = if extracted_batches.batch_signature == 0 {
-        PackedGpuGenerationBatches::calculate_batch_signature(ordered_batches)
-    } else {
-        extracted_batches.batch_signature
-    };
-    let batch_structure_signature = if extracted_batches.batch_structure_signature == 0 {
-        PackedGpuGenerationBatches::calculate_batch_structure_signature(ordered_batches)
-    } else {
-        extracted_batches.batch_structure_signature
-    };
-    let batch_summary = if extracted_batches.batch_signature == 0 {
-        PackedGpuGenerationBatches::summarize_batches(ordered_batches)
-    } else {
-        extracted_batches.summary
-    };
+    let (batch_signature, batch_structure_signature, batch_summary) =
+        if extracted_batches.batch_signature == 0
+            || extracted_batches.batch_structure_signature == 0
+        {
+            PackedGpuGenerationBatches::calculate_batch_metadata(ordered_batches)
+        } else {
+            (
+                extracted_batches.batch_signature,
+                extracted_batches.batch_structure_signature,
+                extracted_batches.summary,
+            )
+        };
     let active_chunk_job_count = batch_summary.active_chunk_job_count;
     let total_region_column_count = batch_summary.total_column_count;
 

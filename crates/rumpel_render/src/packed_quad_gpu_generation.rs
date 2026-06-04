@@ -94,6 +94,92 @@ impl PackedGpuGenerationBatches {
     }
 
     #[must_use]
+    pub fn calculate_batch_metadata(
+        batches: &[PackedGpuGenerationBatch],
+    ) -> (u64, u64, PackedGpuGenerationBatchSummary) {
+        let mut batch_hash = FNV64_OFFSET;
+        let mut structure_hash = FNV64_OFFSET;
+        let mut summary = PackedGpuGenerationBatchSummary::default();
+        batch_hash = fnv64(batch_hash, batches.len() as u64);
+        structure_hash = fnv64(structure_hash, batches.len() as u64);
+
+        for (index, batch) in batches.iter().enumerate() {
+            batch_hash = fnv64(batch_hash, index as u64);
+            structure_hash = fnv64(structure_hash, index as u64);
+            batch_hash = fnv64(batch_hash, batch.key);
+            structure_hash = fnv64(structure_hash, batch.key);
+            batch_hash = fnv64(batch_hash, batch.generation);
+            structure_hash = fnv64(structure_hash, batch.generation);
+            let region_column_count = batch.columns.len();
+            batch_hash = fnv64(batch_hash, region_column_count as u64);
+            structure_hash = fnv64(structure_hash, region_column_count as u64);
+            batch_hash = fnv64(batch_hash, batch.source_chunk_count as u64);
+            structure_hash = fnv64(structure_hash, batch.source_chunk_count as u64);
+            batch_hash = fnv64(batch_hash, batch.max_output_quads as u64);
+            structure_hash = fnv64(structure_hash, batch.max_output_quads as u64);
+            for value in batch.params.config {
+                batch_hash = fnv64(batch_hash, u64::from(value));
+                structure_hash = fnv64(structure_hash, u64::from(value));
+            }
+            for value in batch.params.palette {
+                batch_hash = fnv64(batch_hash, u64::from(value));
+                structure_hash = fnv64(structure_hash, u64::from(value));
+            }
+            for value in batch.translation.to_array() {
+                let value = u64::from(value.to_bits());
+                batch_hash = fnv64(batch_hash, value);
+                structure_hash = fnv64(structure_hash, value);
+            }
+            for value in batch.bounds_min.to_array() {
+                let value = u64::from(value.to_bits());
+                batch_hash = fnv64(batch_hash, value);
+                structure_hash = fnv64(structure_hash, value);
+            }
+            for value in batch.bounds_max.to_array() {
+                let value = u64::from(value.to_bits());
+                batch_hash = fnv64(batch_hash, value);
+                structure_hash = fnv64(structure_hash, value);
+            }
+
+            if region_column_count == 0
+                || batch.max_output_quads == 0
+                || batch.chunk_ranges.is_empty()
+            {
+                summary.invalid_batch_count = summary.invalid_batch_count.saturating_add(1);
+            }
+            summary.source_chunk_count = summary
+                .source_chunk_count
+                .saturating_add(batch.source_chunk_count);
+
+            for range in batch.chunk_ranges.iter() {
+                batch_hash = fnv64(batch_hash, range.chunk_key);
+                structure_hash = fnv64(structure_hash, range.chunk_key);
+                batch_hash = fnv64(batch_hash, range.column_start as u64);
+                structure_hash = fnv64(structure_hash, range.column_start as u64);
+                batch_hash = fnv64(batch_hash, range.column_len as u64);
+                structure_hash = fnv64(structure_hash, range.column_len as u64);
+                batch_hash = fnv64(batch_hash, u64::from(range.active));
+
+                if !range.active || range.column_len == 0 {
+                    continue;
+                }
+                summary.active_chunk_job_count = summary.active_chunk_job_count.saturating_add(1);
+                summary.total_column_count =
+                    summary.total_column_count.saturating_add(range.column_len);
+                let chunk_max_output_quads = range
+                    .column_len
+                    .saturating_mul(PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN);
+                summary.total_max_output_quads = summary
+                    .total_max_output_quads
+                    .saturating_add(chunk_max_output_quads.max(1));
+                summary.max_column_count = summary.max_column_count.max(range.column_len);
+            }
+        }
+
+        (batch_hash.max(1), structure_hash.max(1), summary)
+    }
+
+    #[must_use]
     pub fn calculate_batch_signature(batches: &[PackedGpuGenerationBatch]) -> u64 {
         let mut hash = FNV64_OFFSET;
         hash = fnv64(hash, batches.len() as u64);
@@ -1036,6 +1122,8 @@ mod tests {
 
         let batches = [make_batch(1, 3, 21, 2, true), make_batch(2, 0, 0, 4, false)];
         let summary = PackedGpuGenerationBatches::summarize_batches(&batches);
+        let (batch_signature, batch_structure_signature, metadata_summary) =
+            PackedGpuGenerationBatches::calculate_batch_metadata(&batches);
 
         assert_eq!(summary.invalid_batch_count, 1);
         assert_eq!(summary.total_column_count, 3);
@@ -1046,6 +1134,15 @@ mod tests {
         assert_eq!(summary.max_column_count, 3);
         assert_eq!(summary.source_chunk_count, 6);
         assert_eq!(summary.active_chunk_job_count, 1);
+        assert_eq!(metadata_summary, summary);
+        assert_eq!(
+            batch_signature,
+            PackedGpuGenerationBatches::calculate_batch_signature(&batches)
+        );
+        assert_eq!(
+            batch_structure_signature,
+            PackedGpuGenerationBatches::calculate_batch_structure_signature(&batches)
+        );
         assert!(!summary.is_renderable(batches.len()));
         let active_only = [make_batch(1, 3, 21, 2, true)];
         assert!(PackedGpuGenerationBatches::summarize_batches(&active_only).is_renderable(1));

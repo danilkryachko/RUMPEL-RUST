@@ -3659,10 +3659,8 @@ fn apply_sliding_generated_batches_in_place(
         batches.push(batch);
     }
     batches.sort_by_key(|batch| batch.key);
-    let batch_signature = PackedGpuGenerationBatches::calculate_batch_signature(&batches);
-    let batch_structure_signature =
-        PackedGpuGenerationBatches::calculate_batch_structure_signature(&batches);
-    let batch_summary = PackedGpuGenerationBatches::summarize_batches(&batches);
+    let (batch_signature, batch_structure_signature, batch_summary) =
+        PackedGpuGenerationBatches::calculate_batch_metadata(&batches);
     gpu_batches.batch_signature = batch_signature;
     gpu_batches.batch_structure_signature = batch_structure_signature;
     gpu_batches.summary = batch_summary;
@@ -3801,11 +3799,8 @@ fn finalize_generated_batch_update(
         context.prefetched,
     );
 
-    let batch_signature =
-        PackedGpuGenerationBatches::calculate_batch_signature(&scratch.generated_batches);
-    let batch_structure_signature =
-        PackedGpuGenerationBatches::calculate_batch_structure_signature(&scratch.generated_batches);
-    let batch_summary = PackedGpuGenerationBatches::summarize_batches(&scratch.generated_batches);
+    let (batch_signature, batch_structure_signature, batch_summary) =
+        PackedGpuGenerationBatches::calculate_batch_metadata(&scratch.generated_batches);
     let changed = gpu_batches.batch_signature != batch_signature;
 
     gpu_batches.target = Some(context.target);
@@ -4039,11 +4034,7 @@ pub fn update_packed_gpu_generation_regions(
             for batch in batches.iter_mut() {
                 sync_gpu_chunk_range_active_flags(batch, &scratch.active_chunk_keys);
             }
-            (
-                PackedGpuGenerationBatches::calculate_batch_signature(batches),
-                PackedGpuGenerationBatches::calculate_batch_structure_signature(batches),
-                PackedGpuGenerationBatches::summarize_batches(batches),
-            )
+            PackedGpuGenerationBatches::calculate_batch_metadata(batches)
         };
         if gpu_batches.batch_signature != batch_signature {
             gpu_batches.batch_signature = batch_signature;
