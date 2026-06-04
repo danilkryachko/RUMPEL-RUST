@@ -3628,6 +3628,15 @@ fn sliding_shift_can_update_batches_in_place(
         })
 }
 
+fn fill_carried_generated_batches(
+    carried_batches: &mut HashMap<u64, PackedGpuGenerationBatch>,
+    batches: &[PackedGpuGenerationBatch],
+) {
+    carried_batches.clear();
+    reserve_hash_map_capacity(carried_batches, batches.len());
+    carried_batches.extend(batches.iter().cloned().map(|batch| (batch.key, batch)));
+}
+
 fn apply_sliding_generated_batches_in_place(
     gpu_batches: &mut PackedGpuGenerationBatches,
     carried_batches: &mut HashMap<u64, PackedGpuGenerationBatch>,
@@ -4060,14 +4069,7 @@ pub fn update_packed_gpu_generation_regions(
     let sync_build_budget = packed_gpu_generation_max_synchronous_builds_from_env();
 
     if sliding_shift {
-        scratch.carried_batches.clear();
-        scratch.carried_batches.extend(
-            gpu_batches
-                .batches()
-                .iter()
-                .cloned()
-                .map(|batch| (batch.key, batch)),
-        );
+        fill_carried_generated_batches(&mut scratch.carried_batches, gpu_batches.batches());
 
         let shift_sync_build_budget = packed_gpu_generation_shift_sync_build_budget_from_env();
         prune_stale_pending_active_region_builds(
@@ -5425,6 +5427,21 @@ mod tests {
         registry
     }
 
+    fn test_gpu_generation_batch(key: u64) -> PackedGpuGenerationBatch {
+        PackedGpuGenerationBatch {
+            key,
+            columns: Arc::new(Vec::new()),
+            chunk_ranges: Arc::new(Vec::new()),
+            params: PackedGpuGenerationParams::new(0, 0, 0, 0, 1, 2, 3),
+            source_chunk_count: 0,
+            max_output_quads: 0,
+            translation: Vec4::ZERO,
+            bounds_min: Vec3::ZERO,
+            bounds_max: Vec3::ZERO,
+            generation: 1,
+        }
+    }
+
     #[test]
     fn packed_quad_block_texture_palette_extract_shares_tiles() {
         let source = PackedQuadBlockTexturePalette::default();
@@ -5630,6 +5647,32 @@ mod tests {
         prune_stale_pending_active_region_builds(&mut pending, &active_region_keys);
 
         assert_eq!(pending, vec![(0, 0, active_a), (8, 0, active_b)]);
+    }
+
+    #[test]
+    fn test_fill_carried_generated_batches_reuses_capacity() {
+        let mut carried = HashMap::with_capacity(8);
+        let reserved_capacity = carried.capacity();
+        let batches = vec![
+            test_gpu_generation_batch(10),
+            test_gpu_generation_batch(20),
+            test_gpu_generation_batch(30),
+        ];
+
+        fill_carried_generated_batches(&mut carried, &batches);
+
+        assert_eq!(carried.len(), 3);
+        assert_eq!(carried[&10].key, 10);
+        assert_eq!(carried[&20].key, 20);
+        assert_eq!(carried[&30].key, 30);
+        assert_eq!(carried.capacity(), reserved_capacity);
+
+        fill_carried_generated_batches(&mut carried, &[test_gpu_generation_batch(40)]);
+
+        assert_eq!(carried.len(), 1);
+        assert!(carried.contains_key(&40));
+        assert!(!carried.contains_key(&10));
+        assert_eq!(carried.capacity(), reserved_capacity);
     }
 
     #[test]
