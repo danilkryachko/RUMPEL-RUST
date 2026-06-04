@@ -448,6 +448,17 @@ fn record_dispatched_chunk_generations(prepared: &mut PreparedPackedGpuGenerated
     }
 }
 
+fn move_pending_chunk_generations_to_prepared(
+    buffers: &mut PackedGpuGenerationBuffers,
+    prepared: &mut PreparedPackedGpuGeneratedDraw,
+) {
+    std::mem::swap(
+        &mut prepared.pending_chunk_generations,
+        &mut buffers.pending_chunk_generations,
+    );
+    buffers.pending_chunk_generations.clear();
+}
+
 fn active_chunk_requested_quads(
     range: &crate::packed_quad_gpu_generation::PackedGpuChunkRange,
 ) -> usize {
@@ -1125,9 +1136,7 @@ fn refresh_structure_stable_gpu_generated_prepare(
         buffers,
         active_chunk_job_count,
     );
-    prepared
-        .pending_chunk_generations
-        .clone_from(&buffers.pending_chunk_generations);
+    move_pending_chunk_generations_to_prepared(buffers, prepared);
 
     let Some(jobs_buffer) = buffers.jobs_buffer.as_ref() else {
         prepared.disable();
@@ -1565,9 +1574,7 @@ fn prepare_packed_gpu_generated_draw(
         &mut buffers,
         active_chunk_job_count,
     );
-    prepared
-        .pending_chunk_generations
-        .clone_from(&buffers.pending_chunk_generations);
+    move_pending_chunk_generations_to_prepared(&mut buffers, &mut prepared);
 
     for batch in ordered_batches {
         buffers.columns.extend_from_slice(batch.columns.as_slice());
@@ -3643,6 +3650,34 @@ mod tests {
             &dispatched
         ));
         assert!(chunk_needs_gpu_generation(11, 1, allocation, &dispatched));
+    }
+
+    #[test]
+    fn move_pending_chunk_generations_to_prepared_reuses_scratch_without_copy() {
+        let allocation = crate::packed_quad_buffer::PackedQuadArenaAllocation {
+            key: 10,
+            offset_quads: 16,
+            len_quads: 7,
+            capacity_quads: 32,
+            generation: 3,
+        };
+        let old_state = PackedGpuDispatchedChunkState::new(1, allocation);
+        let new_state = PackedGpuDispatchedChunkState::new(2, allocation);
+        let mut prepared = PreparedPackedGpuGeneratedDraw {
+            pending_chunk_generations: vec![(1, old_state)],
+            ..Default::default()
+        };
+        let mut buffers = PackedGpuGenerationBuffers {
+            pending_chunk_generations: vec![(10, new_state), (11, new_state)],
+            ..Default::default()
+        };
+
+        move_pending_chunk_generations_to_prepared(&mut buffers, &mut prepared);
+
+        assert_eq!(prepared.pending_chunk_generations.len(), 2);
+        assert_eq!(prepared.pending_chunk_generations[0], (10, new_state));
+        assert_eq!(prepared.pending_chunk_generations[1], (11, new_state));
+        assert!(buffers.pending_chunk_generations.is_empty());
     }
 
     #[test]
