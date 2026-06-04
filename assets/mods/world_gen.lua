@@ -97,6 +97,27 @@ local function spawn_pine(tx, ty, tz, height)
     end
 end
 
+-- Stylized desert cactus: a slim vertical column of foliage.
+local function spawn_cactus(cx, cy, cz, height)
+    for y = cy, cy + height - 1 do
+        if y >= 0 and y < CHUNK_SIZE and get_block(cx, y, cz) == "air" then
+            set_block(cx, y, cz, "leaves")
+        end
+    end
+end
+
+-- Low rounded snow drift sitting in the air slot above the surface.
+local function spawn_snow_mound(cx, cy, cz, tall)
+    set_block(cx, cy, cz, "snow")
+    if cx + 1 < CHUNK_SIZE then set_block(cx + 1, cy, cz, "snow") end
+    if cx - 1 >= 0 then set_block(cx - 1, cy, cz, "snow") end
+    if cz + 1 < CHUNK_SIZE then set_block(cx, cy, cz + 1, "snow") end
+    if cz - 1 >= 0 then set_block(cx, cy, cz - 1, "snow") end
+    if tall and cy + 1 < CHUNK_SIZE then
+        set_block(cx, cy + 1, cz, "snow")
+    end
+end
+
 -- ── 1. Sea level water fill ──────────────────────────────────────────────────
 
 for x = 0, CHUNK_MAX do
@@ -105,6 +126,15 @@ for x = 0, CHUNK_MAX do
             if get_block(x, y, z) == "air" then
                 set_block(x, y, z, "water")
             end
+        end
+    end
+end
+
+-- ── 1.5 Frozen lakes: skin exposed water with ice in the snow biome ───────────
+for x = 0, CHUNK_MAX do
+    for z = 0, CHUNK_MAX do
+        if get_block(x, SEA_LEVEL, z) == "water" and get_biome(x, z) == "snow" then
+            set_block(x, SEA_LEVEL, z, "ice")
         end
     end
 end
@@ -158,6 +188,28 @@ for x = 2, CHUNK_MAX - 2, 3 do
             elseif s.biome == "desert" then
                 if chance("desert_shrub", x, z, 0.05) then
                     set_block(x, h, z, "leaves")
+                end
+            end
+        end
+    end
+end
+
+-- ── 2.5 Biome decorations ─────────────────────────────────────────────────────
+-- Desert: occasional tall cacti. Snow: scattered snow drifts. Both placed on a
+-- coarse deterministic grid in the air slot above the surface.
+for x = 1, CHUNK_MAX - 1, 2 do
+    for z = 1, CHUNK_MAX - 1, 2 do
+        local h = get_height(x, z)
+        if h > SEA_LEVEL and h < CHUNK_MAX - 4 and get_block(x, h, z) == "air" then
+            local biome = get_biome(x, z)
+            if biome == "desert" then
+                if chance("cactus", x, z, 0.06) then
+                    local height = 2 + math.floor(rand01("cactus_h", x, z) * 3)
+                    spawn_cactus(x, h, z, height)
+                end
+            elseif biome == "snow" then
+                if chance("snow_mound", x, z, 0.08) then
+                    spawn_snow_mound(x, h, z, chance("snow_mound_tall", x, z, 0.4))
                 end
             end
         end
