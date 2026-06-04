@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated loaded-region prefetch ordering now uses an explicit `(distance, region_key)` key for unstable sorting and nearest-budget selection, giving deterministic ties while avoiding stable-sort overhead and widening distance math to `i64`. Verified with focused prefetch ordering/retain tests, render clippy, and full `just verify`.
 - 2026-06-04: GPU-generated arena allocation request planning now uses unstable key sorting for the unsorted helper and matching parity test, aligning the planner fallback with unique-key render ordering semantics while avoiding stable-sort overhead. Verified with focused allocation-planning test, render clippy, and full `just verify`.
 - 2026-06-04: GPU-generated dispatch tracking now stores per-chunk arena slot state alongside source generation and prunes stale entries against current allocations, forcing regeneration when chunks return through reused slots even if their world generation is unchanged. Verified with focused dispatch/prune/prepare tests and full `just verify`.
 - 2026-06-04: Packed/generated batch ordering now uses unstable key sorting for unique batch/region key paths, avoiding stable-sort overhead in arena packing, sorted batch order staging, sliding generated batches, and generated batch assembly. Verified with focused packing/order tests and full `just verify`.

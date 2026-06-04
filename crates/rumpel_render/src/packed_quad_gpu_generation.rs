@@ -896,18 +896,18 @@ pub fn packed_gpu_generation_shift_sync_build_budget_from_env() -> usize {
         .max(DEFAULT_PACKED_GPU_GENERATION_SHIFT_SYNCHRONOUS_BUILDS_PER_FRAME)
 }
 
-fn loaded_region_prefetch_distance_key(
+fn loaded_region_prefetch_order_key(
     region: (i32, i32, u64),
     camera_chunk_x: i32,
     camera_chunk_z: i32,
     region_size: i32,
-) -> i32 {
+) -> (i64, u64) {
     let center_offset = region_size.max(1) / 2;
     let center_x = region.0.saturating_add(center_offset);
     let center_z = region.1.saturating_add(center_offset);
-    let dx = center_x - camera_chunk_x;
-    let dz = center_z - camera_chunk_z;
-    dx * dx + dz * dz
+    let dx = i64::from(center_x) - i64::from(camera_chunk_x);
+    let dz = i64::from(center_z) - i64::from(camera_chunk_z);
+    (dx * dx + dz * dz, region.2)
 }
 
 /// Sort loaded region origins nearest-first for moving-camera cache warmup.
@@ -920,8 +920,8 @@ pub fn order_loaded_regions_for_prefetch(
     if regions.len() <= 1 {
         return;
     }
-    regions.sort_by_key(|region| {
-        loaded_region_prefetch_distance_key(*region, camera_chunk_x, camera_chunk_z, region_size)
+    regions.sort_unstable_by_key(|region| {
+        loaded_region_prefetch_order_key(*region, camera_chunk_x, camera_chunk_z, region_size)
     });
 }
 
@@ -938,12 +938,7 @@ pub fn retain_nearest_loaded_regions_for_prefetch(
     }
     if regions.len() > budget {
         regions.select_nth_unstable_by_key(budget, |region| {
-            loaded_region_prefetch_distance_key(
-                *region,
-                camera_chunk_x,
-                camera_chunk_z,
-                region_size,
-            )
+            loaded_region_prefetch_order_key(*region, camera_chunk_x, camera_chunk_z, region_size)
         });
         regions.truncate(budget);
     }
@@ -1592,6 +1587,23 @@ mod tests {
         assert_eq!(regions[0].2, 1);
         assert_eq!(regions[1].2, 2);
         assert_eq!(regions[2].2, 3);
+    }
+
+    #[test]
+    fn order_loaded_regions_for_prefetch_breaks_distance_ties_by_region_key() {
+        let mut regions = [(8, 0, 30_u64), (0, 0, 10_u64), (0, 0, 20_u64)];
+        order_loaded_regions_for_prefetch(&mut regions, 5, 2, 4);
+        assert_eq!(regions.map(|region| region.2), [10, 20, 30]);
+    }
+
+    #[test]
+    fn retain_nearest_loaded_regions_for_prefetch_breaks_boundary_ties_by_region_key() {
+        let mut regions = [(8, 0, 30_u64), (0, 0, 10_u64), (0, 0, 20_u64)].to_vec();
+        retain_nearest_loaded_regions_for_prefetch(&mut regions, 2, 5, 2, 4);
+        assert_eq!(
+            regions.iter().map(|region| region.2).collect::<Vec<_>>(),
+            [10, 20]
+        );
     }
 
     #[test]
