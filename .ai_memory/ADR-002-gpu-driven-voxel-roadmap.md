@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated cull dispatch reuse now exits before compute pipeline, view uniform, and cull buffer lookups; stable reused frames only compute the source/view dispatch signature and publish cached visible metrics. Verified with focused cull tests and full `just verify`.
 - 2026-06-04: GPU-generated rebuild column staging no longer maintains the unused `region_column_base` counter while copying columns into the upload scratch buffer. Verified with focused render checks and full `just verify`.
 - 2026-06-04: GPU-generated render prepare now uses the producer-side active chunk job count from `PackedGpuGenerationBatchSummary` instead of scanning every generated chunk range before steady-frame skip/capacity checks. Verified with focused render tests and full `just verify`.
 - 2026-06-04: GPU-generated render prepare now uses the producer-side batch summary's total column count instead of scanning every generated batch before the steady-frame early return. Verified with focused render tests and full `just verify`.

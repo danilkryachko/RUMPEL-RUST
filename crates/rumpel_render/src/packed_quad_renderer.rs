@@ -2033,12 +2033,6 @@ impl render_graph::Node for PackedQuadCullNode {
         }
 
         let node_start = Instant::now();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let pipeline = world.resource::<PackedQuadCullPipeline>();
-        let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline_id)
-        else {
-            return Ok(());
-        };
         let Some(cull_source) = PackedQuadGpuCullSource::from_world(world) else {
             return Ok(());
         };
@@ -2048,9 +2042,6 @@ impl render_graph::Node for PackedQuadCullNode {
         }
 
         let view_entity = graph.view_entity();
-        let Some(view_uniform) = world.get::<PackedQuadViewUniform>(view_entity) else {
-            return Ok(());
-        };
         let Some(extracted_view) = world.get::<ExtractedView>(view_entity) else {
             return Ok(());
         };
@@ -2058,21 +2049,6 @@ impl render_graph::Node for PackedQuadCullNode {
         let clip_from_world = extracted_view.clip_from_world.unwrap_or_else(|| {
             extracted_view.clip_from_view * extracted_view.world_from_view.affine().inverse()
         });
-
-        let (
-            Some(metadata_buffer),
-            Some(output_indirect_buffer),
-            Some(config_buffer),
-            Some(count_buffer),
-        ) = (
-            gpu_cull.metadata_buffer.as_ref(),
-            gpu_cull.output_indirect_buffer.as_ref(),
-            gpu_cull.config_buffer.as_ref(),
-            gpu_cull.count_buffer.as_ref(),
-        )
-        else {
-            return Ok(());
-        };
 
         let dispatch_signature = packed_gpu_cull_dispatch_signature(
             &cull_source,
@@ -2098,6 +2074,29 @@ impl render_graph::Node for PackedQuadCullNode {
             return Ok(());
         }
 
+        let Some(view_uniform) = world.get::<PackedQuadViewUniform>(view_entity) else {
+            return Ok(());
+        };
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let pipeline = world.resource::<PackedQuadCullPipeline>();
+        let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline_id)
+        else {
+            return Ok(());
+        };
+        let (
+            Some(metadata_buffer),
+            Some(output_indirect_buffer),
+            Some(config_buffer),
+            Some(count_buffer),
+        ) = (
+            gpu_cull.metadata_buffer.as_ref(),
+            gpu_cull.output_indirect_buffer.as_ref(),
+            gpu_cull.config_buffer.as_ref(),
+            gpu_cull.count_buffer.as_ref(),
+        )
+        else {
+            return Ok(());
+        };
         let estimate = cull_source.estimate_visible(command_count, view_position, clip_from_world);
 
         let local_bind_group;
