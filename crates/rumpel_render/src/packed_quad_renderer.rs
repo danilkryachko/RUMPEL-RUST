@@ -1446,11 +1446,6 @@ fn prepare_packed_gpu_generated_draw(
         buffers.indirect_capacity_commands = next_capacity;
     }
 
-    buffers.jobs.clear();
-    let jobs_reserve = active_chunk_job_count.saturating_sub(buffers.jobs.capacity());
-    if jobs_reserve > 0 {
-        buffers.jobs.reserve(jobs_reserve);
-    }
     buffers.columns.clear();
     let columns_reserve = total_region_column_count.saturating_sub(buffers.columns.capacity());
     if columns_reserve > 0 {
