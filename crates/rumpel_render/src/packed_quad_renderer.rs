@@ -265,6 +265,8 @@ struct PackedGpuGenerationActiveRange {
     requested_quads: usize,
     params: crate::packed_quad_gpu_generation::PackedGpuGenerationParams,
     translation: Vec4,
+    bounds_min: Vec3,
+    bounds_max: Vec3,
 }
 
 fn reserve_vec_for_len<T>(values: &mut Vec<T>, len: usize) {
@@ -296,15 +298,23 @@ fn collect_active_gpu_generation_ranges(
             if !range.active || range.column_len == 0 {
                 continue;
             }
+            let requested_quads = active_chunk_requested_quads(range);
+            let mut params = batch.params;
+            params.config[0] = range.column_len.min(u32::MAX as usize) as u32;
+            params.config[1] = requested_quads.min(u32::MAX as usize) as u32;
+            let (bounds_min, bounds_max) =
+                crate::packed_quad_pipeline::packed_chunk_world_bounds(range.chunk_key);
             active_ranges.push(PackedGpuGenerationActiveRange {
                 key: batch.key,
                 chunk_key: range.chunk_key,
                 generation: batch.generation,
                 column_offset: region_column_base.saturating_add(range.column_start),
                 column_len: range.column_len,
-                requested_quads: active_chunk_requested_quads(range),
-                params: batch.params,
+                requested_quads,
+                params,
                 translation: batch.translation,
+                bounds_min,
+                bounds_max,
             });
         }
         region_column_base = region_column_base.saturating_add(batch.columns.len());
@@ -359,11 +369,8 @@ fn collect_active_gpu_generation_jobs(
             continue;
         };
 
-        let mut params = range.params;
-        params.config[0] = range.column_len.min(u32::MAX as usize) as u32;
-        params.config[1] = range.requested_quads.min(u32::MAX as usize) as u32;
         let job = PackedGpuGenerationJob::new(
-            params,
+            range.params,
             range.column_offset,
             allocation.offset_quads,
             draw_command_index,
@@ -433,8 +440,6 @@ fn build_planned_gpu_generated_regions(
         let Some(allocation) = allocations.get(&range.chunk_key).copied() else {
             continue;
         };
-        let (bounds_min, bounds_max) =
-            crate::packed_quad_pipeline::packed_chunk_world_bounds(range.chunk_key);
 
         planned_regions.push(PreparedPackedGpuGeneratedRegion {
             key: range.key,
@@ -445,8 +450,8 @@ fn build_planned_gpu_generated_regions(
             arena_offset_quads: allocation.offset_quads,
             arena_capacity_quads: allocation.capacity_quads,
             draw_command_index,
-            bounds_min,
-            bounds_max,
+            bounds_min: range.bounds_min,
+            bounds_max: range.bounds_max,
         });
         draw_command_index = draw_command_index.saturating_add(1);
     }
@@ -3599,8 +3604,17 @@ mod tests {
         assert_eq!(active_ranges[0].column_offset, 0);
         assert_eq!(active_ranges[1].chunk_key, 102);
         assert_eq!(active_ranges[1].column_offset, 1);
+        assert_eq!(active_ranges[1].params.column_count(), 2);
+        assert_eq!(
+            active_ranges[1].params.max_output_quads(),
+            2 * crate::packed_quad_gpu_generation::PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN
+        );
         assert_eq!(active_ranges[2].chunk_key, 201);
         assert_eq!(active_ranges[2].column_offset, 3);
+        let (third_bounds_min, third_bounds_max) =
+            crate::packed_quad_pipeline::packed_chunk_world_bounds(201);
+        assert_eq!(active_ranges[2].bounds_min, third_bounds_min);
+        assert_eq!(active_ranges[2].bounds_max, third_bounds_max);
 
         let mut allocation_requests = Vec::new();
         collect_gpu_generation_allocation_requests(
@@ -3660,6 +3674,8 @@ mod tests {
         assert_eq!(planned_regions[1].draw_command_index, 1);
         assert_eq!(planned_regions[1].arena_offset_quads, 64);
         assert_eq!(planned_regions[2].key, 22);
+        assert_eq!(planned_regions[2].bounds_min, third_bounds_min);
+        assert_eq!(planned_regions[2].bounds_max, third_bounds_max);
 
         let mut buffers = PackedGpuGenerationBuffers {
             active_ranges,
@@ -3671,6 +3687,7 @@ mod tests {
         assert_eq!(buffers.jobs.len(), 3);
         assert_eq!(buffers.jobs[0].source[0], 0);
         assert_eq!(buffers.jobs[1].source[0], 1);
+        assert_eq!(buffers.jobs[1].source[1], 2);
         assert_eq!(buffers.jobs[2].source[0], 3);
         assert_eq!(buffers.jobs[1].output[1], 1);
         assert_eq!(buffers.dirty_jobs.len(), 2);

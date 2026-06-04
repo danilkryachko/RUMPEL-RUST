@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated active-range scratch now carries finalized job params and chunk bounds, so generation job collection and planned-region staging reuse that metadata instead of rewriting params and decoding bounds later. Verified with the focused active-range prepare test and full `just verify`.
 - 2026-06-04: GPU-generated render prepare now builds a single reusable active-range scratch and feeds allocation requests, planned regions, generation jobs, draw params, and dirty-generation tracking from it, removing repeated active chunk-range walks while preserving the GPU buffer ABI. Verified with focused active-range/prepare tests and full `just verify`.
 - 2026-06-04: GPU-generated cull signatures now use a combined `generated_regions_cull_signatures` pass when refreshing prepared regions, avoiding separate metadata/source signature scans over the same prepared region list. Verified with focused cull signature tests and full `just verify`.
 - 2026-06-04: GPU-generated structure-stable refresh now builds `planned_regions` only after readiness and allocation-satisfaction checks pass, avoiding wasted planned-region scans on fallback prepare frames. Verified with focused prepare tests and full `just verify`.
