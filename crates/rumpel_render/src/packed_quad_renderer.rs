@@ -459,21 +459,6 @@ fn active_chunk_requested_quads(
         .max(1)
 }
 
-fn structure_stable_gpu_allocations_satisfied(
-    active_ranges: &[PackedGpuGenerationActiveRange],
-    allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
-) -> bool {
-    for range in active_ranges {
-        let Some(allocation) = allocations.get(&range.chunk_key) else {
-            return false;
-        };
-        if allocation.capacity_quads < range.requested_quads {
-            return false;
-        }
-    }
-    true
-}
-
 fn build_planned_gpu_generated_regions(
     active_ranges: &[PackedGpuGenerationActiveRange],
     allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
@@ -503,6 +488,43 @@ fn build_planned_gpu_generated_regions(
         });
         draw_command_index = draw_command_index.saturating_add(1);
     }
+}
+
+fn build_planned_gpu_generated_regions_if_allocations_satisfied(
+    active_ranges: &[PackedGpuGenerationActiveRange],
+    allocations: &HashMap<u64, crate::packed_quad_buffer::PackedQuadArenaAllocation>,
+    planned_regions: &mut Vec<PreparedPackedGpuGeneratedRegion>,
+    active_chunk_job_count: usize,
+) -> bool {
+    planned_regions.clear();
+    reserve_vec_for_len(planned_regions, active_chunk_job_count);
+
+    let mut draw_command_index = 0usize;
+    for range in active_ranges {
+        let Some(allocation) = allocations.get(&range.chunk_key).copied() else {
+            planned_regions.clear();
+            return false;
+        };
+        if allocation.capacity_quads < range.requested_quads {
+            planned_regions.clear();
+            return false;
+        }
+
+        planned_regions.push(PreparedPackedGpuGeneratedRegion {
+            key: range.key,
+            chunk_key: range.chunk_key,
+            generation: range.generation,
+            column_count: range.column_len,
+            max_output_quads: range.requested_quads,
+            arena_offset_quads: allocation.offset_quads,
+            arena_capacity_quads: allocation.capacity_quads,
+            draw_command_index,
+            bounds_min: range.bounds_min,
+            bounds_max: range.bounds_max,
+        });
+        draw_command_index = draw_command_index.saturating_add(1);
+    }
+    true
 }
 
 fn prepared_structure_refresh_ready(
@@ -1071,17 +1093,18 @@ fn refresh_structure_stable_gpu_generated_prepare(
         batch_structure_signature,
         arena.generation,
         batch_summary.total_column_count,
-    ) || !structure_stable_gpu_allocations_satisfied(&buffers.active_ranges, &arena.allocations)
-    {
+    ) {
         return false;
     }
 
-    build_planned_gpu_generated_regions(
+    if !build_planned_gpu_generated_regions_if_allocations_satisfied(
         &buffers.active_ranges,
         &arena.allocations,
         &mut buffers.planned_regions,
         active_chunk_job_count,
-    );
+    ) {
+        return false;
+    }
 
     arena.next_free_quads = arena
         .next_free_quads
@@ -3506,7 +3529,7 @@ mod tests {
     }
 
     #[test]
-    fn structure_stable_gpu_allocations_satisfied_requires_active_slots() {
+    fn build_planned_gpu_generated_regions_if_allocations_satisfied_requires_active_slots() {
         let chunk_key = 55_u64;
         let batch = crate::packed_quad_gpu_generation::PackedGpuGenerationBatch {
             key: 1,
@@ -3537,11 +3560,17 @@ mod tests {
         };
         let mut allocations = HashMap::new();
         let mut active_ranges = Vec::new();
+        let mut planned_regions = Vec::new();
         collect_active_gpu_generation_ranges(std::slice::from_ref(&batch), &mut active_ranges, 1);
-        assert!(!structure_stable_gpu_allocations_satisfied(
-            &active_ranges,
-            &allocations
-        ));
+        assert!(
+            !build_planned_gpu_generated_regions_if_allocations_satisfied(
+                &active_ranges,
+                &allocations,
+                &mut planned_regions,
+                1,
+            )
+        );
+        assert!(planned_regions.is_empty());
         allocations.insert(
             chunk_key,
             crate::packed_quad_buffer::PackedQuadArenaAllocation {
@@ -3553,10 +3582,27 @@ mod tests {
                 generation: 1,
             },
         );
-        assert!(structure_stable_gpu_allocations_satisfied(
-            &active_ranges,
-            &allocations
-        ));
+        assert!(
+            build_planned_gpu_generated_regions_if_allocations_satisfied(
+                &active_ranges,
+                &allocations,
+                &mut planned_regions,
+                1,
+            )
+        );
+        assert_eq!(planned_regions.len(), 1);
+        assert_eq!(planned_regions[0].chunk_key, chunk_key);
+
+        allocations.get_mut(&chunk_key).unwrap().capacity_quads = 0;
+        assert!(
+            !build_planned_gpu_generated_regions_if_allocations_satisfied(
+                &active_ranges,
+                &allocations,
+                &mut planned_regions,
+                1,
+            )
+        );
+        assert!(planned_regions.is_empty());
     }
 
     #[test]
