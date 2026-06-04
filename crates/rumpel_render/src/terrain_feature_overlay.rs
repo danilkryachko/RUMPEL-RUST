@@ -21,17 +21,21 @@ pub struct FeatureOverlayContext {
     leaves: BlockId,
     /// Sand block ID, included in the terrain-shell filter alongside stone/dirt/grass.
     sand: BlockId,
+    /// Snow block ID, included in the terrain-shell filter for snow/mountain biomes.
+    snow: BlockId,
 }
 
 impl FeatureOverlayContext {
     pub fn from_registry(registry: &BlockRegistry) -> Self {
         let world = WorldGenerationContext::from_registry(registry);
         let sand = world.block_id("sand");
+        let snow = world.block_id("snow");
         Self {
             textures: FeatureTexturePalette::from_registry(registry),
             air: world.palette.air,
             leaves: registry.get_id("leaves").unwrap_or(world.palette.air),
             sand,
+            snow,
             world,
         }
     }
@@ -66,6 +70,7 @@ pub fn build_lua_feature_mesh_for_chunk(
     let base_z = chunk_pos.z * CHUNK_SIZE as i32 - mesh_origin_z;
     let palette = context.world.palette;
     let sand = context.sand;
+    let snow = context.snow;
 
     let mut buffers = FeatureOverlayMeshBuffers::with_block_capacity(CHUNK_SIZE * CHUNK_SIZE * 8);
 
@@ -75,7 +80,7 @@ pub fn build_lua_feature_mesh_for_chunk(
                 let block = chunk.get_block(x, y, z);
                 if block == context.air
                     || block == context.leaves
-                    || is_terrain_shell_block(block, palette, sand)
+                    || is_terrain_shell_block(block, palette, sand, snow)
                 {
                     continue;
                 }

@@ -109,33 +109,20 @@ for x = 0, CHUNK_MAX do
     end
 end
 
--- ── 2. Biome-driven surface repaint ──────────────────────────────────────────
--- Top soil block follows the biome: sand on beaches, snow on mountain peaks,
--- grass elsewhere. Underwater columns stay as-is.
+-- NOTE: biome surface blocks (sand/snow/grass) are painted by the Rust terrain
+-- contract (terrain_biome_surface_block) before this post-pass runs, so the
+-- packed shell, GPU columns, and surface samples already agree. Lua only adds
+-- features on top. `get_height(x,z)` returns the first air slot above terrain,
+-- so the solid surface block is at `get_height - 1` and features are placed at
+-- `get_height`.
 
-for x = 0, CHUNK_MAX do
-    for z = 0, CHUNK_MAX do
-        local h = get_height(x, z)
-        if h > SEA_LEVEL and h <= CHUNK_MAX and get_block(x, h, z) ~= "air" then
-            local biome = get_biome(x, z)
-            if biome == "beach" or biome == "desert" then
-                set_block(x, h, z, "sand")
-            elseif biome == "snow" then
-                set_block(x, h, z, "snow")
-            elseif biome == "mountains" and h >= MOUNTAIN_SNOW_HEIGHT then
-                set_block(x, h, z, "snow")
-            end
-        end
-    end
-end
-
--- ── 3. Biome-driven vegetation ───────────────────────────────────────────────
+-- ── 2. Biome-driven vegetation ───────────────────────────────────────────────
 -- Tree density blends with the continuous humidity field so forest/plains and
 -- plains/desert edges fade smoothly instead of snapping at the biome boundary.
 --   Forest : dense tall oaks (density scales with humidity)
 --   Plains : sparse short oaks (density scales with humidity)
 --   Snow   : pines below the snow line
---   Desert : rare dead shrubs on sand
+--   Desert : rare shrubs on sand
 --   Beach  : bare
 
 local function lerp(a, b, t)
@@ -146,32 +133,31 @@ end
 for x = 2, CHUNK_MAX - 2, 3 do
     for z = 2, CHUNK_MAX - 2, 3 do
         local h = get_height(x, z)
-        if h > SEA_LEVEL and h < CHUNK_MAX - 4 then
+        if h > SEA_LEVEL and h < CHUNK_MAX - 4 and get_block(x, h, z) == "air" then
             local s = sample_world(x, z)
-            local top = get_block(x, h, z)
-            if s.biome == "forest" and top == "grass" then
+            if s.biome == "forest" then
                 -- humidity 0.58..1.0 → density 0.35..0.7
                 local density = lerp(0.35, 0.70, (s.humidity - 0.58) / 0.42)
                 if chance("tree_forest", x, z, density) then
-                    spawn_organic_oak(x, h + 1, z, 6)
+                    spawn_organic_oak(x, h, z, 6)
                 end
-            elseif s.biome == "plains" and top == "grass" then
+            elseif s.biome == "plains" then
                 -- humidity 0.0..0.58 → density 0.04..0.18
                 local density = lerp(0.04, 0.18, s.humidity / 0.58)
                 if chance("tree_plains", x, z, density) then
-                    spawn_organic_oak(x, h + 1, z, 4)
+                    spawn_organic_oak(x, h, z, 4)
                 end
-            elseif s.biome == "snow" and h < MOUNTAIN_SNOW_HEIGHT and (top == "snow" or top == "grass") then
+            elseif s.biome == "snow" and h < MOUNTAIN_SNOW_HEIGHT then
                 if chance("tree_snow", x, z, 0.22) then
-                    spawn_pine(x, h + 1, z, 5)
+                    spawn_pine(x, h, z, 5)
                 end
-            elseif s.biome == "mountains" and h < MOUNTAIN_SNOW_HEIGHT and top == "grass" then
+            elseif s.biome == "mountains" and h < MOUNTAIN_SNOW_HEIGHT then
                 if chance("tree_mountain", x, z, 0.20) then
-                    spawn_pine(x, h + 1, z, 5)
+                    spawn_pine(x, h, z, 5)
                 end
-            elseif s.biome == "desert" and top == "sand" then
+            elseif s.biome == "desert" then
                 if chance("desert_shrub", x, z, 0.05) then
-                    set_block(x, h + 1, z, "leaves")
+                    set_block(x, h, z, "leaves")
                 end
             end
         end
@@ -186,10 +172,10 @@ for k = 1, 4 do
     local lh = get_height(lx, lz)
     if lh > SEA_LEVEL and lh < CHUNK_MAX - 3
         and get_biome(lx, lz) == "forest"
-        and get_block(lx, lh, lz) == "grass" then
-        set_block(lx, lh + 1, lz, "wood")
-        if lx + 1 < CHUNK_SIZE then set_block(lx + 1, lh + 1, lz, "wood") end
-        if lx - 1 >= 0 then set_block(lx - 1, lh + 1, lz, "wood") end
+        and get_block(lx, lh, lz) == "air" then
+        set_block(lx, lh, lz, "wood")
+        if lx + 1 < CHUNK_SIZE then set_block(lx + 1, lh, lz, "wood") end
+        if lx - 1 >= 0 then set_block(lx - 1, lh, lz, "wood") end
     end
 end
 
@@ -199,13 +185,13 @@ for k = 1, 6 do
     local bh = get_height(bx, bz)
     if bh > SEA_LEVEL and bh < CHUNK_MAX - 3
         and get_biome(bx, bz) == "forest"
-        and get_block(bx, bh, bz) == "grass" then
+        and get_block(bx, bh, bz) == "air" then
+        set_block(bx, bh, bz, "leaves")
+        if bx + 1 < CHUNK_SIZE then set_block(bx + 1, bh, bz, "leaves") end
+        if bx - 1 >= 0 then set_block(bx - 1, bh, bz, "leaves") end
+        if bz + 1 < CHUNK_SIZE then set_block(bx, bh, bz + 1, "leaves") end
+        if bz - 1 >= 0 then set_block(bx, bh, bz - 1, "leaves") end
         set_block(bx, bh + 1, bz, "leaves")
-        if bx + 1 < CHUNK_SIZE then set_block(bx + 1, bh + 1, bz, "leaves") end
-        if bx - 1 >= 0 then set_block(bx - 1, bh + 1, bz, "leaves") end
-        if bz + 1 < CHUNK_SIZE then set_block(bx, bh + 1, bz + 1, "leaves") end
-        if bz - 1 >= 0 then set_block(bx, bh + 1, bz - 1, "leaves") end
-        set_block(bx, bh + 2, bz, "leaves")
     end
 end
 
@@ -367,14 +353,17 @@ end
 for x = 0, CHUNK_MAX do
     for z = 0, CHUNK_MAX do
         local h = get_height(x, z)
-        if h > SEA_LEVEL and h < CHUNK_MAX and get_block(x, h, z) == "grass" then
+        -- Flowers sit in the air slot above grass; the solid grass top is at h-1.
+        if h > SEA_LEVEL and h < CHUNK_MAX
+            and get_block(x, h, z) == "air"
+            and get_block(x, h - 1, z) == "grass" then
             local biome = get_biome(x, z)
             if biome == "plains" or biome == "forest" then
                 local roll = rand01("flower", x, z)
                 if roll < 0.04 then
-                    set_block(x, h + 1, z, "flower_red")
+                    set_block(x, h, z, "flower_red")
                 elseif roll < 0.08 then
-                    set_block(x, h + 1, z, "flower_yellow")
+                    set_block(x, h, z, "flower_yellow")
                 end
             end
         end

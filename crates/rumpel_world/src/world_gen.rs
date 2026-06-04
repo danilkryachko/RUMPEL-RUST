@@ -22,6 +22,7 @@ const BIOME_ROUGHNESS_THRESHOLD: f32 = 0.26;
 const BIOME_DESERT_TEMPERATURE_THRESHOLD: f32 = 0.66;
 const BIOME_DESERT_HUMIDITY_THRESHOLD: f32 = 0.35;
 const BIOME_SNOW_TEMPERATURE_THRESHOLD: f32 = 0.30;
+const BIOME_MOUNTAIN_SNOW_HEIGHT: usize = 30;
 const ORE_NOISE_SEED: u32 = 51_337;
 const ORE_NOISE_SCALE: f64 = 0.08;
 const DIRT_DEPTH: usize = 3;
@@ -42,6 +43,16 @@ pub fn terrain_generation_contract_version() -> u64 {
     hash = fnv64(hash, TERRAIN_HEIGHT_RANGE.to_bits());
     hash = fnv64(hash, DIRT_DEPTH as u64);
     hash = fnv64(hash, CHUNK_SIZE as u64);
+    hash = fnv64(hash, u64::from(BIOME_TEMPERATURE_SEED));
+    hash = fnv64(hash, u64::from(BIOME_HUMIDITY_SEED));
+    hash = fnv64(hash, BIOME_NOISE_SCALE.to_bits());
+    hash = fnv64(hash, BIOME_MOUNTAIN_HEIGHT_THRESHOLD as u64);
+    hash = fnv64(hash, f64::from(BIOME_FOREST_HUMIDITY_THRESHOLD).to_bits());
+    hash = fnv64(hash, f64::from(BIOME_ROUGHNESS_THRESHOLD).to_bits());
+    hash = fnv64(hash, f64::from(BIOME_DESERT_TEMPERATURE_THRESHOLD).to_bits());
+    hash = fnv64(hash, f64::from(BIOME_DESERT_HUMIDITY_THRESHOLD).to_bits());
+    hash = fnv64(hash, f64::from(BIOME_SNOW_TEMPERATURE_THRESHOLD).to_bits());
+    hash = fnv64(hash, BIOME_MOUNTAIN_SNOW_HEIGHT as u64);
     if let Ok(bytes) = fs::read(WORLD_GEN_SCRIPT_PATH) {
         for byte in bytes {
             hash = fnv64(hash, u64::from(byte));
@@ -112,6 +123,35 @@ impl WorldGenerationContext {
     pub fn block_id(&self, name: &str) -> BlockId {
         self.name_to_id.get(name).copied().unwrap_or(AIR_BLOCK_ID)
     }
+
+    /// Resolve the per-biome top-soil blocks once so column generation and
+    /// surface sampling agree without repeated registry lookups.
+    #[must_use]
+    pub fn biome_surface_blocks(&self) -> BiomeSurfaceBlocks {
+        let sand = self.block_id("sand");
+        let snow = self.block_id("snow");
+        BiomeSurfaceBlocks {
+            grass: self.palette.grass,
+            sand: if sand == AIR_BLOCK_ID {
+                self.palette.grass
+            } else {
+                sand
+            },
+            snow: if snow == AIR_BLOCK_ID {
+                self.palette.grass
+            } else {
+                snow
+            },
+        }
+    }
+}
+
+/// Top-soil block ids selected per biome by [`terrain_biome_surface_block`].
+#[derive(Clone, Copy, Debug)]
+pub struct BiomeSurfaceBlocks {
+    pub grass: BlockId,
+    pub sand: BlockId,
+    pub snow: BlockId,
 }
 
 impl TerrainBlockPalette {
@@ -258,6 +298,22 @@ pub fn terrain_biome_at(global_x: i32, global_z: i32) -> TerrainBiome {
     }
 }
 
+/// Top-soil block for a biome column, painted into the chunk shell so packed,
+/// GPU, and sampling paths all see the biome surface without a Lua repaint.
+#[must_use]
+pub fn terrain_biome_surface_block(
+    biome: TerrainBiome,
+    height: usize,
+    surface: BiomeSurfaceBlocks,
+) -> BlockId {
+    match biome {
+        TerrainBiome::Beach | TerrainBiome::Desert => surface.sand,
+        TerrainBiome::Snow => surface.snow,
+        TerrainBiome::Mountains if height >= BIOME_MOUNTAIN_SNOW_HEIGHT => surface.snow,
+        _ => surface.grass,
+    }
+}
+
 /// Deterministic 3D value in `[0, 1)` from a salt and global block coordinate.
 ///
 /// 3D analogue of [`worldgen_rand01`] for scattering ores and other
@@ -297,7 +353,12 @@ pub fn terrain_world_sample_at(
 ) -> WorldTerrainSample {
     let height = terrain_height_at(global_x, global_z);
     let chunk_height = height.min(CHUNK_SIZE - 1);
-    let surface_block = terrain_surface_top_block(height, context.palette, surface_material);
+    let biome = terrain_biome_at(global_x, global_z);
+    let mut surface_blocks = context.biome_surface_blocks();
+    if surface_material != context.palette.air {
+        surface_blocks.sand = surface_material;
+    }
+    let surface_block = terrain_biome_surface_block(biome, height, surface_blocks);
     let subsurface_block =
         terrain_block_at_height(height.saturating_sub(2), height, context.palette);
 
@@ -306,7 +367,7 @@ pub fn terrain_world_sample_at(
         global_z,
         height,
         chunk_height,
-        biome: terrain_biome_at(global_x, global_z),
+        biome,
         surface_block,
         subsurface_block,
         temperature: terrain_temperature_at(global_x, global_z),
@@ -584,8 +645,17 @@ pub fn terrain_block_at_height(
 }
 
 #[must_use]
-pub fn is_terrain_shell_block(block: BlockId, palette: TerrainBlockPalette, sand: BlockId) -> bool {
-    block == palette.stone || block == palette.dirt || block == palette.grass || block == sand
+pub fn is_terrain_shell_block(
+    block: BlockId,
+    palette: TerrainBlockPalette,
+    sand: BlockId,
+    snow: BlockId,
+) -> bool {
+    block == palette.stone
+        || block == palette.dirt
+        || block == palette.grass
+        || block == sand
+        || block == snow
 }
 
 #[must_use]
@@ -595,13 +665,14 @@ pub fn terrain_column_top_in_chunk(
     local_z: usize,
     palette: TerrainBlockPalette,
     sand: BlockId,
+    snow: BlockId,
 ) -> TerrainSurfaceSample {
     for y in (0..CHUNK_SIZE).rev() {
         let block = chunk.get_block(local_x, y, local_z);
         if block == palette.air {
             continue;
         }
-        if is_terrain_shell_block(block, palette, sand) {
+        if is_terrain_shell_block(block, palette, sand, snow) {
             return TerrainSurfaceSample {
                 height: y + 1,
                 top_block: block,
@@ -614,6 +685,10 @@ pub fn terrain_column_top_in_chunk(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Surface cell sampling threads chunk geometry, palette, and biome shell blocks."
+)]
 #[must_use]
 pub fn terrain_surface_cell_sample_from_chunk_local(
     chunk: &ChunkData,
@@ -623,6 +698,7 @@ pub fn terrain_surface_cell_sample_from_chunk_local(
     depth: usize,
     palette: TerrainBlockPalette,
     sand: BlockId,
+    snow: BlockId,
 ) -> TerrainSurfaceSample {
     let mut height_sum = 0usize;
     let mut sample_count = 0usize;
@@ -634,7 +710,7 @@ pub fn terrain_surface_cell_sample_from_chunk_local(
             if x >= CHUNK_SIZE || z >= CHUNK_SIZE {
                 continue;
             }
-            height_sum += terrain_column_top_in_chunk(chunk, x, z, palette, sand).height;
+            height_sum += terrain_column_top_in_chunk(chunk, x, z, palette, sand, snow).height;
             sample_count += 1;
         }
     }
@@ -650,7 +726,7 @@ pub fn terrain_surface_cell_sample_from_chunk_local(
     let center_x = (local_x + width / 2).min(CHUNK_SIZE - 1);
     let center_z = (local_z + depth / 2).min(CHUNK_SIZE - 1);
     let mut top_block =
-        terrain_column_top_in_chunk(chunk, center_x, center_z, palette, sand).top_block;
+        terrain_column_top_in_chunk(chunk, center_x, center_z, palette, sand, snow).top_block;
     if top_block == palette.air && height > 0 {
         top_block = chunk.get_block(center_x, height - 1, center_z);
     }
@@ -671,6 +747,7 @@ pub fn terrain_surface_cell_sample_from_world_cached(
     let local_x = usize::try_from(world_x.rem_euclid(CHUNK_SIZE as i32)).unwrap_or(0);
     let local_z = usize::try_from(world_z.rem_euclid(CHUNK_SIZE as i32)).unwrap_or(0);
     let sand = context.block_id("sand");
+    let snow = context.block_id("snow");
     let generated =
         crate::chunk_gen_cache::cached_chunk(ChunkPos::new(chunk_x, chunk_z), context);
     let sample = terrain_surface_cell_sample_from_chunk_local(
@@ -681,6 +758,7 @@ pub fn terrain_surface_cell_sample_from_world_cached(
         depth,
         context.palette,
         sand,
+        snow,
     );
     if sample.height > 0 {
         return sample;
@@ -707,15 +785,21 @@ pub fn generate_chunk(pos: ChunkPos, registry: &BlockRegistry) -> ChunkData {
 pub fn generate_chunk_with_context(pos: ChunkPos, context: &WorldGenerationContext) -> ChunkData {
     let mut chunk = ChunkData::default();
     let perlin = Perlin::new(TERRAIN_SEED);
+    let surface_blocks = context.biome_surface_blocks();
 
     for x in 0..CHUNK_SIZE {
         for z in 0..CHUNK_SIZE {
             let global_x = pos.x * CHUNK_SIZE as i32 + x as i32;
             let global_z = pos.z * CHUNK_SIZE as i32 + z as i32;
             let height = terrain_height_with_noise(global_x, global_z, &perlin);
+            let biome = terrain_biome_at(global_x, global_z);
+            let surface_block = terrain_biome_surface_block(biome, height, surface_blocks);
 
             for y in 0..CHUNK_SIZE {
-                let block_id = terrain_block_at_height(y, height, context.palette);
+                let mut block_id = terrain_block_at_height(y, height, context.palette);
+                if block_id == context.palette.grass && y + 1 == height {
+                    block_id = surface_block;
+                }
                 if block_id != context.palette.air {
                     chunk.set_block(x, y, z, block_id);
                 }
