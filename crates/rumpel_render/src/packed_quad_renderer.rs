@@ -1081,9 +1081,10 @@ fn refresh_structure_stable_gpu_generated_prepare(
     prepared.arena_generation = arena.generation;
     prepared.batch_signature = batch_signature;
     prepared.batch_structure_signature = batch_structure_signature;
-    prepared.cull_metadata_signature = generated_regions_cull_metadata_signature(&prepared.regions);
-    prepared.cull_source_signature =
-        generated_regions_cull_source_signature(&prepared.regions, prepared.arena_generation);
+    let (cull_metadata_signature, cull_source_signature) =
+        generated_regions_cull_signatures(&prepared.regions, prepared.arena_generation);
+    prepared.cull_metadata_signature = cull_metadata_signature;
+    prepared.cull_source_signature = cull_source_signature;
     if prepared.generation_dispatch_count > 0 {
         prepared.mark_pending();
     }
@@ -1537,9 +1538,10 @@ fn prepare_packed_gpu_generated_draw(
     prepared.arena_generation = arena.generation;
     prepared.batch_signature = batch_signature;
     prepared.batch_structure_signature = batch_structure_signature;
-    prepared.cull_metadata_signature = generated_regions_cull_metadata_signature(&prepared.regions);
-    prepared.cull_source_signature =
-        generated_regions_cull_source_signature(&prepared.regions, prepared.arena_generation);
+    let (cull_metadata_signature, cull_source_signature) =
+        generated_regions_cull_signatures(&prepared.regions, prepared.arena_generation);
+    prepared.cull_metadata_signature = cull_metadata_signature;
+    prepared.cull_source_signature = cull_source_signature;
     prepared.generation_bind_group = Some(generation_bind_group);
     prepared.render_bind_group = Some(render_bind_group);
     prepared.indirect_buffer = Some(indirect_buffer.clone());
@@ -1624,6 +1626,48 @@ fn generated_regions_cull_source_signature(
         signature = update_generated_cull_signature(signature, region.draw_command_index as u64);
     }
     signature
+}
+
+fn generated_regions_cull_signatures(
+    regions: &[PreparedPackedGpuGeneratedRegion],
+    arena_generation: u64,
+) -> (u64, u64) {
+    let mut metadata_signature = PACKED_GPU_GENERATED_CULL_SIGNATURE_OFFSET;
+    let mut source_signature = PACKED_GPU_GENERATED_CULL_SIGNATURE_OFFSET;
+    metadata_signature = update_generated_cull_signature(metadata_signature, regions.len() as u64);
+    source_signature = update_generated_cull_signature(source_signature, arena_generation);
+    source_signature = update_generated_cull_signature(source_signature, regions.len() as u64);
+
+    for (index, region) in regions.iter().enumerate() {
+        metadata_signature = update_generated_cull_signature(metadata_signature, index as u64);
+        metadata_signature = update_generated_cull_signature(metadata_signature, region.key);
+        metadata_signature = update_generated_cull_signature(metadata_signature, region.chunk_key);
+        metadata_signature =
+            update_generated_cull_signature(metadata_signature, region.max_output_quads as u64);
+        for value in region.bounds_min.to_array() {
+            metadata_signature =
+                update_generated_cull_signature(metadata_signature, u64::from(value.to_bits()));
+        }
+        for value in region.bounds_max.to_array() {
+            metadata_signature =
+                update_generated_cull_signature(metadata_signature, u64::from(value.to_bits()));
+        }
+
+        source_signature = update_generated_cull_signature(source_signature, index as u64);
+        source_signature = update_generated_cull_signature(source_signature, region.key);
+        source_signature = update_generated_cull_signature(source_signature, region.chunk_key);
+        source_signature = update_generated_cull_signature(source_signature, region.generation);
+        source_signature =
+            update_generated_cull_signature(source_signature, region.max_output_quads as u64);
+        source_signature =
+            update_generated_cull_signature(source_signature, region.arena_offset_quads as u64);
+        source_signature =
+            update_generated_cull_signature(source_signature, region.arena_capacity_quads as u64);
+        source_signature =
+            update_generated_cull_signature(source_signature, region.draw_command_index as u64);
+    }
+
+    (metadata_signature, source_signature)
 }
 
 fn generated_cull_config_signature(config: crate::packed_quad_buffer::PackedQuadCullConfig) -> u64 {
@@ -3197,7 +3241,15 @@ mod tests {
             }
         }
 
-        let base = generated_regions_cull_source_signature(&[test_region(7, 2048)], 11);
+        let region = test_region(7, 2048);
+        let base = generated_regions_cull_source_signature(&[region], 11);
+        let (metadata_signature, source_signature) =
+            generated_regions_cull_signatures(&[region], 11);
+        assert_eq!(
+            metadata_signature,
+            generated_regions_cull_metadata_signature(&[region])
+        );
+        assert_eq!(source_signature, base);
         assert_eq!(
             base,
             generated_regions_cull_source_signature(&[test_region(7, 2048)], 11)
