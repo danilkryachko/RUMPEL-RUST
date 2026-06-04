@@ -25,7 +25,7 @@ use rumpel_world::world_gen::{WorldGenerationContext, terrain_surface_contract_v
 use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuChunkRange, PackedGpuGenerationBatch,
     PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationParams,
-    PackedGpuGenerationTarget, active_gpu_generation_chunk_signature,
+    PackedGpuGenerationTarget, fill_active_gpu_generation_chunk_keys,
     order_loaded_regions_for_prefetch, packed_gpu_generation_columns_per_chunk,
     packed_gpu_generation_lod_for_cell_size, packed_gpu_generation_max_synchronous_builds_from_env,
     packed_gpu_generation_prefetch_budget_from_env,
@@ -908,28 +908,6 @@ pub fn packed_chunk_count_for_radius(view_radius: i32) -> usize {
     count
 }
 
-fn fill_active_gpu_generation_chunk_keys(
-    keys: &mut HashSet<u64>,
-    view_center: IVec2,
-    view_radius: i32,
-) {
-    keys.clear();
-    let radius = view_radius.max(0);
-    let diameter = (radius as usize).saturating_mul(2).saturating_add(1);
-    let max_candidates = diameter.saturating_mul(diameter);
-    reserve_hash_set_capacity(keys, max_candidates);
-
-    let radius_sq = radius * radius;
-    for dz in -radius..=radius {
-        for dx in -radius..=radius {
-            if dx * dx + dz * dz > radius_sq {
-                continue;
-            }
-            keys.insert(pack_chunk_key(view_center.x + dx, view_center.y + dz));
-        }
-    }
-}
-
 pub fn packed_region_count_for_radius(view_radius: i32, region_size: i32) -> usize {
     let radius = view_radius.max(0);
     let size = region_size.max(1);
@@ -1557,13 +1535,6 @@ fn reserve_vec_capacity<T>(items: &mut Vec<T>, capacity: usize) {
 }
 
 fn reserve_hash_map_capacity<K: Eq + Hash, V>(items: &mut HashMap<K, V>, capacity: usize) {
-    let current_capacity = items.capacity();
-    if current_capacity < capacity {
-        items.reserve(capacity - current_capacity);
-    }
-}
-
-fn reserve_hash_set_capacity<T: Eq + Hash>(items: &mut HashSet<T>, capacity: usize) {
     let current_capacity = items.capacity();
     if current_capacity < capacity {
         items.reserve(capacity - current_capacity);
@@ -3956,7 +3927,11 @@ pub fn update_packed_gpu_generation_regions(
     let generated_region_side = region_radius.saturating_mul(2).saturating_add(1).max(1) as usize;
     let loaded_region_capacity = generated_region_side.saturating_mul(generated_region_side);
     let scratch = &mut *region_scratch;
-    fill_active_gpu_generation_chunk_keys(&mut scratch.active_chunk_keys, view_center, view_radius);
+    let (active_chunk_count, active_chunk_hash) = fill_active_gpu_generation_chunk_keys(
+        &mut scratch.active_chunk_keys,
+        view_center,
+        view_radius,
+    );
     scratch.loaded_region_keys.clear();
     scratch.loaded_regions.clear();
     if scratch.loaded_region_keys.capacity() < loaded_region_capacity {
@@ -4007,8 +3982,6 @@ pub fn update_packed_gpu_generation_regions(
                 .iter()
                 .map(|(_, _, region_key)| *region_key),
         );
-    let (active_chunk_count, active_chunk_hash) =
-        active_gpu_generation_chunk_signature(view_center, view_radius);
     let target = PackedGpuGenerationTarget::new(
         camera_chunk_x,
         camera_chunk_z,
@@ -5949,17 +5922,33 @@ mod tests {
     fn test_fill_active_gpu_generation_chunk_keys_reuses_capacity() {
         let mut keys = HashSet::with_capacity(32);
 
-        fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 2);
+        let radius_two_signature =
+            fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 2);
 
         assert_eq!(keys.len(), 13);
+        assert_eq!(
+            radius_two_signature,
+            crate::packed_quad_gpu_generation::active_gpu_generation_chunk_signature(
+                IVec2::new(10, -4),
+                2
+            )
+        );
         assert!(keys.contains(&pack_chunk_key(10, -4)));
         assert!(keys.contains(&pack_chunk_key(12, -4)));
         assert!(!keys.contains(&pack_chunk_key(13, -4)));
 
         let capacity_after_radius_two = keys.capacity();
-        fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 1);
+        let radius_one_signature =
+            fill_active_gpu_generation_chunk_keys(&mut keys, IVec2::new(10, -4), 1);
 
         assert_eq!(keys.len(), 5);
+        assert_eq!(
+            radius_one_signature,
+            crate::packed_quad_gpu_generation::active_gpu_generation_chunk_signature(
+                IVec2::new(10, -4),
+                1
+            )
+        );
         assert_eq!(keys.capacity(), capacity_after_radius_two);
         assert!(keys.contains(&pack_chunk_key(10, -4)));
         assert!(keys.contains(&pack_chunk_key(11, -4)));

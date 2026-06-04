@@ -435,18 +435,40 @@ impl GeneratedRegionCache {
 /// Chunk keys inside the circular view radius (same coverage as CPU streaming).
 #[must_use]
 pub fn active_gpu_generation_chunk_keys(view_center: IVec2, view_radius: i32) -> HashSet<u64> {
-    let radius = view_radius.max(0);
-    let radius_sq = radius * radius;
     let mut keys = HashSet::new();
+    fill_active_gpu_generation_chunk_keys(&mut keys, view_center, view_radius);
+    keys
+}
+
+/// Fill chunk keys inside the circular view radius and return their deterministic signature.
+pub fn fill_active_gpu_generation_chunk_keys(
+    keys: &mut HashSet<u64>,
+    view_center: IVec2,
+    view_radius: i32,
+) -> (usize, u64) {
+    keys.clear();
+    let radius = view_radius.max(0);
+    let diameter = (radius as usize).saturating_mul(2).saturating_add(1);
+    let max_candidates = diameter.saturating_mul(diameter);
+    if keys.capacity() < max_candidates {
+        keys.reserve(max_candidates - keys.capacity());
+    }
+
+    let radius_sq = radius * radius;
+    let mut count = 0usize;
+    let mut hash = FNV64_OFFSET;
     for dz in -radius..=radius {
         for dx in -radius..=radius {
             if dx * dx + dz * dz > radius_sq {
                 continue;
             }
-            keys.insert(gpu_pack_chunk_key(view_center.x + dx, view_center.y + dz));
+            let key = gpu_pack_chunk_key(view_center.x + dx, view_center.y + dz);
+            keys.insert(key);
+            count = count.saturating_add(1);
+            hash = fnv64(hash, key);
         }
     }
-    keys
+    (count, hash)
 }
 
 /// Deterministic signature for chunk keys inside the circular view radius.
