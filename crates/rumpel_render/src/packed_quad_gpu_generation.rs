@@ -925,6 +925,31 @@ pub fn order_loaded_regions_for_prefetch(
     });
 }
 
+pub fn partition_nearest_loaded_regions_for_prefetch(
+    regions: &mut [(i32, i32, u64)],
+    budget: usize,
+    camera_chunk_x: i32,
+    camera_chunk_z: i32,
+    region_size: i32,
+) -> usize {
+    if budget == 0 || regions.is_empty() {
+        return 0;
+    }
+    let selected_count = budget.min(regions.len());
+    if selected_count < regions.len() {
+        regions.select_nth_unstable_by_key(selected_count, |region| {
+            loaded_region_prefetch_order_key(*region, camera_chunk_x, camera_chunk_z, region_size)
+        });
+    }
+    order_loaded_regions_for_prefetch(
+        &mut regions[..selected_count],
+        camera_chunk_x,
+        camera_chunk_z,
+        region_size,
+    );
+    selected_count
+}
+
 pub fn retain_nearest_loaded_regions_for_prefetch(
     regions: &mut Vec<(i32, i32, u64)>,
     budget: usize,
@@ -936,18 +961,14 @@ pub fn retain_nearest_loaded_regions_for_prefetch(
         regions.clear();
         return;
     }
-    if regions.len() > budget {
-        regions.select_nth_unstable_by_key(budget, |region| {
-            loaded_region_prefetch_order_key(*region, camera_chunk_x, camera_chunk_z, region_size)
-        });
-        regions.truncate(budget);
-    }
-    order_loaded_regions_for_prefetch(
+    let selected_count = partition_nearest_loaded_regions_for_prefetch(
         regions.as_mut_slice(),
+        budget,
         camera_chunk_x,
         camera_chunk_z,
         region_size,
     );
+    regions.truncate(selected_count);
 }
 
 #[must_use]
@@ -1603,6 +1624,26 @@ mod tests {
         assert_eq!(
             regions.iter().map(|region| region.2).collect::<Vec<_>>(),
             [10, 20]
+        );
+    }
+
+    #[test]
+    fn partition_nearest_loaded_regions_for_prefetch_orders_only_selected_budget() {
+        let mut regions = [
+            (24, 0, 40_u64),
+            (8, 0, 30_u64),
+            (0, 0, 10_u64),
+            (0, 0, 20_u64),
+        ];
+        let selected_count =
+            partition_nearest_loaded_regions_for_prefetch(&mut regions, 2, 5, 2, 4);
+
+        assert_eq!(selected_count, 2);
+        assert_eq!([regions[0].2, regions[1].2], [10, 20]);
+        assert!(
+            regions[selected_count..]
+                .iter()
+                .all(|region| region.2 == 30 || region.2 == 40)
         );
     }
 

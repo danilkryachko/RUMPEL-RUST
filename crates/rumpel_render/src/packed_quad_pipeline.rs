@@ -26,10 +26,11 @@ use crate::packed_quad_gpu_generation::{
     PACKED_GPU_GENERATION_MAX_QUADS_PER_COLUMN, PackedGpuChunkRange, PackedGpuGenerationBatch,
     PackedGpuGenerationBatches, PackedGpuGenerationCacheContract, PackedGpuGenerationKeySignature,
     PackedGpuGenerationParams, PackedGpuGenerationTarget, fill_active_gpu_generation_chunk_keys,
-    order_loaded_regions_for_prefetch, packed_gpu_generation_columns_per_chunk,
-    packed_gpu_generation_lod_for_cell_size, packed_gpu_generation_max_synchronous_builds_from_env,
+    packed_gpu_generation_columns_per_chunk, packed_gpu_generation_lod_for_cell_size,
+    packed_gpu_generation_max_synchronous_builds_from_env,
     packed_gpu_generation_prefetch_budget_from_env,
-    packed_gpu_generation_shift_sync_build_budget_from_env, region_has_active_chunks,
+    packed_gpu_generation_shift_sync_build_budget_from_env,
+    partition_nearest_loaded_regions_for_prefetch, region_has_active_chunks,
     retain_nearest_loaded_regions_for_prefetch, sync_gpu_chunk_range_active_flags,
 };
 use crate::voxel_material::load_block_atlas;
@@ -3534,16 +3535,19 @@ fn prefetch_active_generated_regions_with_budget(
         return 0;
     }
 
-    order_loaded_regions_for_prefetch(
+    let selected_count = partition_nearest_loaded_regions_for_prefetch(
         scratch.prefetch_candidates.as_mut_slice(),
+        budget,
         camera_chunk_x,
         camera_chunk_z,
         region_size,
     );
 
     let mut prefetched = 0usize;
-    for (region_origin_x, region_origin_z, region_key) in
-        scratch.prefetch_candidates.iter().copied().take(budget)
+    for (region_origin_x, region_origin_z, region_key) in scratch.prefetch_candidates
+        [..selected_count]
+        .iter()
+        .copied()
     {
         let entry =
             build_generated_region_cache_entry(region_origin_x, region_origin_z, region_key, build);
@@ -3593,31 +3597,28 @@ fn process_pending_generated_region_builds(
         return 0;
     }
 
-    order_loaded_regions_for_prefetch(
+    pending.retain(|(_, _, region_key)| !region_cache.entries.contains_key(region_key));
+    if pending.is_empty() {
+        return 0;
+    }
+
+    let selected_count = partition_nearest_loaded_regions_for_prefetch(
         pending.as_mut_slice(),
+        budget,
         camera_chunk_x,
         camera_chunk_z,
         region_size,
     );
 
     let mut built = 0usize;
-    pending.retain(|(region_origin_x, region_origin_z, region_key)| {
-        if built >= budget {
-            return true;
-        }
-        if region_cache.entries.contains_key(region_key) {
-            return false;
-        }
-        let entry = build_generated_region_cache_entry(
-            *region_origin_x,
-            *region_origin_z,
-            *region_key,
-            build,
-        );
-        region_cache.entries.insert(*region_key, entry);
+    for (region_origin_x, region_origin_z, region_key) in pending[..selected_count].iter().copied()
+    {
+        let entry =
+            build_generated_region_cache_entry(region_origin_x, region_origin_z, region_key, build);
+        region_cache.entries.insert(region_key, entry);
         built = built.saturating_add(1);
-        false
-    });
+    }
+    pending.drain(..selected_count);
     built
 }
 
