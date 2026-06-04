@@ -3431,20 +3431,11 @@ fn process_steady_loaded_region_prefetch(
     )
 }
 
-fn sliding_window_prefetch_budget(
-    scratch: &PackedGpuGenerationRegionScratch,
-    region_cache: &crate::packed_quad_gpu_generation::GeneratedRegionCache,
-) -> usize {
-    let normal = packed_gpu_generation_prefetch_budget_from_env();
-    let missing_loaded = scratch
-        .loaded_regions
-        .iter()
-        .filter(|(_, _, key)| !region_cache.entries.contains_key(key))
-        .count();
+fn loaded_region_prefetch_budget(base_budget: usize, missing_loaded: usize) -> usize {
     if missing_loaded == 0 {
-        return normal;
+        return 0;
     }
-    normal
+    base_budget
         .max(missing_loaded)
         .min(SLIDING_WINDOW_PREFETCH_BUDGET_CAP)
 }
@@ -3457,10 +3448,6 @@ fn prefetch_loaded_generated_regions_with_budget(
     build: &GeneratedRegionCacheBuildContext<'_>,
     budget: usize,
 ) -> usize {
-    if budget == 0 {
-        return 0;
-    }
-
     scratch.prefetch_candidates.clear();
     if scratch.prefetch_candidates.capacity() < scratch.loaded_regions.len() {
         scratch
@@ -3478,6 +3465,10 @@ fn prefetch_loaded_generated_regions_with_budget(
     }
 
     if scratch.prefetch_candidates.is_empty() {
+        return 0;
+    }
+    let budget = loaded_region_prefetch_budget(budget, scratch.prefetch_candidates.len());
+    if budget == 0 {
         return 0;
     }
 
@@ -4177,14 +4168,13 @@ pub fn update_packed_gpu_generation_regions(
         return;
     }
 
-    let prefetch_budget = sliding_window_prefetch_budget(scratch, &region_cache);
     let prefetched = prefetch_loaded_generated_regions_with_budget(
         scratch,
         &mut region_cache,
         camera_chunk_x,
         camera_chunk_z,
         &cache_build,
-        prefetch_budget,
+        packed_gpu_generation_prefetch_budget_from_env(),
     );
     let pending_built = process_pending_generated_region_builds(
         &mut scratch.pending_active_region_builds,
@@ -5953,6 +5943,17 @@ mod tests {
         assert!(keys.contains(&pack_chunk_key(10, -4)));
         assert!(keys.contains(&pack_chunk_key(11, -4)));
         assert!(!keys.contains(&pack_chunk_key(12, -4)));
+    }
+
+    #[test]
+    fn test_loaded_region_prefetch_budget_expands_to_missing_regions() {
+        assert_eq!(loaded_region_prefetch_budget(1, 3), 3);
+        assert_eq!(loaded_region_prefetch_budget(0, 3), 3);
+        assert_eq!(
+            loaded_region_prefetch_budget(2, SLIDING_WINDOW_PREFETCH_BUDGET_CAP + 8),
+            SLIDING_WINDOW_PREFETCH_BUDGET_CAP
+        );
+        assert_eq!(loaded_region_prefetch_budget(2, 0), 0);
     }
 
     #[test]
