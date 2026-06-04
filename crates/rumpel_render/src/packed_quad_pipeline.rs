@@ -3375,13 +3375,13 @@ fn maybe_process_steady_loaded_region_prefetch(
 
 fn prune_stale_pending_loaded_region_builds(
     pending: &mut Vec<(i32, i32, u64)>,
-    loaded_region_keys: &[u64],
+    sorted_loaded_region_keys: &[u64],
 ) {
     if pending.is_empty() {
         return;
     }
-    let loaded_keys: HashSet<u64> = loaded_region_keys.iter().copied().collect();
-    pending.retain(|(_, _, region_key)| loaded_keys.contains(region_key));
+    pending
+        .retain(|(_, _, region_key)| sorted_loaded_region_keys.binary_search(region_key).is_ok());
 }
 
 fn enqueue_missing_loaded_region_prefetch_builds(
@@ -3965,6 +3965,7 @@ pub fn update_packed_gpu_generation_regions(
             }
         }
     }
+    scratch.loaded_region_keys.sort_unstable();
     let loaded_regions = scratch.loaded_region_keys.len();
     let (active_region_count, active_region_hash) =
         PackedGpuGenerationTarget::active_region_signature(
@@ -5601,6 +5602,19 @@ mod tests {
         assert!(cache.entries.contains_key(&loaded_b));
         assert!(!cache.entries.contains_key(&evicted));
         assert_eq!(loaded_region_keys, expected_loaded_region_keys);
+    }
+
+    #[test]
+    fn test_prune_stale_pending_loaded_region_builds_uses_sorted_keys() {
+        let loaded_a = pack_chunk_key(0, 0);
+        let loaded_b = pack_chunk_key(8, 0);
+        let evicted = pack_chunk_key(16, 0);
+        let loaded_region_keys = [loaded_a, loaded_b];
+        let mut pending = vec![(0, 0, loaded_a), (16, 0, evicted), (8, 0, loaded_b)];
+
+        prune_stale_pending_loaded_region_builds(&mut pending, &loaded_region_keys);
+
+        assert_eq!(pending, vec![(0, 0, loaded_a), (8, 0, loaded_b)]);
     }
 
     #[test]

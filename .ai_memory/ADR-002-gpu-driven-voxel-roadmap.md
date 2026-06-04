@@ -29,6 +29,7 @@ Use a phased GPU-driven migration instead of replacing the renderer in one step.
 - Keep `surface_streaming` and `VoxelQuadMaterial` intact while the compute path matures.
 
 ## Progress Notes
+- 2026-06-04: GPU-generated steady loaded-region pending prune now reuses sorted `loaded_region_keys` with binary search instead of allocating a temporary `HashSet` each prune pass. Verified with focused prune/cache tests and full `just verify`.
 - 2026-06-04: GPU-generated loaded-region prefetch now derives the sliding-window expanded budget from the already-built missing-region candidate list. This removes the separate loaded-region pre-scan while keeping steady prefetch on its pending-build budget path. Verified with focused prefetch/target tests and full `just verify`.
 - 2026-06-04: GPU-generated region update now fills active chunk keys and computes the deterministic active chunk signature in one circular scan. The new helper returns the same signature as `active_gpu_generation_chunk_signature`, covered by focused active chunk tests and full `just verify`.
 - 2026-06-04: GPU-generated job collection now reserves `pending_chunk_generations` with the same active job-count hint used for jobs, dirty jobs, and draw params, avoiding incremental growth when many chunks need dispatch-generation tracking. Verified with focused generated prepare/summary tests and full `just verify`.
